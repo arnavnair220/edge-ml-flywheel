@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Data and artifacts (never commit BDD100K or model weights)
+data/
+datasets/
+bdd100k/
+artifacts/
+models/
+runs/
+outputs/
+*.onnx
+*.pt
+*.pth
+*.tflite
+*.parquet
+*.jpg
+*.jpeg
+*.png
+!docs/**/*.png
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.pem
+credentials
+aws.json
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
