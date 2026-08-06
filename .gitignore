@@ -18,7 +18,8 @@ htmlcov/
 
 # Terraform
 .terraform/
-.terraform.lock.hcl
+# .terraform.lock.hcl IS committed on purpose: it pins provider versions so CI
+# resolves the same providers this machine did.
 *.tfstate
 *.tfstate.*
 *.tfvars
