@@ -58,6 +58,9 @@ outputs/
 credentials
 aws.json
 
+# Local working notes, not for publication
+local/
+
 # Editors and OS
 .vscode/
 .idea/

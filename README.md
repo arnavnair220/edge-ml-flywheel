@@ -8,12 +8,24 @@ retrains, and checks the challenger against five pass/fail gates. If it passes, 
 promoted, converted to an edge format, deployed to one device, watched, then rolled out — or
 rolled back. That deployment produces new observations, and the loop repeats.
 
-The point of the project is to *measure* model improvement per unit of labeling effort spent.
-**The system is the deliverable, not the model.**
+Every promotion decision is recorded with the evidence behind it, and the cost of each cycle is
+denominated in labels, so the pipeline reports accuracy gained per label spent alongside the model
+itself.
 
-## Status
+## Design principles
 
-Design complete, key decisions locked. Not yet built.
+- **Labels are a metered resource.** The pipeline has no read access to ground truth; the only way
+  to obtain a label is to spend from an audited budget. That makes "improvement per label spent" a
+  real number rather than a claim.
+- **Promotion requires evidence, not a bump.** The quality gate compares champion and challenger
+  across five matched training seeds and requires a confidence interval that excludes zero, so a
+  metric gain sitting inside the noise band is correctly refused.
+- **The evaluation machinery is itself under test.** An A/A control trains a challenger on zero
+  new information and asserts that the gate does not promote, which measures the gate's
+  false-positive rate directly.
+- **Regressions are caught per slice.** Overall accuracy rising while one condition collapses is
+  the failure mode that matters, so every weather, time-of-day, class and object-scale slice is
+  gated on its own noise band.
 
 ## Stack
 
@@ -22,20 +34,31 @@ Design complete, key decisions locked. Not yet built.
 | Data | BDD100K (Berkeley DeepDrive) — non-commercial research license |
 | Cloud | AWS |
 | Edge | Simulated fleet, ARM64 containers on ECS Fargate (Graviton) |
-| Orchestration | Step Functions (single orchestrator, no local execution path) |
+| Orchestration | Step Functions, single orchestrator |
+| Training | Fargate CPU, then SageMaker spot GPU |
+| Model | COCO-pretrained nano detector, frozen backbone, ONNX int8 |
 | IaC | Terraform, S3 backend with DynamoDB lock |
 | CI | GitHub Actions via OIDC, no long-lived keys |
-| Model | COCO-pretrained nano detector, frozen backbone, ONNX int8 |
-| Budget | ~$17/month steady state, ~$26 in the A/B month |
+| Running cost | Approximately $17/month |
 
-## Definition of done
+## Scope
 
-All 7 waves run, the label-efficiency A/B shows a real gap, at least one gate rejection happened
-honestly, and a rollback has been demonstrated. Ship then, regardless of how good the model is.
+- The fleet is simulated: five ARM64 containers replaying held-out imagery on real ARM silicon.
+  Latency and quantization numbers are measured, not estimated, but the tasks are not thermally
+  constrained the way physical hardware would be.
+- No new data is collected or annotated. Distribution shift is simulated by releasing BDD100K in
+  ordered waves, and ground truth is served from withheld annotations behind a budgeted oracle.
+- Selection quality is evaluated by running the loop twice, once with uncertainty sampling and
+  once with random sampling, and comparing the two label-efficiency curves.
 
-## Docs
+## Documentation
 
-See [docs/](docs/) — system overview plus one doc per major component.
+Start with the [architecture overview](docs/00-overview.md) — definitions, the loop diagram, and
+the nine planes the system is built from. Each plane has its own document under [docs/](docs/).
+
+## Status
+
+Design complete. Implementation not yet started.
 
 ## License
 
