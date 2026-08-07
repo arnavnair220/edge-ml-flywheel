@@ -1,0 +1,8 @@
+# Copy to backend.hcl and set your own bucket, then:
+#   terraform init -backend-config=backend.hcl
+#
+# The bucket lives here rather than in versions.tf because a backend block
+# cannot interpolate variables, and the name must be globally unique per
+# deployment. Create the bucket by hand first; it cannot hold its own state.
+
+bucket = "edge-ml-flywheel-tfstate-000000000000"

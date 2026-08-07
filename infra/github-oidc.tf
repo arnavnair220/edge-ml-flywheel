@@ -13,10 +13,15 @@ resource "aws_iam_openid_connect_provider" "github" {
 locals {
   oidc_host = "token.actions.githubusercontent.com"
 
+  # GitHub stamps immutable numeric account and repo IDs into the subject claim,
+  # so the name alone is not what these roles trust. Confirm the live prefix with
+  # gh api repos/OWNER/REPO/actions/oidc/customization/sub before changing this.
+  repo_claim = "repo:${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}"
+
   # Exact subject strings GitHub puts in the token. Deliberately not wildcards:
   # a loose match here would let other repositories assume these roles.
-  sub_pull_request = "repo:${var.github_owner}/${var.github_repo}:pull_request"
-  sub_main_branch  = "repo:${var.github_owner}/${var.github_repo}:ref:refs/heads/main"
+  sub_pull_request = "${local.repo_claim}:pull_request"
+  sub_main_branch  = "${local.repo_claim}:ref:refs/heads/main"
 
   state_bucket_arn = "arn:aws:s3:::${var.state_bucket}"
   state_lock_arn   = "arn:aws:s3:::${var.state_bucket}/${var.state_key}.tflock"
