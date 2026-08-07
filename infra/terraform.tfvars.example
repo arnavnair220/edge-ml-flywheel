@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+# CI does not read this file; it passes the same values as TF_VAR_* env vars.
+
+account_id   = "000000000000"
+state_bucket = "edge-ml-flywheel-tfstate-000000000000"
+
+github_owner = "your-github-username"
+github_repo  = "edge-ml-flywheel"
+
+# Immutable numeric IDs GitHub stamps into the OIDC subject claim. Read yours:
+#   gh api repos/OWNER/REPO/actions/oidc/customization/sub
+# The sub_claim_prefix field reads repo:OWNER@<owner_id>/REPO@<repo_id>
+github_owner_id = "00000000"
+github_repo_id  = "0000000000"
