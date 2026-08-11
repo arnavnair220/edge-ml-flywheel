@@ -1,0 +1,61 @@
+name: python
+
+# Runs on pull requests, and again on main so the default branch is known-good
+# even when a change lands without review. Branch protection is unavailable on
+# a private repo on the free plan, so main is not otherwise guarded.
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".python-version"
+      - ".github/workflows/python.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".python-version"
+      - ".github/workflows/python.yml"
+
+# No AWS here, so no id-token and nothing to assume.
+permissions:
+  contents: read
+
+# Nothing in this workflow touches shared state, so superseding an in-flight run
+# is free. The Terraform workflow deliberately does the opposite, because two
+# runs must never reach state at once.
+concurrency:
+  group: python-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+
+      # --frozen installs strictly from uv.lock and fails if the lock and
+      # pyproject.toml disagree, so a dependency edit without a re-lock is
+      # caught here rather than by whoever syncs next. The interpreter comes
+      # from .python-version, which uv downloads if the runner lacks it.
+      - name: sync
+        run: uv sync --frozen
+
+      # --output-format=github annotates the offending lines in the PR diff
+      # instead of burying them in log output.
+      - name: lint
+        run: uv run ruff check --output-format=github .
+
+      - name: format
+        run: uv run ruff format --check .
+
+      # pytest is added to this job alongside the first module that has tests.
