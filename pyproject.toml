@@ -1,0 +1,47 @@
+[project]
+name = "edge-ml-flywheel"
+version = "0.0.0"
+description = "Closed-loop retraining and deployment pipeline for an edge perception model"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+# One lockfile covers both the local test environment and the training
+# container, and a lock resolves against requires-python. So this range tracks
+# the container interpreter rather than this machine's: 3.12 is provisional
+# until the training base image is chosen. Moving it is one line plus uv sync.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+  "F",   # pyflakes
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "I",   # import sorting
+  "N",   # pep8 naming
+  "UP",  # pyupgrade
+  "B",   # bugbear
+  "A",   # shadowed builtins
+  "C4",  # comprehensions
+  "SIM", # simplify
+  "PTH", # use pathlib
+  "PL",  # pylint subset
+  "RUF", # ruff-specific
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on magic numbers by design; a known-answer bootstrap test is
+# nothing but magic numbers.
+"tests/**" = ["PLR2004"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.2",
+]
