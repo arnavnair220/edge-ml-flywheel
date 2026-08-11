@@ -39,7 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v9
+      # Pinned to an exact version because setup-uv publishes no floating major
+      # tag: v9 does not resolve, only v9.0.0. Bump deliberately.
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
 
