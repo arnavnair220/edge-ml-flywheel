@@ -60,4 +60,5 @@ jobs:
       - name: format
         run: uv run ruff format --check .
 
-      # pytest is added to this job alongside the first module that has tests.
+      - name: test
+        run: uv run pytest -q
