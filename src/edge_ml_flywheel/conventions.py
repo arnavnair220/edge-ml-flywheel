@@ -25,7 +25,9 @@ engine, an IAM policy, or a lifecycle rule. Elsewhere it is noise, and a
 partition holding too little data is worse than none.
 
 **Numbers in keys are zero-padded**, because S3 sorts lexicographically and an
-unpadded ``cycle=10`` sorts before ``cycle=2``.
+unpadded ``cycle=10`` sorts before ``cycle=2``. A width is a promise, so the
+range check that keeps it is part of the padding rather than a duty left to
+whichever call site remembers.
 """
 
 import re
@@ -71,6 +73,13 @@ PARTITION_VERSION_DIGITS: Final = 3
 SHARD_DIGITS: Final = 5
 PART_DIGITS: Final = 5
 
+# One digit, which is to say `seed=1` rather than `seed=01`. A cycle trains five
+# seeds (design section 4.2), so nine is headroom and a hundred is a longer key
+# bought for nothing. As permanent as the widths above -- it is a path component
+# from the first artifact written -- so the cap is the deliberate part, not the
+# absence of padding.
+SEED_DIGITS: Final = 1
+
 # BDD100K image IDs are two 8-character hex groups, as in `0000f77c-6257be58`.
 # Applied at the ingest boundary rather than on every key build: a bad ID should
 # fail the Phase 1 verification loudly, not surface as a mysterious 404 in week
@@ -91,17 +100,19 @@ def _token(name: str, value: str) -> str:
     return value
 
 
-def _cycle(cycle: Cycle) -> str:
-    """Zero-pad a cycle, refusing one that does not fit the width.
+def _padded(name: str, value: int, digits: int) -> str:
+    """Zero-pad a number for a key, refusing one that does not fit the width.
 
     Padding alone would accept cycle 1,000 and emit four digits, which sorts
-    before every three-digit cycle and reads back as a different number. Both
-    failures are silent, so the range check lives with the padding rather than
-    at whichever call site remembers.
+    before every three-digit cycle and reads back as a different number. A
+    negative pads to ``-01``, a component that looks like a real path and
+    addresses nothing. Both failures are silent, so the range check lives with
+    the padding rather than at whichever call site remembers -- and it lives
+    here once rather than once per width.
     """
-    if not 0 <= cycle < 10**CYCLE_DIGITS:
-        raise ValueError(f"cycle does not fit {CYCLE_DIGITS} digits: {cycle}")
-    return f"{cycle:0{CYCLE_DIGITS}d}"
+    if not 0 <= value < 10**digits:
+        raise ValueError(f"{name} is out of range for a {digits}-digit key component: {value}")
+    return f"{value:0{digits}d}"
 
 
 def parse_image_id(value: str) -> ImageId:
@@ -151,6 +162,16 @@ RUN_SLUG_MAX_LEN: Final = 32
 # or trailing hyphen, so the id splits back apart unambiguously.
 _RUN_SLUG: Final = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
+# A slug may not end in a cycle-shaped word, because a model version is
+# `<run_id>-c<cycle>`: the run `...z-foo-c003` and the third model of run
+# `...z-foo` are then the same string, and `_locate` splits it into a run that
+# was never minted. Only the hyphenated case is ambiguous to the parser -- a
+# slug of exactly `c003` cannot be read as a version, since that leaves no slug
+# -- but it is rejected too, because "a run is never named after a cycle" is a
+# rule that survives being remembered at 2am and a carve-out is not. Derived
+# from `CYCLE_DIGITS` so the two cannot drift apart.
+_RUN_SLUG_CYCLE_WORD: Final = re.compile(rf"(?:^|-)c[0-9]{{{CYCLE_DIGITS}}}$")
+
 # Named groups, and a pattern kept separate from its anchors, because the model
 # version below embeds this verbatim. Positional groups would renumber inside the
 # larger pattern and leave both accessors reading the wrong half of a match.
@@ -160,6 +181,26 @@ _RUN_ID_PATTERN: Final = (
 _RUN_ID: Final = re.compile(f"^{_RUN_ID_PATTERN}$")
 
 _RUN_TIMESTAMP_FORMAT: Final = "%Y%m%dt%H%M%Sz"
+
+
+def _check_slug(slug: str) -> None:
+    """Applied when minting and again when parsing.
+
+    Both, because a rule enforced only at the minter is true of the ids we
+    happened to make ourselves and of nothing arriving from outside -- and the
+    ambiguity this rejects is one a hand-typed id walks straight into.
+    """
+    if len(slug) > RUN_SLUG_MAX_LEN:
+        raise ValueError(f"run slug is over {RUN_SLUG_MAX_LEN} characters: {slug!r}")
+    if not _RUN_SLUG.match(slug):
+        raise ValueError(
+            f"run slug must be lowercase alphanumeric words joined by single hyphens: {slug!r}"
+        )
+    if _RUN_SLUG_CYCLE_WORD.search(slug):
+        raise ValueError(
+            f"run slug must not end in a cycle-shaped word, which a model version reads as its "
+            f"own cycle: {slug!r}"
+        )
 
 
 def new_run_id(started_at: datetime, slug: str) -> RunId:
@@ -173,12 +214,7 @@ def new_run_id(started_at: datetime, slug: str) -> RunId:
     """
     if started_at.tzinfo is None:
         raise ValueError(f"started_at must be timezone-aware: {started_at!r}")
-    if len(slug) > RUN_SLUG_MAX_LEN:
-        raise ValueError(f"run slug is over {RUN_SLUG_MAX_LEN} characters: {slug!r}")
-    if not _RUN_SLUG.match(slug):
-        raise ValueError(
-            f"run slug must be lowercase alphanumeric words joined by single hyphens: {slug!r}"
-        )
+    _check_slug(slug)
     stamp = started_at.astimezone(UTC).strftime(_RUN_TIMESTAMP_FORMAT)
     return RunId(f"{stamp}-{slug}")
 
@@ -193,6 +229,7 @@ def parse_run_id(value: str) -> RunId:
     match = _RUN_ID.match(value)
     if not match:
         raise ValueError(f"not a run ID: {value!r}")
+    _check_slug(match["slug"])
     try:
         datetime.strptime(f"{match['date']}t{match['time']}z", _RUN_TIMESTAMP_FORMAT)
     except ValueError:
@@ -332,7 +369,7 @@ def new_model_version(run_id: RunId, cycle: Cycle) -> ModelVersion:
     knows its run and its cycle -- so there is nothing to look up and no clock to
     read, unlike `new_run_id`.
     """
-    return ModelVersion(f"{parse_run_id(run_id)}-c{_cycle(cycle)}")
+    return ModelVersion(f"{parse_run_id(run_id)}-c{_padded('cycle', cycle, CYCLE_DIGITS)}")
 
 
 def parse_model_version(value: str) -> ModelVersion:
@@ -644,12 +681,13 @@ def manifest_key(part: int = 0) -> str:
     The `part` argument exists so a writer that emits multiple files does not
     have to invent a name.
     """
-    return f"{MANIFEST_PREFIX}part-{part:0{PART_DIGITS}d}.parquet"
+    return f"{MANIFEST_PREFIX}part-{_padded('part', part, PART_DIGITS)}.parquet"
 
 
 def partition_prefix(partition_version: PartitionVersion) -> str:
     """Keyed by partition version so a re-partition writes alongside, not over."""
-    return f"derived/partition_version=v{partition_version:0{PARTITION_VERSION_DIGITS}d}/"
+    version = _padded("partition_version", partition_version, PARTITION_VERSION_DIGITS)
+    return f"derived/partition_version=v{version}/"
 
 
 def assignments_prefix(partition_version: PartitionVersion) -> str:
@@ -664,7 +702,8 @@ def assignments_key(partition_version: PartitionVersion, part: int = 0) -> str:
     same partition prefix do use `cohort=` as a prefix, because there the pruning
     is the point.
     """
-    return f"{assignments_prefix(partition_version)}part-{part:0{PART_DIGITS}d}.parquet"
+    name = _padded("part", part, PART_DIGITS)
+    return f"{assignments_prefix(partition_version)}part-{name}.parquet"
 
 
 def shards_prefix(partition_version: PartitionVersion, cohort: Cohort) -> str:
@@ -687,7 +726,8 @@ def shard_key(partition_version: PartitionVersion, cohort: Cohort, index: int) -
     sequential reads for five seeds times seven waves of training every cycle.
     At 5.8 GB, storing twice costs about $0.27 a month.
     """
-    return f"{shards_prefix(partition_version, cohort)}shard-{index:0{SHARD_DIGITS}d}.tar"
+    name = _padded("index", index, SHARD_DIGITS)
+    return f"{shards_prefix(partition_version, cohort)}shard-{name}.tar"
 
 
 # --- Artifacts bucket ---------------------------------------------------------
@@ -702,7 +742,7 @@ def run_prefix(run_id: RunId) -> str:
 
 
 def cycle_prefix(run_id: RunId, cycle: Cycle) -> str:
-    return f"{run_prefix(run_id)}cycle={_cycle(cycle)}/"
+    return f"{run_prefix(run_id)}cycle={_padded('cycle', cycle, CYCLE_DIGITS)}/"
 
 
 def model_prefix(version: ModelVersion) -> str:
@@ -854,7 +894,7 @@ def model_artifact_key(version: ModelVersion, seed: Seed, artifact: ModelArtifac
     matched-seed cost saving in design section 7 depends on -- keeping only seed
     1 quietly removes it.
     """
-    return f"{model_prefix(version)}seed={seed}/{artifact.value}"
+    return f"{model_prefix(version)}seed={_padded('seed', seed, SEED_DIGITS)}/{artifact.value}"
 
 
 def eval_prefix(version: ModelVersion) -> str:
@@ -881,7 +921,7 @@ def eval_matches_key(version: ModelVersion, seed: Seed) -> str:
     separate objects would be unusable. Same access-pattern reasoning that
     produces shards.
     """
-    return f"{eval_prefix(version)}seed={seed}/matches.npz"
+    return f"{eval_prefix(version)}seed={_padded('seed', seed, SEED_DIGITS)}/matches.npz"
 
 
 def gate_report_key(run_id: RunId, cycle: Cycle, suffix: str = "json") -> str:
