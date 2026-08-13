@@ -41,7 +41,11 @@ select = [
 # nothing but magic numbers.
 "tests/**" = ["PLR2004"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [dependency-groups]
 dev = [
+    "pytest>=8",
     "ruff>=0.16.2",
 ]
