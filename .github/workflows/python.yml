@@ -60,5 +60,11 @@ jobs:
       - name: format
         run: uv run ruff format --check .
 
+      # Scope and strictness live in pyproject.toml, so the editor and CI check
+      # the same thing. Before the tests, because a type error is usually the
+      # cheaper diagnosis of the same mistake.
+      - name: types
+        run: uv run mypy
+
       - name: test
         run: uv run pytest -q

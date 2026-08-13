@@ -44,8 +44,37 @@ select = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+# Non-strict over `src/` here, strict from Phase 2. The distinction is about what
+# types describe: this layer is key formats and row schemas, where the value is
+# catching a field renamed on one side of a read, and untyped third-party stubs
+# are not yet in play. Phase 2 is gate predicates, match-array shapes and
+# manifest schemas, where a type error otherwise surfaces as a failed four-hour
+# training job -- so that is where the ratchet tightens.
+#
+# `tests/` is deliberately out of scope. A test that constructs a deliberately
+# invalid row to assert it raises is a type error by design, and silencing those
+# one `# type: ignore` at a time teaches the reader nothing.
+[tool.mypy]
+files = ["src"]
+python_version = "3.12"
+
+# The three warnings that pay for themselves at any strictness. `warn_unused_ignores`
+# is the one that matters most over time: it fails on a suppression whose
+# underlying error is gone, so the ignores in the tree stay honest instead of
+# accumulating as folklore.
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unused_configs = true
+
+# An unannotated function body is invisible to mypy by default, which means a
+# module can pass while being almost entirely unchecked. This is the one
+# strict-adjacent flag worth having before Phase 2, because it makes the coverage
+# honest -- without it, "mypy passes" and "mypy read this" are different claims.
+check_untyped_defs = true
+
 [dependency-groups]
 dev = [
+    "mypy>=1.18",
     "pytest>=8",
     "ruff>=0.16.2",
 ]
