@@ -11,6 +11,8 @@ the data.
 """
 
 import json
+import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,7 @@ from edge_ml_flywheel.conventions import (
     raw_label_key,
 )
 from edge_ml_flywheel.ingest import manifest as manifest_module
-from edge_ml_flywheel.ingest.__main__ import _listed_keys, _staged_keys
+from edge_ml_flywheel.ingest.__main__ import _listed_keys, _parser, _require_host, _staged_keys
 from edge_ml_flywheel.ingest.images import EXPECTED_SIZE, inspect_image
 from edge_ml_flywheel.ingest.labels import parse_label
 from edge_ml_flywheel.ingest.provenance import verify_archive
@@ -38,6 +40,52 @@ from edge_ml_flywheel.ingest.stage import stage
 
 IMAGE = ImageId("0000f77c-6257be58")
 OTHER = ImageId("00054602-3bf57337")
+
+BUILDSPEC = Path(__file__).resolve().parent.parent / "buildspecs" / "ingest.yml"
+
+# Every step the CLI offers. A literal rather than a read of the parser's own
+# choices, so adding a subcommand is a decision about whether the buildspec
+# should call it rather than a line that updates itself.
+SUBCOMMANDS = frozenset(
+    {"url", "verify-archives", "stage", "manifest", "provenance", "verify-upload"}
+)
+
+# `url` is called twice, once per archive.
+BUILDSPEC_INVOCATIONS = 7
+
+_INVOCATION = re.compile(r"python -m edge_ml_flywheel\.ingest\s+(.+)")
+
+
+def _placeholder(token: str) -> str:
+    """A shell expansion stands in for its result, which argparse never sees.
+
+    `"$WORK/extract"` is a path to argparse either way, and nothing at parse
+    time touches the filesystem.
+    """
+    return "placeholder" if token.startswith("$") else token
+
+
+def _buildspec_commands() -> tuple[list[str], ...]:
+    """Every `python -m edge_ml_flywheel.ingest ...` the buildspec runs.
+
+    Only YAML list items, so a command quoted in a comment is not mistaken for
+    one that executes. The trailing paren of a `$(...)` capture is dropped
+    before splitting, since the shell removes it too.
+    """
+    found: list[list[str]] = []
+    for line in BUILDSPEC.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        match = _INVOCATION.search(stripped)
+        if match is None:
+            continue
+        tail = match.group(1).strip().removesuffix(")")
+        found.append([_placeholder(token) for token in shlex.split(tail)])
+    return tuple(found)
+
+
+BUILDSPEC_COMMANDS = _buildspec_commands()
 
 
 def a_label(**overrides: Any) -> dict[str, Any]:
@@ -414,3 +462,49 @@ class TestUploadVerification:
             encoding="utf-8",
         )
         assert _listed_keys(listing) == {"raw/images/100k/train/a.jpg"}
+
+
+# --- the command line the buildspec actually types ----------------------------
+
+
+class TestBuildspecInvocations:
+    """The buildspec is the only caller of this CLI, so nothing else checks it.
+
+    `--host` was declared on the top-level parser, where argparse accepts it
+    only *before* the subcommand. The buildspec wrote it after, every unit test
+    called the functions directly, and the disagreement surfaced as a failed
+    CodeBuild run. Same class of failure the whole module exists to prevent --
+    two spellings of one interface -- one layer up from the S3 keys.
+
+    Parsing the buildspec rather than restating its commands here is the point:
+    a copy of the invocations in this file could drift from the file that runs.
+    """
+
+    def test_the_commands_were_found(self) -> None:
+        """A regex that matched nothing would make every other test vacuous."""
+        assert len(BUILDSPEC_COMMANDS) == BUILDSPEC_INVOCATIONS
+
+    @pytest.mark.parametrize("argv", BUILDSPEC_COMMANDS, ids=lambda argv: argv[0])
+    def test_every_invocation_parses(self, argv: list[str]) -> None:
+        assert _parser().parse_args(argv).command == argv[0]
+
+    def test_every_subcommand_is_reachable_from_the_buildspec(self) -> None:
+        """A step nobody runs is a step that rots unnoticed."""
+        assert {argv[0] for argv in BUILDSPEC_COMMANDS} == SUBCOMMANDS
+
+    @pytest.mark.parametrize("command", ["url", "verify-archives"])
+    def test_host_is_accepted_after_the_subcommand(self, command: str) -> None:
+        """The exact spelling that failed, pinned in the order a person types."""
+        rest = ["images"] if command == "url" else ["--work-dir", "/tmp/w"]
+        parsed = _parser().parse_args([command, *rest, "--host", "example.test"])
+        assert parsed.host == "example.test"
+
+    def test_host_falls_back_to_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`verify-archives` passes no `--host`; the project sets BDD100K_HOST."""
+        monkeypatch.setenv("BDD100K_HOST", "from.env")
+        parsed = _parser().parse_args(["verify-archives", "--work-dir", "/tmp/w"])
+        assert parsed.host == "from.env"
+
+    def test_a_missing_host_is_refused_rather_than_defaulted(self) -> None:
+        with pytest.raises(SystemExit):
+            _require_host("")

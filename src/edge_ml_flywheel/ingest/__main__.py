@@ -26,20 +26,37 @@ log = logging.getLogger("edge_ml_flywheel.ingest")
 _LISTING_FIELDS = 4
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m edge_ml_flywheel.ingest")
+def _add_host(parser: argparse.ArgumentParser) -> None:
+    """`--host` belongs to the subcommands that read it, not to the top level.
+
+    On the top-level parser it would only be accepted *before* the subcommand
+    name -- `ingest --host X url images` -- and the natural spelling the
+    buildspec used, `ingest url images --host X`, fails as an unrecognized
+    argument. Declared here it is accepted where anyone would type it.
+
+    Never on both parsers at once. Argparse writes the subparser's value into
+    the same namespace field last, so a top-level `--host` would be silently
+    overwritten by this one's empty default -- the same failure, but quiet
+    rather than loud.
+    """
     parser.add_argument(
         "--host",
         default=os.environ.get("BDD100K_HOST", ""),
         help="Host serving the archives. Defaults to $BDD100K_HOST.",
     )
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="python -m edge_ml_flywheel.ingest")
     sub = parser.add_subparsers(dest="command", required=True)
 
     url = sub.add_parser("url", help="print one archive's download URL")
     url.add_argument("archive", choices=sorted(ARCHIVES))
+    _add_host(url)
 
     verify = sub.add_parser("verify-archives", help="check the downloads against the source")
     verify.add_argument("--work-dir", type=Path, required=True)
+    _add_host(verify)
 
     staging = sub.add_parser("stage", help="move the extract to its S3 keys")
     staging.add_argument("--extract-dir", type=Path, required=True)
