@@ -31,7 +31,10 @@ from edge_ml_flywheel.conventions import (
     raw_label_key,
 )
 
-# The archives lay both modalities out as `<top>/<modality>/100k/<split>/<file>`.
+# Both archives lay the pool out as `100k/<split>/<file>`, with no top-level
+# directory, so the two modalities merge into one tree on extract. Only the
+# trailing three components are read, so a repackaged mirror that wraps the
+# pool in a directory stages identically.
 _POOL_DIR: Final = "100k"
 
 # Not a `Split` member, and that is the point: `Split` has no `TEST`, so the

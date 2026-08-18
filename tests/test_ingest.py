@@ -298,18 +298,28 @@ class TestInspectImage:
 # --- stage --------------------------------------------------------------------
 
 
-def an_extract(root: Path, split: str, image_id: str) -> None:
-    """The layout the archives unzip to: `<top>/<modality>/100k/<split>/<file>`."""
-    an_image(root / "bdd100k" / "images" / "100k" / split / f"{image_id}.jpg")
-    label = root / "bdd100k" / "labels" / "100k" / split / f"{image_id}.json"
+# What the archives really unzip to, measured from a failed run: no top-level
+# directory at all, and both modalities merged into one `100k/<split>/` tree.
+# The wrapped form is what a repackaged mirror would ship. Staging reads only
+# the trailing three components, so both work -- and the first ingest attempt
+# died precisely because the flat form was assumed not to exist.
+LAYOUTS = ("", "bdd100k")
+
+
+def an_extract(root: Path, split: str, image_id: str, top: str = "") -> None:
+    """One image and its label, at the layout the archives unzip to."""
+    base = root / top if top else root
+    an_image(base / "100k" / split / f"{image_id}.jpg")
+    label = base / "100k" / split / f"{image_id}.json"
     label.parent.mkdir(parents=True, exist_ok=True)
     label.write_text(json.dumps(a_label(name=f"{image_id}.jpg")), encoding="utf-8")
 
 
 class TestStage:
-    def test_files_land_at_the_keys_conventions_builds(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("top", LAYOUTS, ids=["flat", "wrapped"])
+    def test_files_land_at_the_keys_conventions_builds(self, tmp_path: Path, top: str) -> None:
         extract, staged = tmp_path / "extract", tmp_path / "stage"
-        an_extract(extract, "train", IMAGE)
+        an_extract(extract, "train", IMAGE, top)
 
         stage(extract, staged)
 
@@ -328,11 +338,13 @@ class TestStage:
         assert pool.labels == pool.images
         assert (pool.image_count, pool.label_count) == (2, 2)
 
-    def test_a_test_split_file_is_a_hard_failure(self, tmp_path: Path) -> None:
-        # The unzip exclusion should mean this never happens. If it does, the
-        # leakage guard is the thing that must not be downgraded to a warning.
+    @pytest.mark.parametrize("top", LAYOUTS, ids=["flat", "wrapped"])
+    def test_a_test_split_file_is_a_hard_failure(self, tmp_path: Path, top: str) -> None:
+        # The unzip exclusion should mean this never happens. It did happen --
+        # the pattern matched nothing and the build extracted the withheld
+        # split -- and this is the guard that stopped it. Not downgradable.
         extract, staged = tmp_path / "extract", tmp_path / "stage"
-        an_extract(extract, "test", IMAGE)
+        an_extract(extract, "test", IMAGE, top)
 
         with pytest.raises(ValueError, match="withheld test-split file"):
             stage(extract, staged)
@@ -340,12 +352,12 @@ class TestStage:
     def test_files_outside_the_pool_layout_are_reported_not_moved(self, tmp_path: Path) -> None:
         extract, staged = tmp_path / "extract", tmp_path / "stage"
         an_extract(extract, "train", IMAGE)
-        (extract / "bdd100k" / "notes.json").write_text("{}", encoding="utf-8")
+        (extract / "notes.json").write_text("{}", encoding="utf-8")
 
         pool = stage(extract, staged)
 
-        assert pool.ignored == ("bdd100k/notes.json",)
-        assert (extract / "bdd100k" / "notes.json").is_file()
+        assert pool.ignored == ("notes.json",)
+        assert (extract / "notes.json").is_file()
 
     def test_an_unknown_split_is_refused(self, tmp_path: Path) -> None:
         extract, staged = tmp_path / "extract", tmp_path / "stage"

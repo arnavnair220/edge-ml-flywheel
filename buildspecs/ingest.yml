@@ -81,8 +81,13 @@ phases:
       # Labels first. It is 190 MB against 5.7 GB and it is the archive with a
       # published digest, so a host that has changed what it serves fails this
       # build in under a minute instead of after the images pull.
-      - curl -fSL -C - -o "$WORK/bdd100k_labels.zip" "$LABELS_URL"
-      - curl -fSL -C - -o "$WORK/bdd100k_images_100k.zip" "$IMAGES_URL"
+      #
+      # `-s` suppresses the progress meter, which curl writes to stderr and
+      # CodeBuild ships to CloudWatch: a 16-minute download emitted ~77 KB of
+      # carriage-return-separated percentages for a log nobody reads, billed by
+      # the gigabyte. `-S` is what keeps errors visible through it.
+      - curl -fsSL -C - -o "$WORK/bdd100k_labels.zip" "$LABELS_URL"
+      - curl -fsSL -C - -o "$WORK/bdd100k_images_100k.zip" "$IMAGES_URL"
 
       # Verify content after transfer, because there is nothing to trust about
       # the wire: plain HTTP, no login, no signature. Writes what it checked to
@@ -94,11 +99,46 @@ phases:
     commands:
       # The 20,000 withheld test labels are never written to disk at all.
       # Excluding them at extraction is both cheaper and stronger than deleting
-      # them afterwards -- there is no window in which they exist. The glob
-      # matches `<top>/labels/100k/test/*` and `<top>/images/100k/test/*` in one
-      # pattern, whatever the archives call their top-level directory.
-      - unzip -q "$WORK/bdd100k_labels.zip" -x '*/100k/test/*' -d "$WORK/extract"
-      - unzip -q "$WORK/bdd100k_images_100k.zip" -x '*/100k/test/*' -d "$WORK/extract"
+      # them afterwards -- there is no window in which they exist.
+      #
+      # `100k/test/*` with no leading `*/`, because these archives have no
+      # top-level directory: entries are `100k/<split>/<file>`. The previous
+      # `*/100k/test/*` required something before `100k`, matched nothing, and
+      # unzip extracted the withheld split -- which is what the staging guard
+      # then caught, 22 minutes in.
+      #
+      # Exactly one pattern, deliberately. Info-ZIP's `*` does not cross `/`,
+      # so no single pattern covers both this layout and a repackaged mirror's
+      # `<top>/100k/test/*`; and listing both spellings would defeat the guard
+      # below, since unzip reports every unmatched pattern and one of two
+      # alternatives is always unmatched.
+      #
+      # That guard: unzip reports an unmatched exclusion as a caution and still
+      # exits 0, which is how a broken pattern rode out a 16-minute download.
+      # Making the caution fatal moves the discovery to the 190 MB labels
+      # archive, seconds in.
+      #
+      # It fails closed. An archive that ships no test split, or that wraps the
+      # pool in a directory, fails here rather than extracting. From this side
+      # "the exclusion matched nothing" and "there was nothing to exclude" are
+      # indistinguishable, and only one of them is safe to assume.
+      #
+      # One block rather than a shell function called twice, so the guard does
+      # not depend on state surviving between buildspec commands.
+      - |
+        for archive in "$WORK/bdd100k_labels.zip" "$WORK/bdd100k_images_100k.zip"; do
+          echo "extracting $archive"
+          if ! output=$(unzip -q "$archive" -x '100k/test/*' -d "$WORK/extract" 2>&1); then
+            echo "$output" >&2
+            exit 1
+          fi
+          echo "$output"
+          if echo "$output" | grep -q 'excluded filename not matched'; then
+            echo "the test-split exclusion matched nothing in $archive" >&2
+            echo "the layout has changed and the withheld split would have been extracted" >&2
+            exit 1
+          fi
+        done
 
       # 5.7 GB that has already been verified and extracted. The labels archive
       # stays: it is small, and the verification suite re-hashes it rather than
