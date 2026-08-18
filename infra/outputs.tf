@@ -38,3 +38,17 @@ output "ingest_role_arn" {
   description = "The only principal permitted to write raw/ or read a withheld label."
   value       = aws_iam_role.ingest.arn
 }
+
+output "ingest_project_name" {
+  description = "Start a run with: aws codebuild start-build --project-name <this>."
+  value       = aws_codebuild_project.ingest.name
+}
+
+# PENDING until the GitHub App authorization is completed by hand in the
+# console. An output rather than a note in a doc, because it is the one piece of
+# this stack that applying cannot finish, and a build against a pending
+# connection fails before it produces a log line to diagnose.
+output "ingest_connection_status" {
+  description = "AVAILABLE once the GitHub connection is authorized in the console. PENDING before."
+  value       = aws_codeconnections_connection.github.connection_status
+}

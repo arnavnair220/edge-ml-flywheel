@@ -38,8 +38,11 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 # Tests assert on magic numbers by design; a known-answer bootstrap test is
-# nothing but magic numbers.
+# nothing but magic numbers. `verification/` is the same kind of file -- it
+# exists to compare a real extract against literal expected counts -- it just
+# needs 5.8 GB of BDD100K to run, so it sits outside `tests/`.
 "tests/**" = ["PLR2004"]
+"verification/**" = ["PLR2004"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -72,9 +75,36 @@ warn_unused_configs = true
 # honest -- without it, "mypy passes" and "mypy read this" are different claims.
 check_untyped_defs = true
 
+# pyarrow ships no `py.typed` marker, so mypy refuses to look inside it and
+# every import is an error rather than an unknown. Scoped to the one package
+# that needs it rather than set globally: Pillow *is* typed, and a blanket
+# `ignore_missing_imports` would silently accept the next dependency that is
+# not. Revisit if pyarrow ever ships types -- `warn_unused_configs` reports
+# this section as unused the moment nothing matches it.
+[[tool.mypy.overrides]]
+module = ["pyarrow.*"]
+ignore_missing_imports = true
+
 [dependency-groups]
 dev = [
     "mypy>=1.18",
     "pytest>=8",
     "ruff>=0.16.2",
+]
+
+# A group rather than a project dependency, because these are the ingest
+# container's needs and not the package's. The Phase 3 training image installs
+# the same lockfile and has no reason to carry a parquet writer or an image
+# decoder that only the one-shot data job uses.
+#
+# CI installs it anyway (`uv sync --frozen --group ingest`), so the ingest module
+# is linted, typed and unit tested like everything else rather than being code
+# that only ever runs in a place nobody watches.
+ingest = [
+    # Writes the manifest parquet. Chosen over a dataframe library because
+    # writing 80,000 rows with one list column is the entire requirement.
+    "pyarrow>=18",
+    # Decodes images for the integrity checks, and specifically for `draft`,
+    # which decodes a JPEG at 1/8 scale straight out of the DCT coefficients.
+    "pillow>=11",
 ]

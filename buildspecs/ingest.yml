@@ -1,0 +1,148 @@
+# BDD100K ingest, start to finish.
+#
+# Run it with:
+#   aws codebuild start-build --project-name edge-ml-flywheel-ingest
+#
+# Everything here runs in a container that exists for the duration of one build
+# and is then destroyed. That is the point rather than a convenience: extracting
+# these archives anywhere else leaves 80,000 withheld label files outside both
+# halves of the label wall -- the bucket policy on `raw/labels/` and the
+# `oracle_labels` table -- and those are the two statements the project's whole
+# cost-per-label claim rests on. The one copy no policy describes is the one on
+# somebody's laptop.
+#
+# The shape of the file: shell does the parts shell is good at -- fetching,
+# unzipping, copying to S3 -- and every decision about *what the data is* goes
+# through the package, where it is linted, typed and unit tested. No S3 key is
+# ever spelled here; the staging step builds the local tree at exactly the keys
+# `edge_ml_flywheel.conventions` produces, and the upload is a single recursive
+# copy of that tree.
+
+version: 0.2
+
+env:
+  variables:
+    # On the 64 GB build volume. Peak usage is ~11 GB: the 5.7 GB images
+    # archive, its ~4.6 GB extract once the test split is excluded, and the
+    # labels either side of the same.
+    WORK: /tmp/ingest
+
+    # Overridden by the project's environment (see infra/ingest.tf) and
+    # overridable again per build. Repeated here so the file runs on its own.
+    BDD100K_HOST: 128.32.162.150
+
+    # `uv run` re-resolves the environment against the default groups before
+    # every invocation. It leaves the ingest group installed, but there are
+    # eight of them in this file and the environment was built deliberately one
+    # phase up -- pinning it means every step runs against exactly what the
+    # install phase produced, rather than against uv's sync semantics.
+    UV_NO_SYNC: "1"
+
+phases:
+  install:
+    commands:
+      # The first thing worth seeing in the log, because every failure mode
+      # below that is not a network failure is a disk failure.
+      - df -h /
+
+      # Pinned, like the setup-uv action in CI, and installed to a directory
+      # already on PATH: exports do not survive from one buildspec phase to the
+      # next, so anything relying on ~/.local/bin would work here and vanish in
+      # pre_build.
+      - curl -LsSf https://astral.sh/uv/0.11.25/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+      # --frozen installs strictly from uv.lock, so this container runs the
+      # dependency set CI resolved rather than whatever resolves today. The
+      # interpreter comes from .python-version and uv downloads it, which is
+      # what keeps this independent of what the CodeBuild image happens to ship.
+      - uv sync --frozen --group ingest
+      - uv run python -c "import sys; print(sys.version)"
+
+  pre_build:
+    commands:
+      - mkdir -p "$WORK"
+
+      # URLs come from the package rather than being written here, so the host,
+      # the filenames and the expected digests have one spelling that the
+      # verification tests read too.
+      - IMAGES_URL=$(uv run python -m edge_ml_flywheel.ingest url images --host "$BDD100K_HOST")
+      - LABELS_URL=$(uv run python -m edge_ml_flywheel.ingest url labels --host "$BDD100K_HOST")
+      - echo "images $IMAGES_URL"
+      - echo "labels $LABELS_URL"
+
+      # Ask for sixteen bytes before asking for 5.7 GB. A 206 means the server
+      # honours Range and `curl -C -` can resume; a 200 with the full length
+      # means it cannot, and a build that discovers that at byte 5,600,000,000
+      # has to start over from zero.
+      - RANGE_PROBE=$(curl -s -r 0-15 -o /dev/null -w '%{http_code}' "$IMAGES_URL")
+      - echo "range probe returned $RANGE_PROBE"
+      - test "$RANGE_PROBE" = "206"
+
+      # Labels first. It is 190 MB against 5.7 GB and it is the archive with a
+      # published digest, so a host that has changed what it serves fails this
+      # build in under a minute instead of after the images pull.
+      - curl -fSL -C - -o "$WORK/bdd100k_labels.zip" "$LABELS_URL"
+      - curl -fSL -C - -o "$WORK/bdd100k_images_100k.zip" "$IMAGES_URL"
+
+      # Verify content after transfer, because there is nothing to trust about
+      # the wire: plain HTTP, no login, no signature. Writes what it checked to
+      # $WORK for the provenance step, and fails here rather than after an
+      # extract.
+      - uv run python -m edge_ml_flywheel.ingest verify-archives --work-dir "$WORK"
+
+  build:
+    commands:
+      # The 20,000 withheld test labels are never written to disk at all.
+      # Excluding them at extraction is both cheaper and stronger than deleting
+      # them afterwards -- there is no window in which they exist. The glob
+      # matches `<top>/labels/100k/test/*` and `<top>/images/100k/test/*` in one
+      # pattern, whatever the archives call their top-level directory.
+      - unzip -q "$WORK/bdd100k_labels.zip" -x '*/100k/test/*' -d "$WORK/extract"
+      - unzip -q "$WORK/bdd100k_images_100k.zip" -x '*/100k/test/*' -d "$WORK/extract"
+
+      # 5.7 GB that has already been verified and extracted. The labels archive
+      # stays: it is small, and the verification suite re-hashes it rather than
+      # taking the earlier check's word for it.
+      - rm -f "$WORK/bdd100k_images_100k.zip"
+      - df -h /
+
+      # Move every file to the exact key it will have in S3, built through
+      # conventions. After this the upload is a recursive copy with no key
+      # formatting anywhere in it.
+      - uv run python -m edge_ml_flywheel.ingest stage --extract-dir "$WORK/extract" --stage-dir "$WORK/stage"
+
+      # The long step: parse 80,000 label files, hash 80,000 images, and run the
+      # per-image integrity checks. Roughly 10-20 minutes on 2 vCPU.
+      - uv run python -m edge_ml_flywheel.ingest manifest --stage-dir "$WORK/stage"
+      - uv run python -m edge_ml_flywheel.ingest provenance --stage-dir "$WORK/stage" --work-dir "$WORK"
+
+      # Before any upload, deliberately. `raw/` is write-once and versioned, so
+      # bad bytes are far cheaper to refuse than to reverse.
+      - INGEST_STAGE_DIR="$WORK/stage" INGEST_WORK_DIR="$WORK" uv run pytest verification -q
+
+  post_build:
+    commands:
+      # post_build runs whether or not build succeeded, which for a phase whose
+      # job is "write to the immutable bucket" is a footgun rather than a
+      # feature. This is the guard.
+      - test "$CODEBUILD_BUILD_SUCCEEDING" = "1"
+
+      # 160,000 small objects, so the request rate is the whole cost of this
+      # step. --only-show-errors because a per-object progress line 160,000
+      # times is CloudWatch ingestion billed by the gigabyte, for output nobody
+      # reads.
+      - aws configure set s3.max_concurrent_requests 40
+      - aws s3 cp "$WORK/stage/" "s3://$DATA_BUCKET/" --recursive --only-show-errors
+
+      # Two listings rather than one at the bucket root: the ingest role's
+      # ListBucket is conditioned on an `s3:prefix` of `raw/` or `derived/`, so
+      # a root listing is denied by design -- it cannot enumerate the artifacts
+      # of runs it has nothing to do with.
+      - aws s3 ls "s3://$DATA_BUCKET/raw/" --recursive > "$WORK/uploaded.txt"
+      - aws s3 ls "s3://$DATA_BUCKET/derived/" --recursive >> "$WORK/uploaded.txt"
+
+      # The check the pre-upload suite structurally cannot make: that every
+      # staged key arrived. Catches a partial upload, where the earlier ID-set
+      # check catches a partial download.
+      - uv run python -m edge_ml_flywheel.ingest verify-upload --stage-dir "$WORK/stage" --listing "$WORK/uploaded.txt"
+      - df -h /

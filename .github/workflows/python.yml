@@ -8,6 +8,7 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "verification/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".python-version"
@@ -17,6 +18,7 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "verification/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".python-version"
@@ -49,8 +51,13 @@ jobs:
       # pyproject.toml disagree, so a dependency edit without a re-lock is
       # caught here rather than by whoever syncs next. The interpreter comes
       # from .python-version, which uv downloads if the runner lacks it.
+      #
+      # --group ingest so that the ingest module is linted, typed and unit
+      # tested here rather than only in the CodeBuild job that runs it. Code
+      # whose only execution is inside an hour-long build is exactly the code
+      # that needs checking somewhere cheaper.
       - name: sync
-        run: uv sync --frozen
+        run: uv sync --frozen --group ingest
 
       # --output-format=github annotates the offending lines in the PR diff
       # instead of burying them in log output.
