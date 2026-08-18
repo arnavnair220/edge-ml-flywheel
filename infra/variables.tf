@@ -58,3 +58,15 @@ variable "state_key" {
   type        = string
   default     = "core/terraform.tfstate"
 }
+
+# The UC Berkeley host serving both BDD100K archives. A variable rather than a
+# constant in the buildspec so that a move can be answered with a per-build
+# override instead of a commit: `dl.yf.io` resolves to this same address and
+# serves byte-identical files. Trusting DNS or an IP costs nothing extra here --
+# the transport is plain HTTP either way, and the labels sha256 plus the
+# image-ID set check are what actually establish that the right bytes arrived.
+variable "bdd100k_host" {
+  description = "Host serving the BDD100K archives. Plain HTTP, no login."
+  type        = string
+  default     = "128.32.162.150"
+}

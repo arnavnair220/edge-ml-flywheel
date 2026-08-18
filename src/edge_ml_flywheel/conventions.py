@@ -539,7 +539,13 @@ def table_name(table: Table) -> str:
 
 RAW_PREFIX: Final = "raw/"
 RAW_IMAGES_PREFIX: Final = "raw/images/100k/"
-RAW_LABELS_PREFIX: Final = "raw/labels/scalabel/"
+
+# The label format, spelled once. It is both the prefix `raw/labels/` is keyed
+# by and the value every manifest row carries in `label_source`, because those
+# are the same fact: switching formats moves the prefix and rewrites the column
+# together, which is what makes it a re-ingest rather than a second manifest.
+LABEL_SOURCE: Final = "scalabel"
+RAW_LABELS_PREFIX: Final = f"raw/labels/{LABEL_SOURCE}/"
 
 # Leads with an underscore on purpose: Hive, Glue and Athena skip paths
 # beginning with "_" or ".", so a crawler pointed at `raw/` ignores it. The
