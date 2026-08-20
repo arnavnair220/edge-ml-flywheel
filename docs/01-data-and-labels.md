@@ -32,12 +32,12 @@ rather than a second manifest.
 
 ### Test split exclusion
 
-The archive contains 100,000 labelled images: 70,000 train, 10,000 val and 20,000 test. The test
+The archive contains 100,000 labeled images: 70,000 train, 10,000 val and 20,000 test. The test
 annotations are complete ground truth (367,728 boxes, 18.39 per image against 18.41 for train), which
 the benchmark does not publish. Ingest retains train and val only, giving a pool of exactly 80,000
-images. Excluding the split forgoes 25 percent additional unlabelled capacity; the label budget
-rather than pool size is the binding constraint, and results reported against this dataset must not
-depend on withheld annotations.
+images. Excluding the split forgoes 25 percent additional unlabeled capacity; the binding constraint
+is the label budget, not pool size, and results reported against this dataset must not depend on
+withheld annotations.
 
 The exclusion is enforced at three levels:
 
@@ -59,7 +59,7 @@ s3://<project>-data-<account>/
 
 | Property | Rationale |
 |---|---|
-| `raw/` is immutable and writable only by the ingest role | All reprocessing reads from it, which is what allows inference outputs to be regenerated offline |
+| `raw/` is immutable and writable only by the ingest role | All reprocessing reads from it, so inference outputs can be regenerated offline |
 | The training role is denied `raw/labels/` in both its own policy and the bucket policy | The `oracle_labels` table cannot prevent direct object access; an explicit deny can |
 | `_provenance/` is underscore-prefixed | Glue and Athena skip such paths, so a crawler over `raw/` does not index it |
 | All keys are constructed by `edge_ml_flywheel.conventions` | A key formatted at two call sites diverges silently, with the writer still succeeding |
@@ -133,7 +133,7 @@ aws codebuild start-build --project-name edge-ml-flywheel-ingest
 ```
 
 Two values are overridable per build by either route. The source version selects a commit or branch,
-which is what allows an hour-long job to be iterated on without pushing to `main`. `BDD100K_HOST`
+so an hour-long job can be iterated on without pushing to `main`. `BDD100K_HOST`
 selects the endpoint: the download page's buttons point at a raw IP, and `dl.yf.io` resolves to the
 same host and serves byte-identical files, so a name that stops answering is a per-build override
 rather than a re-deploy.
@@ -143,8 +143,8 @@ rather than a re-deploy.
 ## Partition
 
 The partitioner runs once per `partition_version` and assigns each of the 80,000 images to exactly
-one cohort. The assignment is disjoint and complete, which is what makes `cohort=` valid as a
-storage prefix and what the Phase 1 partition assertion checks.
+one cohort. The assignment is disjoint and complete, so `cohort=` is valid as a storage prefix; the
+Phase 1 partition assertion checks both properties.
 
 | Cohort | Images | Split | Labels |
 |---|---:|---|---|
@@ -215,20 +215,28 @@ One cycle spends its budget in six steps:
 | Pool remaining | 62,000, falling to 54,000 |
 | Selectivity | 1,000 of 62,000, about 1.6 percent |
 
-Selectivity is what decides whether selection can matter. Buying a quarter of what was scored is
-barely a choice, and the uncertainty and random arms would land on nearly the same training set. At
-1.6 percent they diverge from the first cycle. A 500-label budget is affordable but puts each
-cycle's gain closer to the quality gate's noise band, so cycles would fail to promote for lack of
-signal rather than lack of learning.
+Selectivity determines whether selection can matter. At a quarter of the scored pool, any
+ranking and a random draw converge on nearly the same training set; at 1.6 percent they diverge from
+the first cycle. A 500-label budget is affordable but puts each cycle's gain closer to the quality
+gate's noise band, so cycles would fail to promote for lack of signal rather than lack of learning.
+
+### The selector is a config value
+
+Steps 2 to 4 are one swappable function. All three rules are named before any of them is needed, so
+the deferred label-efficiency arm — see [planned additions](00-overview.md#planned-additions) —
+changes one field rather than adding a second code path. A selector change deliberately does not
+force a fresh champion baseline, since the arms are paired against one.
+
+`random` needs only the remaining pool and a seed, with no inference at all, which also makes it the
+smoke test for the ranking-to-purchase path before a champion exists to score with.
 
 ### Why the ranked list is not bought directly
 
 Raw top-N on uncertainty degrades in two ways, with unequal consequences:
 
 - **The top of the list is redundant.** Images are uncertain for shared reasons, so an unfiltered
-  top 1,000 can be a thousand near-identical night highway frames: one lesson bought a thousand
-  times. The budget is spent and the training set barely moves, which voids a cycle rather than
-  degrading it.
+  top 1,000 can be a thousand near-identical night highway frames. The budget is spent and the
+  training set barely moves, which voids a cycle rather than degrading it.
 - **High-uncertainty frames are often uninformative.** Motion blur, heavy occlusion and genuinely
   ambiguous objects all score highly and teach nothing that generalizes. This costs a fraction of a
   batch, and the fraction is unmeasured.

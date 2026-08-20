@@ -37,6 +37,7 @@ from edge_ml_flywheel.conventions import (
     RunId,
     RunRegistration,
     Seed,
+    Selector,
     Split,
     Table,
     assignments_key,
@@ -104,6 +105,7 @@ def a_registration(**overrides: Any) -> RunRegistration:
         "partition_version": PartitionVersion(1),
         "class_set_version": ClassSetVersion(1),
         "recipe_version": RecipeVersion(1),
+        "selector": Selector.UNCERTAINTY,
         "note": "first skeleton run",
     }
     return RunRegistration(**(values | overrides))
@@ -503,11 +505,22 @@ class TestRunRegistration:
             ("git_commit", "c" * 40),
             ("created_at", datetime(2026, 9, 1, tzinfo=UTC)),
             ("note", "a different reason"),
+            ("selector", Selector.RANDOM),
         ],
-        ids=["run_id", "git_commit", "created_at", "note"],
+        ids=["run_id", "git_commit", "created_at", "note", "selector"],
     )
     def test_anything_outside_the_trio_does_not_supersede(self, field: str, value: Any) -> None:
         assert a_registration(**{field: value}).supersedes(a_registration()) is False
+
+    @pytest.mark.parametrize("selector", [Selector.RANDOM, Selector.CERTAINTY])
+    def test_a_different_selector_never_supersedes(self, selector: Selector) -> None:
+        # Pinned separately from the case above, because this is the one field
+        # whose inclusion would resemble a correction. A control arm is paired
+        # against the same bootstrap champion and the same eval as the
+        # uncertainty arm; superseding on the selector would re-baseline that
+        # champion and leave the arms differing in two respects instead of one.
+        assert a_registration(selector=selector).supersedes(a_registration()) is False
+        assert a_registration().supersedes(a_registration(selector=selector)) is False
 
 
 # --- Model versions ---
@@ -560,6 +573,13 @@ class TestSplit:
         # The archive ships withheld ground truth for the 20,000 test images, so
         # re-adding this member should be a conscious act, not an autocomplete.
         assert not hasattr(Split, "TEST")
+
+
+class TestSelector:
+    def test_the_controls_are_named_before_they_are_implemented(self) -> None:
+        # Both controls exist from the start so that adding one is a config value
+        # rather than a second code path alongside the first.
+        assert {s.value for s in Selector} == {"uncertainty", "random", "certainty"}
 
 
 # --- Buckets and tables ---

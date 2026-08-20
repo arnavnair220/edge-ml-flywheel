@@ -122,6 +122,42 @@ def parse_image_id(value: str) -> ImageId:
     return ImageId(value)
 
 
+# --- Selection ----------------------------------------------------------------
+#
+# Defined ahead of runs because a run carries one: the rule it buys labels by is
+# part of what the run *is*, not a per-cycle choice.
+
+
+class Selector(StrEnum):
+    """Which rule a run ranks the pool by, recorded on the run registration.
+
+    All three members exist before any of them is needed. "Uncertain frames
+    teach the most" is the hypothesis the project sets out to test rather than
+    a premise it may assume, and what tests it is a run buying by a different
+    rule over the same bootstrap and the same eval. Naming the alternatives
+    here keeps selection a swappable function rather than one rule with a
+    second added alongside it later, which is the arrangement under which two
+    runs come to differ in more than the selector.
+
+    `UNCERTAINTY` is the rule the loop runs by, and the only one a cycle uses
+    by default.
+
+    `RANDOM` needs the remaining pool and a seed and no inference at all, which
+    makes it both the smoke test for the ranking-to-purchase path before a
+    champion exists to score with, and the control arm of the deferred
+    label-efficiency comparison (design section 8).
+
+    `CERTAINTY` inverts the ranking, buying what the champion is most sure of.
+    Those frames carry the least new information, so a cycle run this way
+    should gain close to nothing; one that gains as much as a real cycle says
+    the ranking is not what is doing the work.
+    """
+
+    UNCERTAINTY = "uncertainty"
+    RANDOM = "random"
+    CERTAINTY = "certainty"
+
+
 # --- Runs ---------------------------------------------------------------------
 #
 # `run_id` is the blast radius boundary for a whole experiment: the partition
@@ -270,6 +306,11 @@ class RunRegistration:
     a model manifest disagreeing with its run's registration is a bug worth
     detecting rather than a fact worth storing twice.
 
+    `selector` is here for the trio's reason and not with the trio: it is a
+    precondition of what the run's numbers mean, so a bucket listing has to be
+    able to say which rule bought the labels -- but it is deliberately outside
+    `supersedes`, for the reason that method gives.
+
     `note` is free text and the only unstructured field: the reason this run was
     started, which is exactly the thing no schema anticipates and no artifact
     records.
@@ -281,6 +322,7 @@ class RunRegistration:
     partition_version: PartitionVersion
     class_set_version: ClassSetVersion
     recipe_version: RecipeVersion
+    selector: Selector
     note: str
 
     def __post_init__(self) -> None:
@@ -296,6 +338,16 @@ class RunRegistration:
         The design's re-baseline rule (section 5) stated once, here, rather than
         as an `if` in the promotion path that someone later extends by one field
         and forgets in the other two places.
+
+        `selector` is not one of these fields, and the omission is load-bearing.
+        The trio fixes the data universe and the metric; the selector changes
+        only which images inside that universe get bought. A label-efficiency
+        comparison is *paired* -- both arms start from the same bootstrap
+        champion and score against the same frozen eval -- so a selector change
+        forcing a re-baseline would discard the shared baseline that makes the
+        arms comparable at all, leaving them different in two respects instead
+        of one. Adding it here resembles tightening the rule and instead voids
+        the comparison.
         """
         return (
             self.partition_version,
