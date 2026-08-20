@@ -17,11 +17,10 @@ import pytest
 
 from edge_ml_flywheel.conventions import (
     ATHENA_RESULTS_PREFIX,
-    EVAL_COHORTS,
     MANIFEST_PREFIX,
+    PURCHASES_PREFIX,
     RAW_PROVENANCE_PREFIX,
     SHARDED_COHORTS,
-    WAVE_COHORTS,
     AssignmentRow,
     Buckets,
     ClassSetVersion,
@@ -60,6 +59,8 @@ from edge_ml_flywheel.conventions import (
     parse_model_version,
     parse_run_id,
     partition_prefix,
+    purchase_shard_key,
+    purchase_shards_prefix,
     raw_image_key,
     raw_label_key,
     run_prefix,
@@ -117,7 +118,7 @@ def a_manifest(**overrides: Any) -> ModelManifest:
         "partition_version": PartitionVersion(1),
         "class_set_version": ClassSetVersion(1),
         "recipe_version": RecipeVersion(1),
-        "cohorts_trained_on": frozenset({Cohort.BOOTSTRAP, Cohort.WAVE_0}),
+        "cohorts_trained_on": frozenset({Cohort.BOOTSTRAP, Cohort.POOL}),
         "labels_spent": 2000,
         "deployed_seed": Seed(1),
         "artifact_sha256": {Seed(1): SHA},
@@ -186,8 +187,18 @@ LAYOUT_CASES: list[tuple[str, Any, str]] = [
     ),
     (
         "shard_key",
-        lambda: shard_key(PV, Cohort.WAVE_0, 7),
-        "derived/partition_version=v001/shards/cohort=wave_0/shard-00007.tar",
+        lambda: shard_key(PV, Cohort.EVAL, 7),
+        "derived/partition_version=v001/shards/cohort=eval/shard-00007.tar",
+    ),
+    (
+        "purchase_shards_prefix",
+        lambda: purchase_shards_prefix(RUN, CYCLE),
+        "derived/purchases/run_id=20260812t143355z-v0-skeleton/cycle=003/",
+    ),
+    (
+        "purchase_shard_key",
+        lambda: purchase_shard_key(RUN, CYCLE, 7),
+        "derived/purchases/run_id=20260812t143355z-v0-skeleton/cycle=003/shard-00007.tar",
     ),
     (
         "run_prefix",
@@ -393,8 +404,8 @@ class TestRunIdMinting:
 
     @pytest.mark.parametrize(
         "slug",
-        ["c03", "c0031", "ac003", "wave7", "v0-skeleton"],
-        ids=["two-digits", "four-digits", "no-boundary", "wave", "multi-word"],
+        ["c03", "c0031", "ac003", "batch7", "v0-skeleton"],
+        ids=["two-digits", "four-digits", "no-boundary", "word-then-digits", "multi-word"],
     )
     def test_still_accepts_a_slug_that_only_looks_cycle_shaped(self, slug: str) -> None:
         assert new_run_id(CREATED, slug) == f"20260812t143355z-{slug}"
@@ -529,27 +540,16 @@ class TestModelVersions:
 
 
 class TestCohorts:
-    def test_pool_unused_is_the_only_unsharded_cohort(self) -> None:
-        # WAVE_COHORTS is built from range(7), so a WAVE_7 added to the enum without
-        # extending it would silently leave that wave's images unsharded.
-        assert set(Cohort) - SHARDED_COHORTS == {Cohort.POOL_UNUSED}
-        assert len(Cohort) == 11
-        assert len(SHARDED_COHORTS) == 10
+    def test_only_the_labeled_cohorts_are_sharded(self) -> None:
+        # A cohort added to the enum without a decision about sharding lands in
+        # neither set, and this is where that shows up.
+        assert set(Cohort) - SHARDED_COHORTS == {Cohort.POOL, Cohort.RESERVE}
+        assert len(Cohort) == 4
+        assert {Cohort.BOOTSTRAP, Cohort.EVAL} == SHARDED_COHORTS
 
-    def test_waves_and_evals_are_disjoint(self) -> None:
-        assert WAVE_COHORTS.isdisjoint(EVAL_COHORTS)
-
-    def test_there_are_seven_waves(self) -> None:
-        assert len(WAVE_COHORTS) == 7
-
-    @pytest.mark.parametrize("n", range(7))
-    def test_wave_returns_the_matching_member(self, n: int) -> None:
-        assert Cohort.wave(n).value == f"wave_{n}"
-
-    @pytest.mark.parametrize("n", [7, -1], ids=["past-the-end", "negative"])
-    def test_wave_rejects_a_number_with_no_cohort(self, n: int) -> None:
-        with pytest.raises(ValueError, match="no such wave"):
-            Cohort.wave(n)
+    def test_eval_is_never_sharded_with_the_training_cohorts(self) -> None:
+        # Distinct prefixes are what lets the eval shards be frozen by policy.
+        assert shards_prefix(PV, Cohort.EVAL) != shards_prefix(PV, Cohort.BOOTSTRAP)
 
 
 class TestSplit:
@@ -639,9 +639,10 @@ class TestAssignmentRow:
 
 
 class TestDerivedKeys:
-    def test_pool_unused_has_no_shard_prefix(self) -> None:
+    @pytest.mark.parametrize("cohort", [Cohort.POOL, Cohort.RESERVE])
+    def test_an_unlabeled_cohort_has_no_shard_prefix(self, cohort: Cohort) -> None:
         with pytest.raises(ValueError, match="never sharded"):
-            shards_prefix(PV, Cohort.POOL_UNUSED)
+            shards_prefix(PV, cohort)
 
     @pytest.mark.parametrize(
         "cohort",
@@ -688,14 +689,9 @@ class TestModelManifest:
         with pytest.raises(ValueError, match="trained on no cohort"):
             a_manifest(cohorts_trained_on=frozenset())
 
-    @pytest.mark.parametrize(
-        "cohort",
-        [Cohort.EVAL_CURRENT, Cohort.EVAL_FROZEN_GLOBAL],
-        ids=["eval_current", "eval_frozen_global"],
-    )
-    def test_rejects_training_on_an_eval_cohort(self, cohort: Cohort) -> None:
-        with pytest.raises(ValueError, match="trained on an eval cohort"):
-            a_manifest(cohorts_trained_on=frozenset({Cohort.BOOTSTRAP, cohort}))
+    def test_rejects_training_on_the_eval_cohort(self) -> None:
+        with pytest.raises(ValueError, match="trained on the eval cohort"):
+            a_manifest(cohorts_trained_on=frozenset({Cohort.BOOTSTRAP, Cohort.EVAL}))
 
     def test_no_disagreements_with_its_own_run(self) -> None:
         assert a_manifest().disagreements(a_registration()) == ()
@@ -780,6 +776,10 @@ OUT_OF_RANGE_CASES: list[tuple[str, Any]] = [
     ("shard_key-pv-1000", lambda: shard_key(PartitionVersion(1000), Cohort.BOOTSTRAP, 0)),
     ("shard_key-index--1", lambda: shard_key(PV, Cohort.BOOTSTRAP, -1)),
     ("shard_key-index-100000", lambda: shard_key(PV, Cohort.BOOTSTRAP, 100000)),
+    ("purchase_shard_key-index--1", lambda: purchase_shard_key(RUN, CYCLE, -1)),
+    ("purchase_shard_key-index-100000", lambda: purchase_shard_key(RUN, CYCLE, 100000)),
+    ("purchase_shard_key-cycle--1", lambda: purchase_shard_key(RUN, Cycle(-1), 0)),
+    ("purchase_shard_key-cycle-1000", lambda: purchase_shard_key(RUN, Cycle(1000), 0)),
     ("manifest_key--1", lambda: manifest_key(-1)),
     ("manifest_key-100000", lambda: manifest_key(100000)),
     ("assignments_key-part--1", lambda: assignments_key(PV, -1)),
@@ -922,6 +922,18 @@ class TestNesting:
         # under there would be an easy tidy-up to get wrong.
         assert not MANIFEST_PREFIX.startswith(partition_prefix(PartitionVersion(version)))
 
+    @pytest.mark.parametrize("version", [0, 1, 999])
+    def test_purchases_are_not_under_any_partition(self, version: int) -> None:
+        # Which images a cycle bought is a fact about the run, not the partition:
+        # two runs over one partition buy differently, and the label-efficiency
+        # A/B is the case where they must not collide.
+        prefix = purchase_shards_prefix(RUN, CYCLE)
+        assert not prefix.startswith(partition_prefix(PartitionVersion(version)))
+
+    def test_a_purchase_is_separated_by_run(self) -> None:
+        other = RunId("20260812t143355z-v1-other")
+        assert purchase_shards_prefix(RUN, CYCLE) != purchase_shards_prefix(other, CYCLE)
+
 
 ALL_BUILT_KEYS: dict[str, str] = {
     "raw_image_key": raw_image_key(IMAGE, Split.TRAIN),
@@ -931,7 +943,9 @@ ALL_BUILT_KEYS: dict[str, str] = {
     "assignments_prefix": assignments_prefix(PV),
     "assignments_key": assignments_key(PV),
     "shards_prefix": shards_prefix(PV, Cohort.BOOTSTRAP),
-    "shard_key": shard_key(PV, Cohort.WAVE_0, 7),
+    "shard_key": shard_key(PV, Cohort.EVAL, 7),
+    "purchase_shards_prefix": purchase_shards_prefix(RUN, CYCLE),
+    "purchase_shard_key": purchase_shard_key(RUN, CYCLE, 7),
     "run_prefix": run_prefix(RUN),
     "cycle_prefix": cycle_prefix(RUN, CYCLE),
     "model_prefix": model_prefix(VERSION),
@@ -943,6 +957,7 @@ ALL_BUILT_KEYS: dict[str, str] = {
     "gate_report_key": gate_report_key(RUN, CYCLE),
     "telemetry_prefix": telemetry_prefix(RUN, date(2026, 8, 12)),
     "MANIFEST_PREFIX": MANIFEST_PREFIX,
+    "PURCHASES_PREFIX": PURCHASES_PREFIX,
     "RAW_PROVENANCE_PREFIX": RAW_PROVENANCE_PREFIX,
     "ATHENA_RESULTS_PREFIX": ATHENA_RESULTS_PREFIX,
 }
@@ -975,6 +990,11 @@ class TestSortOrder:
 
     def test_cycles_sort_numerically_as_strings(self) -> None:
         assert cycle_prefix(RUN, Cycle(2)) < cycle_prefix(RUN, Cycle(10))
+
+    def test_purchases_sort_numerically_as_strings(self) -> None:
+        # A cycle trains on every purchase up to it, so the cumulative labeled set
+        # is only a key range if lexicographic order matches cycle order.
+        assert purchase_shards_prefix(RUN, Cycle(2)) < purchase_shards_prefix(RUN, Cycle(10))
 
     def test_partition_versions_sort_numerically_as_strings(self) -> None:
         assert partition_prefix(PartitionVersion(2)) < partition_prefix(PartitionVersion(10))

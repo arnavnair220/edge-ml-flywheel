@@ -15,7 +15,7 @@ choice of these two is recorded rather than assumed. `bdd100k_det_20_labels.zip`
 contains 2,000 tracking JPEGs and zero labels, and the download page's
 `2021/bdd100k_det_20_labels_trainval.zip` link 404s. The legacy 2018 Scalabel
 archive named here is a complete substitute -- it carries both the boxes and the
-weather/scene/timeofday attributes the wave design runs on -- and is arguably
+weather/scene/timeofday attributes the eval slices are defined over -- and is arguably
 the better one: `det_20` has a documented gap where train yields 69,863 of
 70,000 images with labels, while every image in this archive has detection
 boxes.

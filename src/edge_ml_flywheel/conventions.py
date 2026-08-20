@@ -417,39 +417,29 @@ class Cohort(StrEnum):
     Phase 1 partition assertion and the validity of the `cohort=` prefix are the
     same statement.
 
-    `WAVE_0` is the design's wave 0.5, the calibration wave -- more of the
-    bootstrap distribution with no new conditions. The design numbers the
-    bootstrap itself wave 0; here it has a name instead, so the wave numbers run
-    contiguously.
+    `BOOTSTRAP` and `EVAL` are labeled when the partitioner runs; `POOL` is the
+    withheld remainder that the fleet drives through and selection ranks. An
+    image leaves the pool by being bought, and which images a cycle bought is a
+    fact about a run rather than about the partition, so a purchase is recorded
+    under its run -- see `purchase_shards_prefix` -- and never by reassigning a
+    cohort. Cohort assignment is immutable for the life of a partition version.
+
+    `RESERVE` is deliberately inert. Growing `EVAL` mid-run moves the ruler every
+    earlier cycle was measured against, so the spare `val` images are held out of
+    `POOL` where selection would otherwise spend them, and a larger eval becomes
+    a new partition rather than a dead end.
     """
 
     BOOTSTRAP = "bootstrap"
-    WAVE_0 = "wave_0"
-    WAVE_1 = "wave_1"
-    WAVE_2 = "wave_2"
-    WAVE_3 = "wave_3"
-    WAVE_4 = "wave_4"
-    WAVE_5 = "wave_5"
-    WAVE_6 = "wave_6"
-    EVAL_CURRENT = "eval_current"
-    EVAL_FROZEN_GLOBAL = "eval_frozen_global"
-    POOL_UNUSED = "pool_unused"
-
-    @classmethod
-    def wave(cls, n: int) -> "Cohort":
-        """`Cohort.wave(3)` rather than an f-string at the call site."""
-        try:
-            return cls(f"wave_{n}")
-        except ValueError:
-            raise ValueError(f"no such wave: {n}") from None
+    POOL = "pool"
+    EVAL = "eval"
+    RESERVE = "reserve"
 
 
-WAVE_COHORTS: Final = frozenset(Cohort.wave(n) for n in range(7))
-EVAL_COHORTS: Final = frozenset({Cohort.EVAL_CURRENT, Cohort.EVAL_FROZEN_GLOBAL})
-
-# `pool_unused` is never trained on and never evaluated, so it is never sharded.
-# Roughly a tenth of the images, and the only cohort excluded.
-SHARDED_COHORTS: Final = frozenset({Cohort.BOOTSTRAP}) | WAVE_COHORTS | EVAL_COHORTS
+# `pool` is read one object at a time -- by the fleet, and by the selection pass
+# scoring it -- and `reserve` is not read at all, so neither earns a WebDataset
+# shard. What a cycle buys out of the pool is sharded under its run instead.
+SHARDED_COHORTS: Final = frozenset({Cohort.BOOTSTRAP, Cohort.EVAL})
 
 
 class ModelArtifact(StrEnum):
@@ -590,7 +580,7 @@ _SHA256: Final = re.compile(r"^[0-9a-f]{64}$")
 class ManifestRow:
     """One row per image in `derived/manifest/`. Written once, at ingest.
 
-    Every Phase 1 question is a query over this: wave sizing, eval
+    Every Phase 1 question is a query over this: cohort sizing, eval
     stratification, per-slice counts. It has to exist before the shards, which
     cannot be written until the partitioner has assigned cohorts.
 
@@ -600,15 +590,13 @@ class ManifestRow:
     people habitually mis-remember -- so an enum written today is a guess that
     fails ingest on data that is genuinely fine.
 
-    They become enums with the wave-definitions bullet, once the per-condition
-    counts land: the members and the wave predicates come out of the same
-    measurement, so they belong in the same change. Deferring costs nothing --
-    `StrEnum` serializes to the identical string, so the parquet column stays
-    `string` and adopting enums later is a parse-boundary change with no
-    re-ingest and no migration. The grouping the waves filter on (`benign_weather`
-    and friends) is the more valuable half to type: a typo in a raw value fails
-    the moment you filter on it, while a wrong group membership silently resizes
-    a wave.
+    The counts have since been measured, so the members are known. They become
+    enums with the partitioner, which is the first code to filter on them: eval
+    stratification and the per-slice floors are written against these values, so
+    the members and their first reader belong in one change. Deferring cost
+    nothing -- `StrEnum` serializes to the identical string, so the parquet column
+    stays `string` and adopting enums is a parse-boundary change with no
+    re-ingest and no migration.
 
     `sha256` is over the image bytes. Design section 4.1's data gate and section
     6's artifact verification both need the raw data content-addressed.
@@ -703,7 +691,7 @@ def assignments_prefix(partition_version: PartitionVersion) -> str:
 def assignments_key(partition_version: PartitionVersion, part: int = 0) -> str:
     """80,000 rows of two columns, well under a megabyte.
 
-    `cohort` is a column here, not a prefix: splitting a file this small eleven
+    `cohort` is a column here, not a prefix: splitting a file this small four
     ways would make every query slower and buy nothing. The shards under this
     same partition prefix do use `cohort=` as a prefix, because there the pruning
     is the point.
@@ -713,11 +701,12 @@ def assignments_key(partition_version: PartitionVersion, part: int = 0) -> str:
 
 
 def shards_prefix(partition_version: PartitionVersion, cohort: Cohort) -> str:
-    """Sharded by cohort, so a cycle's training set is a prefix selection over
-    waves 0..N rather than a filter over everything.
+    """Sharded by cohort, so a bulk read is a prefix selection rather than a
+    filter over everything.
 
-    Both eval cohorts are frozen after Phase 1 by denying writes under their
-    prefixes -- which is only expressible because cohort is a prefix.
+    Only the two cohorts labeled at partition time are sharded. `eval` is frozen
+    after Phase 1 by denying writes under its prefix -- which is only expressible
+    because cohort is a prefix.
     """
     if cohort not in SHARDED_COHORTS:
         raise ValueError(f"{cohort.value} is never sharded")
@@ -728,12 +717,36 @@ def shard_key(partition_version: PartitionVersion, cohort: Cohort, index: int) -
     """One ~200 MB WebDataset shard.
 
     Two representations of the same images, because there are two access
-    patterns: random single-object GET for the faucet and the fleet, bulk
-    sequential reads for five seeds times seven waves of training every cycle.
-    At 5.8 GB, storing twice costs about $0.27 a month.
+    patterns: random single-object GET for the fleet and for scoring the pool,
+    bulk sequential reads for five seeds of training every cycle. Only the
+    labeled images are duplicated -- 13,000 at partition time, growing by what
+    each cycle buys -- so the second copy is about 1.5 GB, a few cents a month.
     """
     name = _padded("index", index, SHARD_DIGITS)
     return f"{shards_prefix(partition_version, cohort)}shard-{name}.tar"
+
+
+PURCHASES_PREFIX: Final = "derived/purchases/"
+
+
+def purchase_shards_prefix(run_id: RunId, cycle: Cycle) -> str:
+    """One cycle's bought labels, sharded for the same bulk read the cohort
+    shards serve.
+
+    Keyed by run and cycle rather than by partition version, because which images
+    a cycle bought is a fact about that run's selector and budget: two runs over
+    one partition buy different images, and the label-efficiency A/B is exactly
+    the case where they must not collide. A cycle's training set is therefore the
+    bootstrap shards plus every purchase prefix from cycle 1 up to it, which
+    states the cumulative labeled set as a key range.
+    """
+    return f"{PURCHASES_PREFIX}{cycle_prefix(run_id, cycle)}"
+
+
+def purchase_shard_key(run_id: RunId, cycle: Cycle, index: int) -> str:
+    """One shard of a single cycle's purchase, padded to sort with the rest."""
+    name = _padded("index", index, SHARD_DIGITS)
+    return f"{purchase_shards_prefix(run_id, cycle)}shard-{name}.tar"
 
 
 # --- Artifacts bucket ---------------------------------------------------------
@@ -795,9 +808,12 @@ class ModelManifest:
     They are properties here rather than fields, so the serialized document has
     one spelling of them and readers still get both typed.
 
-    `cohorts_trained_on` rather than design section 5's "wave number": a cycle
-    trains on waves 0..N plus bootstrap, so the set is the honest record and the
-    wave number is recoverable from it.
+    `cohorts_trained_on` records which cohorts the training set drew from:
+    `bootstrap` alone at cycle 0, and `bootstrap` with `pool` once any labels
+    have been bought. Exactly *which* pool images is a function of run and cycle,
+    both already inside `version`, so this field is not an inventory -- it is the
+    leakage statement, and `eval` appearing in it is the failure the field exists
+    to make representable and then refuse.
 
     `artifact_sha256` is the digest of each seed's `model.onnx`, all five, not
     only the deployed one -- the matched-seed saving in design section 7 depends
@@ -836,10 +852,8 @@ class ModelManifest:
                 raise ValueError(f"seed {seed} digest is not a lowercase hex sha256: {digest!r}")
         if not self.cohorts_trained_on:
             raise ValueError("a model trained on no cohort is not a model")
-        if self.cohorts_trained_on & EVAL_COHORTS:
-            raise ValueError(
-                f"trained on an eval cohort: {sorted(self.cohorts_trained_on & EVAL_COHORTS)}"
-            )
+        if Cohort.EVAL in self.cohorts_trained_on:
+            raise ValueError(f"trained on the {Cohort.EVAL.value} cohort")
 
     @property
     def run_id(self) -> RunId:
@@ -906,8 +920,8 @@ def model_artifact_key(version: ModelVersion, seed: Seed, artifact: ModelArtifac
 def eval_prefix(version: ModelVersion) -> str:
     """Under the cycle that produced the model, not the cycle being decided.
 
-    A champion is re-compared every cycle without being re-evaluated: both eval
-    cohorts are frozen, so its scores are a function of the model alone and the
+    A champion is re-compared every cycle without being re-evaluated: the eval
+    cohort is frozen, so its scores are a function of the model alone and the
     cached results stay valid where they were first written (design section 7).
     Keying this by the deciding cycle instead would write a fresh copy of an
     unchanged answer every cycle and make the reuse impossible to express.
