@@ -85,7 +85,7 @@ flowchart TB
 
     subgraph DATA["Data and label supply plane"]
         PART["partitioner<br/>bootstrap / pool / eval / reserve"]
-        SEL["selection<br/>mean per-object uncertainty + diversity"]
+        SEL["selection<br/>mean per-object uncertainty + condition cap"]
         ORACLE["oracle<br/>budget ledger, idempotent, audited"]
         POOL[("cumulative labeled set")]
     end
@@ -155,7 +155,7 @@ Listed in the order a cycle passes through them.
 
 | # | Plane | What it does in a cycle | Invariant it owns |
 |---|---|---|---|
-| 1 | **Data and label supply** | Partitions the dataset once, ranks the unlabeled pool by mean per-object uncertainty over what the fleet actually saw, and sells labels for the top N against a hard budget | Labels can only be obtained by paying the oracle, and `eval` is not purchasable at any price |
+| 1 | **Data and label supply** | Partitions the dataset once, ranks the unlabeled pool by mean per-object uncertainty over what the fleet actually saw, caps how much of a batch any one condition may take, and sells labels against a hard budget | Labels can only be obtained by paying the oracle, and `eval` is not purchasable at any price |
 | 2 | **Training** | Trains the challenger on the cumulative labeled set with five fixed seeds, from the COCO base every time, and exports an int8 ONNX artifact | Seed *k* reproduces bit-for-bit; seed 1 is the artifact that ships, never the best-scoring seed |
 | 3 | **Evaluation** | Scores each model once, persists per-image match arrays, then answers every later question from that cache — paired deltas, confidence bands, per-slice metrics | Bootstrap the *paired* delta on a shared eval resample, never each model independently |
 | 4 | **Gating** | Runs five pass/fail checks in order — data, quality, edge, regression, canary. Any hard failure stops the cycle and the champion stays put; the labels stay bought | Zero image-ID overlap with either eval set is a hard fail with no override |
@@ -190,9 +190,10 @@ Planes 1-8 turn the loop. Plane 9 establishes that the loop's measurements can b
 
 Properties every plane honors, rather than components living anywhere:
 
-- **`run_id` in the partition key of every stateful table.** A re-run must be physically unable
-  to see the previous run's spent budget or promoted models. DynamoDB key design cannot be
-  changed after table creation, so this is decided before the first table exists.
+- **`run_id` in the partition key of every stateful table, and in the prefix of every purchased
+  batch.** A re-run must be physically unable to see the previous run's spent budget or promoted
+  models, and the A/B's two arms unable to read each other's purchases. DynamoDB key design cannot
+  be changed after table creation, so this is decided before the first table exists.
 - **Idempotency keys on anything that spends budget.** Retries and redeliveries are normal; a
   double charge against the label ledger has no undo.
 - **Determinism is load-bearing.** Both the matched-seed quality gate and the champion seed-run

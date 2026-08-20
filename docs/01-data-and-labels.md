@@ -189,21 +189,26 @@ more than any partition choice does.
 
 ## Selection and purchase
 
-One cycle spends its budget in five steps:
+One cycle spends its budget in six steps:
 
 1. The champion scores every remaining pool image. This is inference over image features only; no
    label is read, so the step sits entirely inside the label wall.
 2. Each image gets a **mean per-object uncertainty** score. Per-object rather than per-image,
    because an image-level maximum is decided by its single worst box and ranks a frame with one
    ambiguous detection above a frame the model is uniformly unsure of.
-3. A diversity pass reduces the ranked list.
-4. The top 1,000 go to the oracle.
-5. The oracle checks the idempotency key, debits the ledger, releases those labels, and appends them
+3. Selection walks the ranked list from the top, taking an image only while its `weather` and
+   `timeofday` bucket is under its cap, and stops at 900.
+4. A further 100 are drawn at random from the rest of the pool.
+5. The 1,000 go to the oracle.
+6. The oracle checks the idempotency key, debits the ledger, releases those labels, and appends them
    to the cumulative labeled set.
 
 | Quantity | Value |
 |---|---|
 | Budget per cycle | 1,000 labels |
+| Selected by uncertainty | 900 |
+| Drawn at random | 100 |
+| Per-condition cap | twice the bucket's share of the remaining pool |
 | Cycles per run | 8 |
 | Total purchased | 8,000 |
 | Training set | 8,000 at cycle 0, 16,000 after cycle 8 |
@@ -218,18 +223,38 @@ signal rather than lack of learning.
 
 ### Why the ranked list is not bought directly
 
-Raw top-N on uncertainty degrades in two known ways, and the diversity pass exists for both:
+Raw top-N on uncertainty degrades in two ways, with unequal consequences:
 
-- **High-uncertainty frames are often uninformative.** Motion blur, heavy occlusion and genuinely
-  ambiguous objects all score highly and teach nothing that generalizes. Confusing and instructive
-  are correlated, not identical.
 - **The top of the list is redundant.** Images are uncertain for shared reasons, so an unfiltered
   top 1,000 can be a thousand near-identical night highway frames: one lesson bought a thousand
-  times.
+  times. The budget is spent and the training set barely moves, which voids a cycle rather than
+  degrading it.
+- **High-uncertainty frames are often uninformative.** Motion blur, heavy occlusion and genuinely
+  ambiguous objects all score highly and teach nothing that generalizes. This costs a fraction of a
+  batch, and the fraction is unmeasured.
 
-The pass caps how much of one cycle's purchase any single condition may take, and deduplicates near
-neighbours in embedding space before the list reaches the oracle. Both are recorded per cycle: a cap
-that binds every cycle reports that the ranking has collapsed onto one condition.
+The cap addresses the first at the coarsest granularity the manifest supports. The random draw bounds
+both, since a tenth of every batch is bought without reference to the champion's confusions.
+
+The cap is measured against the remaining pool, recomputed each cycle. A fleet gathering its own
+footage has no other reference: condition tags come from the vehicle, so they exist on unbought
+frames, but a true population proportion does not.
+
+Every cycle records the batch's condition mix beside the pool's, and the count each stage rejected. A
+cap that binds every cycle reports a ranking collapsed onto one condition; a batch whose mix already
+matches the pool's reports a cap that never engaged.
+
+### Deferred
+
+Redundancy inside a single condition bucket, and unlabelable frames, are not addressed. Both need a
+finer signal than the manifest carries, and neither can be sized before the first cycles report what
+they bought.
+
+| Addition | Condition that unlocks it |
+|---|---|
+| Dedup on image embeddings | The cap binds every cycle, or batches stay redundant inside one bucket |
+| A blur and exposure screen over a derived quality table | Unlabelable frames appear in what was bought |
+| Seed disagreement in place of single-model uncertainty | Both of the above are in place and cycles still fail the quality gate |
 
 ### The label wall
 
