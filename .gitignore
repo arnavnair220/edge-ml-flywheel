@@ -64,6 +64,9 @@ aws.json
 # Local working notes, not for publication
 local/
 
+# Agent tooling config, local only
+.claude/
+
 # Editors and OS
 .vscode/
 .idea/

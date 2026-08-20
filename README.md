@@ -2,30 +2,28 @@
 
 Closed-loop retraining and deployment pipeline for an edge perception model.
 
-A model runs on a simulated edge fleet, notices which examples confuse it, and sends only those
-back to the cloud. The cloud buys ground truth for that small batch against a hard label budget,
-retrains, and checks the challenger against five pass/fail gates. If it passes, the model is
-promoted, converted to an edge format, deployed to one device, watched, then rolled out — or
-rolled back. That deployment produces new observations, and the loop repeats.
+A model runs on a simulated edge fleet, scores unlabeled imagery, and returns the frames it is
+least certain about. The cloud buys ground truth for that batch against a hard label budget,
+retrains, and checks the challenger against five pass/fail gates. A passing model is promoted,
+converted to an edge format, deployed to one device, watched, then rolled out or rolled back. That
+deployment produces new observations, and the cycle repeats.
 
-Every promotion decision is recorded with the evidence behind it, and the cost of each cycle is
-denominated in labels, so the pipeline reports accuracy gained per label spent alongside the model
-itself.
+Every promotion decision is recorded with its supporting evidence, and each cycle's cost is
+denominated in labels, so the pipeline reports accuracy gained per label spent alongside the model.
 
 ## Design principles
 
-- **Labels are a metered resource.** The pipeline has no read access to ground truth; the only way
-  to obtain a label is to spend from an audited budget. That makes "improvement per label spent" a
-  real number rather than a claim.
-- **Promotion requires evidence, not a bump.** The quality gate compares champion and challenger
-  across five matched training seeds and requires a confidence interval that excludes zero, so a
-  metric gain sitting inside the noise band is correctly refused.
-- **The evaluation machinery is itself under test.** An A/A control trains a challenger on zero
-  new information and asserts that the gate does not promote, which measures the gate's
-  false-positive rate directly.
-- **Regressions are caught per slice.** Overall accuracy rising while one condition collapses is
-  the failure mode that matters, so every weather, time-of-day, class and object-scale slice is
-  gated on its own noise band.
+- **Labels are a metered resource.** The pipeline has no read access to ground truth. A label is
+  obtained only by spending from an audited budget, which makes improvement per label spent a
+  measured quantity.
+- **Promotion requires a significant gain.** The quality gate compares champion and challenger
+  across five matched training seeds and requires a confidence interval that excludes zero. A gain
+  inside the noise band does not promote.
+- **The evaluation machinery is itself under test.** An A/A control trains a challenger on zero new
+  information and asserts that the gate refuses it, measuring the gate's false-positive rate
+  directly.
+- **Regressions are caught per slice.** Every weather, time-of-day, class and object-scale slice is
+  gated on its own noise band, so overall accuracy cannot rise while one condition degrades.
 
 ## Stack
 
@@ -43,13 +41,15 @@ itself.
 
 ## Scope
 
-- The fleet is simulated: five ARM64 containers replaying held-out imagery on real ARM silicon.
-  Latency and quantization numbers are measured, not estimated, but the tasks are not thermally
-  constrained the way physical hardware would be.
-- No new data is collected or annotated. Distribution shift is simulated by releasing BDD100K in
-  ordered waves, and ground truth is served from withheld annotations behind a budgeted oracle.
-- Selection quality is evaluated by running the loop twice, once with uncertainty sampling and
-  once with random sampling, and comparing the two label-efficiency curves.
+- The fleet is simulated: five ARM64 containers replaying unlabeled pool imagery on real ARM
+  silicon. Latency and quantization numbers are measured, not estimated, but the tasks are not
+  thermally constrained the way physical hardware would be.
+- No new data is collected or annotated. BDD100K ships its own ground truth, and the pipeline is
+  denied read access to it, so a frame can only be labeled by buying it from the oracle against a
+  metered budget.
+- Selection is validated by controls inside the run: an A/A test and a confidence-ordered cycle. The
+  label-efficiency comparison against a random-sampling arm is deferred; see
+  [planned additions](docs/00-overview.md#planned-additions).
 
 ## Documentation
 
@@ -58,7 +58,9 @@ the nine planes the system is built from. Each plane has its own document under 
 
 ## Status
 
-Design complete. Implementation not yet started.
+Ingest is deployed and has run: `raw/` holds the 80,000-image train and val pool with its derived
+image manifest, and every partition and eval-sizing question is now a query against that manifest.
+Partitioning is next.
 
 ## License
 

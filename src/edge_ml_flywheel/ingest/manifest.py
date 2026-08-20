@@ -1,6 +1,6 @@
 """The 80,000-row manifest parquet, and the integrity report beside it.
 
-Every Phase 1 question is a query against this file -- wave sizing, eval
+Every Phase 1 question is a query against this file -- cohort sizing, eval
 stratification, per-slice counts, the minimum-slice thresholds -- which is why
 it is built before the shards rather than alongside them. The shards cannot be
 written until the partitioner has assigned cohorts, and the partitioner cannot
@@ -65,7 +65,7 @@ SCHEMA: Final = pa.schema(
 
 # zstd over parquet's snappy default. The file is read whole by every query and
 # written once, so decompression speed is not the constraint and the smaller
-# object is a smaller download every time a wave is sized.
+# object is a smaller download every time a cohort or slice is sized.
 _COMPRESSION: Final = "zstd"
 
 INTEGRITY_KEY: Final = f"{RAW_PROVENANCE_PREFIX}integrity.json"

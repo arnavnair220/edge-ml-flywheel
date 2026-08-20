@@ -121,16 +121,16 @@ resource "aws_dynamodb_table" "label_budget" {
 # Deployment intent, and the only mutable state the fleet reads. Two shapes of
 # item share the table, distinguished by the sort key:
 #
-#   entity = "run"           the run's own config, including the open wave
+#   entity = "run"           the run's own config, including the current cycle
 #   entity = "device#<n>"    one device's `desired_version`
 #
 # They belong together because they are read together -- a device resolving what
-# to run and the faucet resolving which wave is open are both a query on one
-# `run_id` partition -- and because the open wave is advanced by a conditional
-# write on this item. That conditional write is doing real work: a double-fired
-# cron tick would otherwise skip a wave, and the cycle number is not a usable
-# proxy, since a budget re-calibration cycle and the A/A test's symmetric variant
-# each burn a cycle without opening a wave.
+# to run and the control plane resolving which cycle is current are both a query
+# on one `run_id` partition -- and because the cycle is advanced by a conditional
+# write on this item. That conditional write is the single-flight lock: it is the
+# one place two overlapping cycles become representable, so it is the one place
+# they can be refused. A double-fired cron tick loses the condition and does
+# nothing, rather than opening a second cycle against the same budget.
 resource "aws_dynamodb_table" "fleet_config" {
   name         = "${local.table_prefix}-fleet_config"
   billing_mode = "PAY_PER_REQUEST"

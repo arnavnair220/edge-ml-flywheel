@@ -37,7 +37,7 @@ from typing import Any, Final
 
 from edge_ml_flywheel.conventions import ImageId
 
-# The three the wave design runs on. Every one is required to be present: the
+# The three the eval slices are defined over. Every one is required to be present: the
 # archive uses an explicit "undefined" where a value is unknown, so an absent
 # key is a malformed document rather than a missing observation.
 ATTRIBUTES: Final = ("weather", "scene", "timeofday")
