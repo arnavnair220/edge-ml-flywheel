@@ -43,11 +43,12 @@ itself.
 
 ## Scope
 
-- The fleet is simulated: five ARM64 containers replaying held-out imagery on real ARM silicon.
-  Latency and quantization numbers are measured, not estimated, but the tasks are not thermally
-  constrained the way physical hardware would be.
-- No new data is collected or annotated. Distribution shift is simulated by releasing BDD100K in
-  ordered waves, and ground truth is served from withheld annotations behind a budgeted oracle.
+- The fleet is simulated: five ARM64 containers replaying unlabeled pool imagery on real ARM
+  silicon. Latency and quantization numbers are measured, not estimated, but the tasks are not
+  thermally constrained the way physical hardware would be.
+- No new data is collected or annotated. BDD100K ships its own ground truth, and the pipeline is
+  denied read access to it, so the only way to label a frame is to buy it from the oracle against a
+  metered budget — the same constraint a real annotation programme operates under.
 - Selection quality is evaluated by running the loop twice, once with uncertainty sampling and
   once with random sampling, and comparing the two label-efficiency curves.
 
@@ -58,7 +59,9 @@ the nine planes the system is built from. Each plane has its own document under 
 
 ## Status
 
-Design complete. Implementation not yet started.
+Ingest is deployed and has run: `raw/` holds the 80,000-image train and val pool with its derived
+image manifest, and every partition and eval-sizing question is now a query against that manifest.
+Partitioning is next.
 
 ## License
 
