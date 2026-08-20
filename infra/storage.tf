@@ -155,9 +155,9 @@ resource "aws_s3_bucket_lifecycle_configuration" "telemetry" {
 
   # Deliberately no expiry on `fleet/`. It is the bucket's real content and the
   # one thing here a retention rule could actually destroy: the champion-over-time
-  # and drift charts are read at the end of the project and want the first wave's
-  # frames, so any rule short enough to bound cost would delete the earliest data
-  # exactly when it becomes the point. At parquet volumes this is cents a month.
+  # and drift charts are read at the end of the project and want the earliest
+  # cycles' frames, so any rule short enough to bound cost would delete exactly
+  # the data that makes the curve a curve. At parquet volumes this is cents a month.
 }
 
 # ---------------------------------------------------------------------------
@@ -290,6 +290,6 @@ resource "aws_s3_bucket_policy" "other" {
   depends_on = [aws_s3_bucket_public_access_block.this]
 }
 
-# Freezing the two eval cohorts is a deny on their `shards/cohort=eval_*`
-# prefixes, which is expressible only because cohort is a path component rather
-# than a column. It lands with the partitioner, once there are shards to freeze.
+# Freezing the eval cohort is a deny on its `shards/cohort=eval/` prefix, which
+# is expressible only because cohort is a path component rather than a column.
+# It lands with the partitioner, once there are shards to freeze.
