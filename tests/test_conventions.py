@@ -11,6 +11,7 @@ an accidental edit into a loud diff.
 
 import re
 from datetime import UTC, date, datetime, timedelta, timezone
+from enum import StrEnum
 from typing import Any
 
 import pytest
@@ -36,10 +37,14 @@ from edge_ml_flywheel.conventions import (
     RecipeVersion,
     RunId,
     RunRegistration,
+    Scene,
     Seed,
     Selector,
     Split,
     Table,
+    TimeOfDay,
+    Weather,
+    _token,
     assignments_key,
     assignments_prefix,
     columns,
@@ -133,9 +138,9 @@ def a_manifest_row(**overrides: Any) -> ManifestRow:
     values: dict[str, Any] = {
         "image_id": IMAGE,
         "split": Split.TRAIN,
-        "weather": "clear",
-        "scene": "city street",
-        "timeofday": "daytime",
+        "weather": Weather.CLEAR,
+        "scene": Scene.CITY_STREET,
+        "timeofday": TimeOfDay.DAYTIME,
         "n_boxes": 2,
         "box_areas": (120.0, 4800.5),
         "sha256": SHA,
@@ -547,6 +552,68 @@ class TestModelVersions:
     def test_rejects(self, value: str, message: str) -> None:
         with pytest.raises(ValueError, match=message):
             parse_model_version(value)
+
+
+# --- Image tags ---
+
+
+class TestImageTags:
+    """Golden vocabularies, for the reason the layout strings are golden.
+
+    Every eval slice and the selection condition cap is a predicate over these
+    values. A predicate against a tidied-up `dawn-dusk` or a singular
+    `gas station` raises nothing and matches nothing: the slice empties, the cap
+    never binds, and both read downstream as a clean pass. So the spellings are
+    frozen here against the counts they were measured from, and an edit to one
+    is a loud diff rather than a silent hole in the gate.
+    """
+
+    def test_weather_members(self) -> None:
+        assert {w.value for w in Weather} == {
+            "clear",
+            "overcast",
+            "partly cloudy",
+            "rainy",
+            "snowy",
+            "foggy",
+            "undefined",
+        }
+
+    def test_scene_members(self) -> None:
+        assert {s.value for s in Scene} == {
+            "city street",
+            "highway",
+            "residential",
+            "parking lot",
+            "tunnel",
+            "gas stations",
+            "undefined",
+        }
+
+    def test_timeofday_members(self) -> None:
+        assert {t.value for t in TimeOfDay} == {"daytime", "night", "dawn/dusk", "undefined"}
+
+    def test_undefined_is_a_member_of_all_three(self) -> None:
+        # The archive writes it explicitly -- 9,291 images for weather alone --
+        # so it is an observation the source records, not a null.
+        assert (Weather.UNDEFINED, Scene.UNDEFINED, TimeOfDay.UNDEFINED) == (
+            "undefined",
+            "undefined",
+            "undefined",
+        )
+
+    @pytest.mark.parametrize(
+        "tag",
+        [TimeOfDay.DAWN_DUSK, Scene.GAS_STATIONS, Weather.PARTLY_CLOUDY],
+        ids=["a-slash", "a-plural", "a-space"],
+    )
+    def test_a_tag_is_never_an_s3_key_component(self, tag: StrEnum) -> None:
+        # Unlike `Split` and `Cohort`, these values hold slashes and spaces: one
+        # would silently add a path level, the other needs escaping downstream.
+        # So a tag partitions a query and never a prefix, and the key builders
+        # refuse it rather than emitting a key that addresses nothing.
+        with pytest.raises(ValueError, match="not usable as an S3 key component"):
+            _token("tag", tag)
 
 
 # --- Cohorts and splits ---

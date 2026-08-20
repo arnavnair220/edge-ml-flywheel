@@ -24,7 +24,10 @@ from edge_ml_flywheel.conventions import (
     LABEL_SOURCE,
     ImageId,
     ManifestRow,
+    Scene,
     Split,
+    TimeOfDay,
+    Weather,
     columns,
     manifest_key,
     raw_image_key,
@@ -157,12 +160,12 @@ class TestVerifyArchive:
 
 
 class TestParseLabel:
-    def test_reads_the_three_attributes(self) -> None:
+    def test_reads_the_three_attributes_into_their_vocabularies(self) -> None:
         parsed = parse_label(a_label(), IMAGE)
         assert (parsed.weather, parsed.scene, parsed.timeofday) == (
-            "clear",
-            "highway",
-            "daytime",
+            Weather.CLEAR,
+            Scene.HIGHWAY,
+            TimeOfDay.DAYTIME,
         )
 
     def test_areas_are_native_pixels_in_document_order(self) -> None:
@@ -214,6 +217,23 @@ class TestParseLabel:
         attributes = dict(a_label()["attributes"])
         del attributes[attribute]
         with pytest.raises(ValueError, match=f"attribute {attribute!r} is missing"):
+            parse_label(a_label(attributes=attributes), IMAGE)
+
+    @pytest.mark.parametrize(
+        ("attribute", "value"),
+        [
+            ("weather", "drizzle"),
+            ("scene", "gas station"),
+            ("timeofday", "dawn-dusk"),
+        ],
+        ids=["unknown", "the-plural-dropped", "the-slash-tidied"],
+    )
+    def test_rejects_a_value_outside_the_vocabulary(self, attribute: str, value: str) -> None:
+        # The vocabularies were counted over all 80,000 images, so this means the
+        # host is serving different data. Carrying the value through would write a
+        # tag no eval slice can match, and an empty slice reads as a clean pass.
+        attributes = dict(a_label()["attributes"]) | {attribute: value}
+        with pytest.raises(ValueError, match=f"attribute {attribute!r} is {value!r}"):
             parse_label(a_label(attributes=attributes), IMAGE)
 
     @pytest.mark.parametrize(
