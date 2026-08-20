@@ -66,7 +66,7 @@ RecipeVersion = NewType("RecipeVersion", int)
 # ends in the padded cycle: widening it after the first version is minted leaves
 # every existing version unparseable, and those strings are in S3 keys, in
 # `fleet_config`, and in whatever a device last reported. Three digits caps a run
-# at 1,000 cycles against a design that plans seven, so the headroom is not the
+# at 1,000 cycles against a design that plans eight, so the headroom is not the
 # question -- but change it before Phase 3 mints anything, or not at all.
 CYCLE_DIGITS: Final = 3
 PARTITION_VERSION_DIGITS: Final = 3
