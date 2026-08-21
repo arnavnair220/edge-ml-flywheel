@@ -1,0 +1,96 @@
+# Cohort assignment for one partition_version.
+#
+# Run it with:
+#   aws codebuild start-build --project-name edge-ml-flywheel-partition
+#
+# To draw a different version:
+#   aws codebuild start-build --project-name edge-ml-flywheel-partition \
+#     --environment-variables-override name=PARTITION_VERSION,value=1,type=PLAINTEXT
+#
+# Same division of labour as `ingest.yml`: shell copies, and every decision about
+# what the data is goes through the package. No S3 key is written here -- the two
+# prefixes are printed by `partition prefix`, which reads them from
+# `conventions`, so the copy cannot address a path the writer does not use.
+#
+# The seed is not an input. It is a property of `PARTITION_VERSION`, recorded in
+# `conventions.PARTITIONS`, and there is no flag to override it.
+
+version: 0.2
+
+env:
+  variables:
+    WORK: /tmp/partition
+
+    # Overridden by the project's environment (see infra/partition.tf) and
+    # overridable again per build. Repeated here so the file runs on its own.
+    PARTITION_VERSION: "0"
+
+    # Pinned for `ingest.yml`'s reason: every step runs against exactly what the
+    # install phase produced rather than against uv's sync semantics.
+    UV_NO_SYNC: "1"
+
+phases:
+  install:
+    commands:
+      - curl -LsSf https://astral.sh/uv/0.11.25/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+      # The `ingest` group, which is where `pyarrow` lives. Both data jobs read
+      # and write parquet, so the group serves both.
+      - uv sync --frozen --group ingest
+      - uv run python -c "import sys; print(sys.version)"
+
+  pre_build:
+    commands:
+      - mkdir -p "$WORK/stage"
+
+      # Prefixes out of the package, so this file holds none. `prefix` writes to
+      # stdout and logging to stderr, the way `ingest url` does.
+      - MANIFEST_PREFIX=$(uv run python -m edge_ml_flywheel.partition prefix manifest)
+      - PARTITION_PREFIX=$(uv run python -m edge_ml_flywheel.partition prefix partition --partition-version "$PARTITION_VERSION")
+      - echo "reading $MANIFEST_PREFIX"
+      - echo "writing $PARTITION_PREFIX"
+
+      # Staged at the key it has in S3, so the partitioner finds it exactly where
+      # `conventions` says it is.
+      - aws s3 cp "s3://$DATA_BUCKET/$MANIFEST_PREFIX" "$WORK/stage/$MANIFEST_PREFIX" --recursive --only-show-errors
+      - ls -l "$WORK/stage/$MANIFEST_PREFIX"
+
+      # The redraw guard. If this version has already been drawn, its recorded
+      # seed, sizes and draw rule must be the ones in this commit -- the
+      # assignments in the bucket are what every run keyed to this version was
+      # measured against, so an edited seed here is a new version and not a
+      # re-run of this one.
+      #
+      # `|| true` because absent is the ordinary first-run case and `aws s3 cp`
+      # exits 1 on a missing key; `verify-recorded` treats a missing file as the
+      # first run and a present one as something to check. Copied to $WORK rather
+      # than into the staged tree, which is what gets uploaded.
+      - aws s3 cp "s3://$DATA_BUCKET/${PARTITION_PREFIX}_partition.json" "$WORK/recorded.json" --only-show-errors || true
+      - uv run python -m edge_ml_flywheel.partition verify-recorded --recorded "$WORK/recorded.json" --partition-version "$PARTITION_VERSION"
+
+  build:
+    commands:
+      # Reads the manifest, draws the cohorts, asserts the partition is disjoint
+      # and complete, and writes both files. The assertion runs before either
+      # file exists, so a failure here uploads nothing.
+      - uv run python -m edge_ml_flywheel.partition assign --stage-dir "$WORK/stage" --partition-version "$PARTITION_VERSION"
+      - ls -lR "$WORK/stage/$PARTITION_PREFIX"
+
+  post_build:
+    commands:
+      # post_build runs whether or not build succeeded, and this phase writes to
+      # the bucket. This is the guard.
+      - test "$CODEBUILD_BUILD_SUCCEEDING" = "1"
+
+      # Two objects, and only the partition prefix: the manifest was copied into
+      # the staged tree to be read, and writing it back is a permission this role
+      # deliberately does not hold.
+      - PARTITION_PREFIX=$(uv run python -m edge_ml_flywheel.partition prefix partition --partition-version "$PARTITION_VERSION")
+      - aws s3 cp "$WORK/stage/$PARTITION_PREFIX" "s3://$DATA_BUCKET/$PARTITION_PREFIX" --recursive --only-show-errors
+      - aws s3 ls "s3://$DATA_BUCKET/$PARTITION_PREFIX" --recursive
+
+      # Read back what landed and check it against the code, which is the same
+      # comparison the guard above makes and here confirms the upload: the
+      # document in the bucket now describes the partition this commit draws.
+      - aws s3 cp "s3://$DATA_BUCKET/${PARTITION_PREFIX}_partition.json" "$WORK/uploaded.json" --only-show-errors
+      - uv run python -m edge_ml_flywheel.partition verify-recorded --recorded "$WORK/uploaded.json" --partition-version "$PARTITION_VERSION"

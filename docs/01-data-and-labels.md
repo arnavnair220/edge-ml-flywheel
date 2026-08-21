@@ -228,6 +228,34 @@ and the scale threshold belongs to the evaluation module that owns the metric: a
 percent of every box in the pool is small by the COCO rule, so the threshold moves such a slice far
 more than any partition choice does.
 
+### Execution environment
+
+The partitioner runs in CodeBuild under its own role, not ingest's. It reads `derived/manifest/` and
+writes one `derived/partition_version=` prefix. It holds no grant on `raw/` and appears in neither
+the raw-writer nor the label-reader allowlist, so the bucket policy denies it both.
+
+`buildspecs/partition.yml` defines the sequence and contains no S3 keys: `partition prefix` prints
+both prefixes out of `conventions`, and each copy is a recursive copy of one of them. The manifest is
+staged at the key it has in S3, so the partitioner reads it where `conventions` says it is.
+
+Three properties of the sequence:
+
+- A version already in the bucket is checked against this commit before it is redrawn. A re-run of
+  an unchanged version is byte-identical; an edited seed would replace the assignments every
+  existing run was measured against.
+- The upload covers the partition prefix only. The manifest was staged to be read, and writing it
+  back is a permission the role does not hold.
+- The uploaded document is read back and re-checked, applying the pre-draw comparison to what
+  landed.
+
+```
+aws codebuild start-build --project-name edge-ml-flywheel-partition
+```
+
+There is no webhook: a push to `main` is not a reason to redraw the partition. `PARTITION_VERSION`
+selects the version, defaults to 0, and is overridable per build; a value outside
+`conventions.PARTITIONS` is refused before the manifest is read.
+
 ---
 
 ## Selection and purchase

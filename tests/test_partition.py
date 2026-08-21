@@ -366,7 +366,76 @@ class TestWrite:
 # --- The command line ---
 
 
+class TestRecorded:
+    """The guard on redrawing a version that is already in the bucket."""
+
+    def test_a_matching_record_agrees(self) -> None:
+        spec = partition_spec(V0)
+        assert partition.disagreements(partition.document(V0, spec), V0, spec) == ()
+
+    def test_the_written_document_agrees_with_itself(self, tmp_path: Path) -> None:
+        # `drawn_at` is in the file and not in the comparison, so a re-run of one
+        # version agrees with what it wrote last time.
+        spec = partition_spec(V0)
+        path = tmp_path / "_partition.json"
+        partition.write_document(V0, spec, path)
+        recorded = json.loads(path.read_text(encoding="utf-8"))
+        assert "drawn_at" in recorded
+        assert partition.disagreements(recorded, V0, spec) == ()
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("seed", 20260820),
+            ("draw", "uniform shuffle with random.sample"),
+            ("cohorts", {"eval": {"images": 10_000, "split": "val"}}),
+        ],
+        ids=["an-edited-seed", "an-edited-rule", "an-edited-size"],
+    )
+    def test_an_edited_version_disagrees(self, field: str, value: object) -> None:
+        # Each of the three changes the assignment under a key every existing run
+        # is measured against, which is what makes it a new version.
+        spec = partition_spec(V0)
+        recorded = partition.document(V0, spec) | {field: value}
+        assert partition.disagreements(recorded, V0, spec) == (field,)
+
+    def test_a_missing_record_is_the_first_run(self, tmp_path: Path) -> None:
+        main(
+            [
+                "verify-recorded",
+                "--recorded",
+                str(tmp_path / "absent.json"),
+                "--partition-version",
+                "0",
+            ]
+        )
+
+    def test_an_edited_seed_stops_the_build(self, tmp_path: Path) -> None:
+        path = tmp_path / "_partition.json"
+        path.write_text(
+            json.dumps(partition.document(V0, partition_spec(V0)) | {"seed": 1}), encoding="utf-8"
+        )
+        with pytest.raises(
+            SystemExit, match="already recorded in the bucket with a different seed"
+        ):
+            main(["verify-recorded", "--recorded", str(path), "--partition-version", "0"])
+
+
 class TestCli:
+    def test_the_manifest_prefix_is_printed(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # Printed rather than spelled in the buildspec, so the copy and the writer
+        # cannot disagree about where the manifest is.
+        main(["prefix", "manifest"])
+        assert capsys.readouterr().out.strip() == "derived/manifest/"
+
+    def test_the_partition_prefix_is_printed(self, capsys: pytest.CaptureFixture[str]) -> None:
+        main(["prefix", "partition", "--partition-version", "0"])
+        assert capsys.readouterr().out.strip() == "derived/partition_version=v000/"
+
+    def test_the_partition_prefix_needs_a_version(self) -> None:
+        with pytest.raises(SystemExit, match="keyed by a version"):
+            main(["prefix", "partition"])
+
     def test_the_version_is_required(self) -> None:
         with pytest.raises(SystemExit):
             _parser().parse_args(["assign", "--stage-dir", "."])

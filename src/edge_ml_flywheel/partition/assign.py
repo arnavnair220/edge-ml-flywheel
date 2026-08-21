@@ -26,7 +26,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -70,6 +70,12 @@ _MANIFEST_COLUMNS: Final = ("image_id", "split", *_TAG_COLUMNS)
 # proportional sampling is the claim overall mAP rests on, and `pool` because its
 # tag shares are the reference line every cycle's purchase mix is read against.
 _REPORTED_COHORTS: Final = (Cohort.EVAL, Cohort.POOL)
+
+# Recorded in `_partition.json`, and compared when a partition already in the
+# bucket is checked against this code: a seed reproduces a draw only for someone
+# who knows what was done with it, so a changed rule under an unchanged version
+# is the same failure as a changed seed.
+DRAW_RULE: Final = "per split, ascending sha256(seed:image_id), quotas in cohort order"
 
 
 def read_manifest(stage_dir: Path) -> pa.Table:
@@ -228,6 +234,24 @@ def write_parquet(rows: Sequence[AssignmentRow], path: Path) -> None:
     pq.write_table(pa.table(data, schema=SCHEMA), path, compression=_COMPRESSION)
 
 
+def document(partition_version: PartitionVersion, spec: PartitionSpec) -> dict[str, Any]:
+    """A partition's description of itself, everything but when it was drawn.
+
+    Split out from the writer so that the comparison below reads the fields the
+    writer writes. Two spellings of this shape would let a recorded partition and
+    a spec agree on the fields someone remembered to compare.
+    """
+    return {
+        "partition_version": int(partition_version),
+        "seed": int(spec.seed),
+        "draw": DRAW_RULE,
+        "cohorts": {
+            cohort.value: {"images": spec.sizes[cohort], "split": COHORT_SPLIT[cohort].value}
+            for cohort in COHORT_SPLIT
+        },
+    }
+
+
 def write_document(partition_version: PartitionVersion, spec: PartitionSpec, path: Path) -> None:
     """Record the seed beside the assignments it produced.
 
@@ -236,26 +260,26 @@ def write_document(partition_version: PartitionVersion, spec: PartitionSpec, pat
     done with it.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "partition_version": int(partition_version),
-                "seed": int(spec.seed),
-                "draw": "per split, ascending sha256(seed:image_id), quotas in cohort order",
-                "drawn_at": datetime.now(UTC).isoformat(),
-                "cohorts": {
-                    cohort.value: {
-                        "images": spec.sizes[cohort],
-                        "split": COHORT_SPLIT[cohort].value,
-                    }
-                    for cohort in COHORT_SPLIT
-                },
-            },
-            indent=2,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
+    payload = document(partition_version, spec) | {"drawn_at": datetime.now(UTC).isoformat()}
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def disagreements(
+    recorded: Mapping[str, Any], partition_version: PartitionVersion, spec: PartitionSpec
+) -> tuple[str, ...]:
+    """Fields where a partition already in the bucket contradicts this code.
+
+    Empty means a re-run would reproduce what is there, which is the only case in
+    which overwriting it is safe. `PartitionSpec` says to add a version rather
+    than edit one; this is what makes that enforceable instead of remembered,
+    because an edited seed produces a partition that is valid, differently drawn,
+    and keyed identically to the one every existing run was measured against.
+
+    Field names rather than a bool, for `ModelManifest.disagreements`' reason: a
+    refusal is only actionable with the field that caused it.
+    """
+    expected = document(partition_version, spec)
+    return tuple(name for name, value in expected.items() if recorded.get(name) != value)
 
 
 def composition(
