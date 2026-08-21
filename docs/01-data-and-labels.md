@@ -149,8 +149,8 @@ rather than a re-deploy.
 ## Partition
 
 The partitioner runs once per `partition_version` and assigns each of the 80,000 images to exactly
-one cohort. The assignment is disjoint and complete, so `cohort=` is valid as a storage prefix; the
-Phase 1 partition assertion checks both properties.
+one cohort. The assignment is disjoint and complete, so `cohort=` is valid as a storage prefix; both
+properties are asserted before either output file is written.
 
 | Cohort | Images | Split | Labels |
 |---|---:|---|---|
@@ -166,6 +166,37 @@ Phase 1 partition assertion checks both properties.
 | `reserve` exists and is left alone | Growing the eval set mid-run invalidates every earlier cycle's comparison, so a larger eval has to be a next-run decision rather than a dead end |
 | No condition is withheld from the pool | The pool is IID across weather, scene and time of day from cycle one, so any concentration in what gets bought comes from the selector rather than a release schedule |
 
+### The draw
+
+`conventions.PARTITIONS` records the seed and the four cohort sizes per `partition_version`, and the
+partitioner takes a version and no other argument. Within a split, images are ordered by
+`sha256(<seed>:<image_id>)` and each cohort takes the next `n`; `COHORT_SPLIT` fixes which split a
+cohort draws from and the order the cohorts draw in. No predicate over `weather`, `scene` or
+`timeofday` appears in the assignment.
+
+| Property | Rationale |
+|---|---|
+| The seed is a property of the version, not a run argument | Every cycle's result is conditional on which 8,000 images the champion started from. A per-run seed is a number that can be mistyped into a partition that is valid, different and indistinguishable from the intended one |
+| A digest per image rather than a shuffle of the split | A shuffle depends on the order its input arrived in, and the manifest is built by walking a directory, so a re-ingest that lists files differently would repartition the dataset under the same seed. A digest also removes the dependency on `random`, whose sampling algorithm CPython does not fix across versions |
+| Cohort sizes are recorded per version alongside the seed | Growing `eval` moves the ruler earlier cycles were measured against, so it is a new version rather than a re-run of an existing one |
+| `eval` draws before `reserve`, `bootstrap` before `pool` | A later version that spends the reserve at the same seed holds every earlier `eval` image, so a larger eval adds images rather than exchanging them |
+| Rows are sorted by `image_id` on output | Two runs of one version produce byte-identical parquet, so "this is the same partition" is a checksum rather than a claim |
+
+The partition assertion covers 80,000 rows, unique `image_id`, every manifest ID assigned, each
+cohort at its specified size, and no cohort holding an image from the other split. It runs against
+the manifest rather than against the draw's own bookkeeping, and it runs before either file is
+written.
+
+Output is `assignments/part-00000.parquet` (715 KB) and `_partition.json`, which records the seed,
+the sizes and the draw rule. The JSON duplicates the `PARTITIONS` entry, which stays authoritative,
+and exists so the seed is answerable from the bucket rather than from a source checkout at an unknown
+commit. Realized cohort compositions are logged rather than stored, since they are a query over the
+manifest joined to the assignments.
+
+```
+python -m edge_ml_flywheel.partition assign --stage-dir ./stage --partition-version 0
+```
+
 ### Eval stratification
 
 `eval` is sampled in proportion to the pool rather than balanced across conditions, so that overall
@@ -173,12 +204,18 @@ mAP is the fleet-weighted number it appears to be. Proportional sampling of 5,00
 
 | Axis | Slice | Images | Axis | Slice | Images |
 |---|---|---:|---|---|---:|
-| `weather` | `clear` | 2,673 | `scene` | `city street` | 3,106 |
-| | `overcast` | 627 | | `highway` | 1,245 |
+| `weather` | `clear` | 2,672 | `scene` | `city street` | 3,106 |
+| | `overcast` | 626 | | `highway` | 1,244 |
 | | `undefined` | 581 | | `residential` | 585 |
 | | `snowy` | 396 | `timeofday` | `daytime` | 2,629 |
-| | `rainy` | 364 | | `night` | 1,998 |
+| | `rainy` | 364 | | `night` | 1,997 |
 | | `partly cloudy` | 352 | | `dawn/dusk` | 363 |
+
+Each axis sums to exactly 5,000, by largest-remainder apportionment rather than independent rounding
+of each share, which would leave the three axes disagreeing about the cohort's size. The targets are
+proportions of the 80,000-image pool but are drawn from `val` alone, so each is bounded by `val`'s own
+count for that slice; `val` tracks the pool within 1.0 point on every tag value, and the tightest
+slice, `snowy`, needs 396 against 769 available.
 
 A slice is gated only if it holds at least 300 images. Below that the bootstrap noise band is wide
 enough to admit almost any delta and the gate stops discriminating. Twelve slices clear the floor.

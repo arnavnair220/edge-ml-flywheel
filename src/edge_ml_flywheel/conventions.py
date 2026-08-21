@@ -47,6 +47,13 @@ PartitionVersion = NewType("PartitionVersion", int)
 Cycle = NewType("Cycle", int)
 Seed = NewType("Seed", int)
 
+# The partitioner's draw seed, kept distinct from `Seed` because the two are
+# different numbers with different lifetimes. `Seed` is a training seed, one of
+# the five a cycle trains, and a path component capped at one digit by
+# `SEED_DIGITS`; a draw seed appears in no key, is fixed once per partition
+# version, and is six digits wider than that cap allows.
+PartitionSeed = NewType("PartitionSeed", int)
+
 RunId = NewType("RunId", str)
 
 # `<run_id>-c<cycle>`. Built out of the run-id machinery, so the format itself is
@@ -554,6 +561,103 @@ class Cohort(StrEnum):
 # shard. What a cycle buys out of the pool is sharded under its run instead.
 SHARDED_COHORTS: Final = frozenset({Cohort.BOOTSTRAP, Cohort.EVAL})
 
+# Which split each cohort draws from: everything trainable out of `train`,
+# everything held out of `val`. The leakage rule as data rather than as a
+# predicate somewhere in the partitioner, so a leakage question is answered by
+# naming a cohort's source instead of re-deriving an image-ID set.
+#
+# Declaration order is draw order within a split, which is what a later partition
+# version inherits. `eval` before `reserve` means a version that grows `eval` at
+# the same seed holds every earlier `eval` image, and `bootstrap` before `pool`
+# the same for a larger bootstrap.
+COHORT_SPLIT: Final[Mapping[Cohort, Split]] = {
+    Cohort.BOOTSTRAP: Split.TRAIN,
+    Cohort.POOL: Split.TRAIN,
+    Cohort.EVAL: Split.VAL,
+    Cohort.RESERVE: Split.VAL,
+}
+
+
+# --- Partition versions -------------------------------------------------------
+#
+# A partition version is not a label attached to whatever the partitioner did on
+# some afternoon; it is the draw. One seed and four cohort sizes produce one
+# assignment of the 80,000 images, so both are recorded here per version and the
+# partitioner takes a version and nothing else.
+#
+# **The seed is the irreversible half.** Every cycle's numbers are conditional on
+# which 8,000 images the champion started from, and an unrecorded seed makes that
+# set unrecoverable. A `--seed` flag would be a number a hand can mistype into a
+# partition that is valid, different, and indistinguishable from the intended
+# one; there is no flag, so a version can only be drawn one way.
+#
+# **Sizes belong beside it.** Growing `eval` moves the ruler every earlier cycle
+# was measured against, so it is a new version rather than a re-run of an
+# existing one -- which is only expressible if a version fixes its sizes.
+
+
+@dataclass(frozen=True, slots=True)
+class PartitionSpec:
+    """What one `partition_version` means. Add a version, never edit one.
+
+    Editing an entry re-defines a partition that has already been drawn, and
+    every artifact keyed by that version disagrees with it from then on.
+    """
+
+    seed: PartitionSeed
+    sizes: Mapping[Cohort, int]
+
+    def __post_init__(self) -> None:
+        missing = sorted(cohort.value for cohort in set(Cohort) - set(self.sizes))
+        if missing:
+            raise ValueError(f"partition spec sizes no cohort: {missing}")
+        negative = {cohort.value: size for cohort, size in self.sizes.items() if size < 0}
+        if negative:
+            raise ValueError(f"partition spec sizes a cohort negatively: {negative}")
+
+    def quotas(self, split: Split) -> tuple[tuple[Cohort, int], ...]:
+        """The cohorts drawing from one split, in draw order, with their sizes."""
+        return tuple(
+            (cohort, self.sizes[cohort])
+            for cohort, source in COHORT_SPLIT.items()
+            if source is split
+        )
+
+
+PARTITIONS: Final[Mapping[PartitionVersion, PartitionSpec]] = {
+    # The sizes are the decision, and each one is load-bearing on its own.
+    # `eval` at 5,000 is what puts twelve slices over the 300-image gating floor;
+    # `bootstrap` at 8,000 leaves the model headroom for a 1,000-label cycle to
+    # move the metric; `pool` at 62,000 makes one cycle 1.6% of what was scored,
+    # which is the selectivity a ranking needs to diverge from a random draw.
+    #
+    # The seed is the date the cohort sizes were settled, which is a way of
+    # saying it means nothing -- recorded so that its arbitrariness is on the
+    # record and nobody improves it.
+    PartitionVersion(0): PartitionSpec(
+        seed=PartitionSeed(20260819),
+        sizes={
+            Cohort.BOOTSTRAP: 8_000,
+            Cohort.POOL: 62_000,
+            Cohort.EVAL: 5_000,
+            Cohort.RESERVE: 5_000,
+        },
+    ),
+}
+
+
+def partition_spec(partition_version: PartitionVersion) -> PartitionSpec:
+    """The seed and sizes a version is drawn with, or a refusal.
+
+    A version nobody wrote down is a partition nobody can reproduce, so it is a
+    partition nobody can write.
+    """
+    spec = PARTITIONS.get(partition_version)
+    if spec is None:
+        listed = ", ".join(str(version) for version in sorted(PARTITIONS))
+        raise ValueError(f"partition version {partition_version} is not defined. Defined: {listed}")
+    return spec
+
 
 class ModelArtifact(StrEnum):
     """Filenames under a seed's model prefix."""
@@ -790,6 +894,21 @@ def partition_prefix(partition_version: PartitionVersion) -> str:
     """Keyed by partition version so a re-partition writes alongside, not over."""
     version = _padded("partition_version", partition_version, PARTITION_VERSION_DIGITS)
     return f"derived/partition_version=v{version}/"
+
+
+def partition_manifest_key(partition_version: PartitionVersion) -> str:
+    """The seed and sizes the assignments beside it were drawn with.
+
+    Underscore-prefixed for `RAW_PROVENANCE_PREFIX`'s reason: Glue and Athena
+    skip paths beginning with `_`, so a crawler over the partition prefix reads
+    `assignments/` and walks past this.
+
+    A copy of the `PARTITIONS` entry, which stays authoritative. Written anyway,
+    because the question "which seed produced these 80,000 rows" is asked by
+    someone looking at a bucket, and answering it from a source checkout requires
+    knowing which commit was current when the partitioner ran.
+    """
+    return f"{partition_prefix(partition_version)}_partition.json"
 
 
 def assignments_prefix(partition_version: PartitionVersion) -> str:
