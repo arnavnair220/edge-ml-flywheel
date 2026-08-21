@@ -318,6 +318,21 @@ class RunRegistration:
     able to say which rule bought the labels -- but it is deliberately outside
     `supersedes`, for the reason that method gives.
 
+    `label_budget_per_cycle` is the *rule*, and `Table.LABEL_BUDGET` holds what
+    is left of it. Those are different facts and only one of them is durable: a
+    budget item is a counter the oracle decrements, so it says a cycle has 400
+    labels left and never that the cycle was allowed 1,000. Summing purchases
+    afterwards recovers what was spent, not what was permitted, and the two
+    differ in exactly the case worth auditing -- a cycle that could not spend its
+    cap. Model improvement per label spent is the headline number, so the
+    denominator's rule is recorded where the run's other preconditions are.
+
+    Being on a write-once item makes the budget fixed for the run, which is the
+    intended constraint rather than a side effect: a budget raised at cycle four
+    makes the per-cycle curve before and after it two different measurements
+    plotted on one axis. A different budget is a different run, which is cheap --
+    it shares the partition and the frozen eval.
+
     `note` is free text and the only unstructured field: the reason this run was
     started, which is exactly the thing no schema anticipates and no artifact
     records.
@@ -330,6 +345,7 @@ class RunRegistration:
     class_set_version: ClassSetVersion
     recipe_version: RecipeVersion
     selector: Selector
+    label_budget_per_cycle: int
     note: str
 
     def __post_init__(self) -> None:
@@ -338,6 +354,13 @@ class RunRegistration:
             raise ValueError(f"created_at must be timezone-aware: {self.created_at!r}")
         if not _GIT_COMMIT.match(self.git_commit):
             raise ValueError(f"not a full 40-character git commit SHA: {self.git_commit!r}")
+        # Zero is refused rather than treated as a dry run. A run that can buy
+        # nothing trains the same model every cycle, and the loop reports eight
+        # clean no-change cycles rather than a configuration error.
+        if self.label_budget_per_cycle <= 0:
+            raise ValueError(
+                f"label budget per cycle must be positive: {self.label_budget_per_cycle}"
+            )
 
     def supersedes(self, other: "RunRegistration") -> bool:
         """True when `other`'s cached comparisons cannot carry into this run.

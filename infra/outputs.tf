@@ -54,6 +54,16 @@ output "partition_project_name" {
   value       = aws_codebuild_project.partition.name
 }
 
+output "register_role_arn" {
+  description = "Run registration. PutItem and GetItem on the runs table, and no S3 at all."
+  value       = aws_iam_role.register.arn
+}
+
+output "register_project_name" {
+  description = "Start a run with: aws codebuild start-build --project-name <this>, RUN_SLUG and RUN_NOTE overridden."
+  value       = aws_codebuild_project.register.name
+}
+
 # PENDING until the GitHub App authorization is completed by hand in the
 # console. An output rather than a note in a doc, because it is the one piece of
 # this stack that applying cannot finish, and a build against a pending

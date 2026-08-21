@@ -111,6 +111,7 @@ def a_registration(**overrides: Any) -> RunRegistration:
         "class_set_version": ClassSetVersion(1),
         "recipe_version": RecipeVersion(1),
         "selector": Selector.UNCERTAINTY,
+        "label_budget_per_cycle": 1000,
         "note": "first skeleton run",
     }
     return RunRegistration(**(values | overrides))
@@ -488,6 +489,21 @@ class TestRunRegistration:
     def test_rejects_a_bad_git_commit(self, commit: str) -> None:
         with pytest.raises(ValueError, match="40-character git commit"):
             a_registration(git_commit=commit)
+
+    @pytest.mark.parametrize("budget", [0, -1], ids=["zero", "negative"])
+    def test_rejects_a_non_positive_label_budget(self, budget: int) -> None:
+        with pytest.raises(ValueError, match="must be positive"):
+            a_registration(label_budget_per_cycle=budget)
+
+    def test_the_label_budget_does_not_supersede(self) -> None:
+        """A budget change is a new run, but not a re-baseline of the champion.
+
+        Same reasoning as `selector`: the trio fixes the data universe and the
+        metric, and neither of those moves when a run buys 2,000 labels a cycle
+        instead of 1,000. Adding this to `supersedes` would discard the shared
+        baseline that makes two runs comparable.
+        """
+        assert a_registration(label_budget_per_cycle=2000).supersedes(a_registration()) is False
 
     def test_an_identical_trio_does_not_supersede(self) -> None:
         assert a_registration().supersedes(a_registration()) is False
