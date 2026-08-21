@@ -44,6 +44,16 @@ output "ingest_project_name" {
   value       = aws_codebuild_project.ingest.name
 }
 
+output "partition_role_arn" {
+  description = "Cohort assignment. Reads derived/manifest/, writes one partition version, no raw/."
+  value       = aws_iam_role.partition.arn
+}
+
+output "partition_project_name" {
+  description = "Start a draw with: aws codebuild start-build --project-name <this>."
+  value       = aws_codebuild_project.partition.name
+}
+
 # PENDING until the GitHub App authorization is completed by hand in the
 # console. An output rather than a note in a doc, because it is the one piece of
 # this stack that applying cannot finish, and a build against a pending
