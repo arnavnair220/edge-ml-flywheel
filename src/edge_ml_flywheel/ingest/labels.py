@@ -22,25 +22,28 @@ into a silent drop. Legacy calls them `person`/`motor`/`bike` where `det_20`
 says `pedestrian`/`motorcycle`/`bicycle`, which is exactly the kind of list
 worth not having written down twice. The categories that *did* carry boxes are
 counted and recorded in the integrity report, so the vocabulary is measured
-rather than asserted -- the same treatment `weather`, `scene` and `timeofday`
-already get.
+rather than asserted.
 
-**Everything else is strict and raises.** A missing attribute, a second frame, a
-label naming a different image: each of those means the archive is not what this
-code was written against, and the one thing worse than failing an hour-long
-ingest is completing it with a manifest nobody can trust.
+`weather`, `scene` and `timeofday` are the deliberate opposite: measured once and
+then written down, as the vocabularies in `conventions`. The difference is what
+reads them. No predicate is written against a box category here -- naming the
+classes is `class_set_version`'s job downstream -- whereas every eval slice and
+the selection condition cap is a predicate over the three tags, and a predicate
+is exactly what an enum protects.
+
+**Everything else is strict and raises.** A missing attribute, a tag outside its
+vocabulary, a second frame, a label naming a different image: each of those means
+the archive is not what this code was written against, and the one thing worse
+than failing an hour-long ingest is completing it with a manifest nobody can
+trust.
 """
 
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Any, Final
 
-from edge_ml_flywheel.conventions import ImageId
-
-# The three the eval slices are defined over. Every one is required to be present: the
-# archive uses an explicit "undefined" where a value is unknown, so an absent
-# key is a malformed document rather than a missing observation.
-ATTRIBUTES: Final = ("weather", "scene", "timeofday")
+from edge_ml_flywheel.conventions import ImageId, Scene, TimeOfDay, Weather
 
 _CORNERS: Final = ("x1", "y1", "x2", "y2")
 
@@ -61,26 +64,51 @@ class ParsedLabel:
     """
 
     image_id: ImageId
-    weather: str
-    scene: str
-    timeofday: str
+    weather: Weather
+    scene: Scene
+    timeofday: TimeOfDay
     box_areas: tuple[float, ...]
     box_categories: tuple[str, ...]
     degenerate_boxes: int
 
 
-def _attributes(document: dict[str, Any], image_id: ImageId) -> dict[str, str]:
+def _attributes(document: dict[str, Any], image_id: ImageId) -> dict[str, Any]:
     attributes = document.get("attributes")
     if not isinstance(attributes, dict):
         raise ValueError(f"{image_id}: label has no attributes object")
+    return attributes
 
-    values: dict[str, str] = {}
-    for key in ATTRIBUTES:
-        value = attributes.get(key)
-        if not isinstance(value, str):
-            raise ValueError(f"{image_id}: attribute {key!r} is missing or not a string")
-        values[key] = value
-    return values
+
+def _tag[Tag: StrEnum](
+    attributes: dict[str, Any], key: str, vocabulary: type[Tag], image_id: ImageId
+) -> Tag:
+    """Read one of the three tag attributes into its vocabulary.
+
+    Required to be present, because the archive writes an explicit `undefined`
+    where a value is unknown -- so an absent key is a malformed document rather
+    than a missing observation, and `undefined` is a member rather than a null.
+
+    Unlisted values raise too. The vocabularies in `conventions` were counted
+    over all 80,000 images, so a value outside one does not mean a member was
+    overlooked; it means the host is serving data this code was not written
+    against, which is worth failing an hour-long ingest over. Carrying it through
+    would put a tag in the manifest that no eval slice and no condition cap can
+    ever match, and an empty slice reads downstream as a clean pass.
+
+    Generic over the vocabulary so each of the three returns its own type. A
+    common `StrEnum` return would type-check a weather value into the scene
+    column.
+    """
+    value = attributes.get(key)
+    if not isinstance(value, str):
+        raise ValueError(f"{image_id}: attribute {key!r} is missing or not a string")
+    try:
+        return vocabulary(value)
+    except ValueError:
+        listed = ", ".join(member.value for member in vocabulary)
+        raise ValueError(
+            f"{image_id}: attribute {key!r} is {value!r}, which is not one of: {listed}"
+        ) from None
 
 
 def _objects(document: dict[str, Any], image_id: ImageId) -> list[Any]:
@@ -160,9 +188,9 @@ def parse_label(document: Any, image_id: ImageId) -> ParsedLabel:
 
     return ParsedLabel(
         image_id=image_id,
-        weather=attributes["weather"],
-        scene=attributes["scene"],
-        timeofday=attributes["timeofday"],
+        weather=_tag(attributes, "weather", Weather, image_id),
+        scene=_tag(attributes, "scene", Scene, image_id),
+        timeofday=_tag(attributes, "timeofday", TimeOfDay, image_id),
         box_areas=tuple(areas),
         box_categories=tuple(categories),
         degenerate_boxes=degenerate,

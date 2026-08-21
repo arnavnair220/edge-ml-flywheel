@@ -446,6 +446,67 @@ def model_version_cycle(version: ModelVersion) -> Cycle:
     return _locate(version)[1]
 
 
+# --- Image tags ---------------------------------------------------------------
+#
+# The three BDD100K attributes the eval slices and the selection condition cap
+# are written against. Each vocabulary is exhaustive because it was counted over
+# all 80,000 images rather than recalled, which is also what makes an unexpected
+# value at ingest a statement that the archive changed rather than a gap here.
+#
+# **Values are the archive's own spellings, carried verbatim.** `dawn/dusk` holds
+# a slash, four members hold a space, and `gas stations` is plural. Which is the
+# one way these differ from `Split` and `Cohort`: a tag is never an S3 key
+# component -- a slash would silently add a path level and a space needs escaping
+# somewhere downstream -- so a tag partitions a query and never a prefix.
+# `_token` refuses every one of them, so the mistake fails at the key builder
+# rather than producing a key that addresses nothing.
+#
+# **`undefined` is a member of all three.** The archive states it explicitly --
+# 9,291 images for `weather` alone -- so it is an observation the source records,
+# not a value it withholds. A vocabulary omitting it would reject data that is
+# genuinely fine, and a nullable column would put two spellings of the same fact
+# in one place.
+
+
+class Weather(StrEnum):
+    """Pool shares run from `clear` at 53% down to `foggy` at 143 images.
+
+    That spread is why the regression gate carries a slice floor rather than
+    gating every member it can name: `foggy` is not measurable at any eval size
+    drawn from this archive, so a slice too small to discriminate is reported and
+    never vetoes (design section 4.4).
+    """
+
+    CLEAR = "clear"
+    OVERCAST = "overcast"
+    PARTLY_CLOUDY = "partly cloudy"
+    RAINY = "rainy"
+    SNOWY = "snowy"
+    FOGGY = "foggy"
+    UNDEFINED = "undefined"
+
+
+class Scene(StrEnum):
+    """`GAS_STATIONS` is plural, which is the archive's spelling and not a typo."""
+
+    CITY_STREET = "city street"
+    HIGHWAY = "highway"
+    RESIDENTIAL = "residential"
+    PARKING_LOT = "parking lot"
+    TUNNEL = "tunnel"
+    GAS_STATIONS = "gas stations"
+    UNDEFINED = "undefined"
+
+
+class TimeOfDay(StrEnum):
+    """`DAWN_DUSK` is one value, `dawn/dusk`, not two joined by a separator."""
+
+    DAYTIME = "daytime"
+    NIGHT = "night"
+    DAWN_DUSK = "dawn/dusk"
+    UNDEFINED = "undefined"
+
+
 # --- Cohorts and splits ------------------------------------------------------
 
 
@@ -636,19 +697,14 @@ class ManifestRow:
     stratification, per-slice counts. It has to exist before the shards, which
     cannot be written until the partitioner has assigned cohorts.
 
-    `weather`, `scene` and `timeofday` are `str` **for now**. Their vocabularies
-    are a property of the archive, to be measured rather than asserted from
-    memory -- BDD100K carries an `undefined` value and at least one scene member
-    people habitually mis-remember -- so an enum written today is a guess that
-    fails ingest on data that is genuinely fine.
-
-    The counts have since been measured, so the members are known. They become
-    enums with the partitioner, which is the first code to filter on them: eval
-    stratification and the per-slice floors are written against these values, so
-    the members and their first reader belong in one change. Deferring cost
-    nothing -- `StrEnum` serializes to the identical string, so the parquet column
-    stays `string` and adopting enums is a parse-boundary change with no
-    re-ingest and no migration.
+    `weather`, `scene` and `timeofday` are enums because their vocabularies were
+    measured over all 80,000 images before being written down. Eval
+    stratification and the selection condition cap are predicates over these
+    three columns, and a misspelled tag is the one kind of wrong predicate that
+    does not fail: it matches nothing, so the slice empties or the cap never
+    binds, and both read downstream as a clean pass. The parquet column stays
+    `string` either way -- `StrEnum` serializes to the identical value -- so the
+    typing is a parse-boundary guarantee bought without a re-ingest.
 
     `sha256` is over the image bytes. Design section 4.1's data gate and section
     6's artifact verification both need the raw data content-addressed.
@@ -674,9 +730,9 @@ class ManifestRow:
 
     image_id: ImageId
     split: Split
-    weather: str
-    scene: str
-    timeofday: str
+    weather: Weather
+    scene: Scene
+    timeofday: TimeOfDay
     n_boxes: int
     box_areas: tuple[float, ...]
     sha256: str

@@ -76,9 +76,15 @@ One row per image: `image_id`, `split`, `weather`, `scene`, `timeofday`, `n_boxe
 - **No `cohort` column.** Cohort assignment is a function of the partition, not the archive, and is
   stored in a separate `assignments/` table keyed by `partition_version`. Including it here would
   require rewriting 80,000 rows of image facts per re-partition with no authoritative copy.
-- **`weather`, `scene` and `timeofday` are typed as strings pending measurement.** Their value
-  domains are properties of the archive. `StrEnum` serializes to the same representation, so
-  adopting enums later requires no re-ingest.
+- **`weather`, `scene` and `timeofday` are enums over the measured vocabularies.** Their value
+  domains are properties of the archive, so they were counted over all 80,000 images before being
+  written down: seven weather values, seven scene values, four for time of day, with `undefined` a
+  populated member of each rather than a null. Every eval slice and the selection condition cap is a
+  predicate over these three columns, and a misspelled value raises nothing and matches nothing, so
+  the slice empties and reports as a pass. The literals are the archive's own — `dawn/dusk` carries a
+  slash, `gas stations` is plural — which also makes a tag the one categorical here that is never an
+  S3 key component. `StrEnum` serializes identically, so the parquet columns remain `string` and the
+  typing cost no re-ingest.
 
 The manifest precedes partitioning because cohort sizing, eval stratification and per-slice counts
 are all queries against it.
