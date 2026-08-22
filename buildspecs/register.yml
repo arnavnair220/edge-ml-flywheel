@@ -1,0 +1,93 @@
+# Mints a run_id and claims it in the runs table.
+#
+# Run it with:
+#   aws codebuild start-build --project-name edge-ml-flywheel-register \
+#     --environment-variables-override \
+#       name=RUN_SLUG,value=v1-uncertainty,type=PLAINTEXT \
+#       name=RUN_NOTE,value="first real loop",type=PLAINTEXT
+#
+# To register a control arm, override the selector too:
+#       name=SELECTOR,value=random,type=PLAINTEXT
+#
+# Unlike the two data jobs, this one is not idempotent and is not meant to be:
+# every build mints a fresh `run_id` from the current second and claims it. Two
+# builds are two runs.
+#
+# No table name is written here. `register` reads it out of `conventions.Table`,
+# which is the same name `infra/tables.tf` composes, so a drift between them is a
+# build that cannot find its table rather than a run registered somewhere nobody
+# looks.
+
+version: 0.2
+
+env:
+  variables:
+    # Overridden by the project's environment (see infra/register.tf) and
+    # overridable again per build. Repeated here so the file runs on its own.
+    SELECTOR: "uncertainty"
+    LABEL_BUDGET: "1000"
+    PARTITION_VERSION: "0"
+    CLASS_SET_VERSION: "1"
+    RECIPE_VERSION: "1"
+
+    # Deliberately empty. A default slug is how two runs come to be named the
+    # same thing, and a default note is how the field stops meaning anything.
+    RUN_SLUG: ""
+    RUN_NOTE: ""
+
+    # Pinned for `ingest.yml`'s reason: every step runs against exactly what the
+    # install phase produced rather than against uv's sync semantics.
+    UV_NO_SYNC: "1"
+
+phases:
+  install:
+    commands:
+      - curl -LsSf https://astral.sh/uv/0.11.25/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+      # The `run` group, which is boto3 and nothing else. No pyarrow: this job
+      # reads no parquet.
+      - uv sync --frozen --group run
+      - uv run python -c "import sys; print(sys.version)"
+
+  pre_build:
+    commands:
+      # Before anything is minted. The CLI would refuse an empty slug anyway,
+      # but failing here says which variable was not supplied.
+      - test -n "$RUN_SLUG" || { echo "RUN_SLUG is required: --environment-variables-override name=RUN_SLUG,value=..."; exit 1; }
+      - test -n "$RUN_NOTE" || { echo "RUN_NOTE is required: it is the only record of why this run exists"; exit 1; }
+
+      # The commit the registration will claim. CodeBuild resolves it from the
+      # source, so it names what is actually running -- which is the whole
+      # reason this job is a build rather than a script on a laptop.
+      - echo "registering at $CODEBUILD_RESOLVED_SOURCE_VERSION"
+
+  build:
+    commands:
+      # Mints the id, writes it under `attribute_not_exists(run_id)`, and reads
+      # it back. A collision exits non-zero here and nothing downstream is
+      # started. `--git-commit` is not passed: it defaults to
+      # CODEBUILD_RESOLVED_SOURCE_VERSION, which this environment sets.
+      - |
+        RUN_ID=$(uv run python -m edge_ml_flywheel.run register \
+          --slug "$RUN_SLUG" \
+          --selector "$SELECTOR" \
+          --partition-version "$PARTITION_VERSION" \
+          --class-set-version "$CLASS_SET_VERSION" \
+          --recipe-version "$RECIPE_VERSION" \
+          --label-budget "$LABEL_BUDGET" \
+          --note "$RUN_NOTE")
+      - echo "$RUN_ID" > /tmp/run_id
+
+  post_build:
+    commands:
+      # post_build runs whether or not build succeeded, and a failed mint has no
+      # run to show.
+      - test "$CODEBUILD_BUILD_SUCCEEDING" = "1"
+
+      # The registration as it now stands in the table, in the log. This is the
+      # line anyone reads six weeks later to find out what a `run_id` in a
+      # bucket listing was configured as, and the string they paste into every
+      # later step.
+      - RUN_ID=$(cat /tmp/run_id)
+      - uv run python -m edge_ml_flywheel.run show --run-id "$RUN_ID"
+      - echo "run_id=$RUN_ID"

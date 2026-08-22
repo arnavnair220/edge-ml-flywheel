@@ -32,9 +32,10 @@ promoted models.
 **Label** — one image and all of its boxes. Annotation is priced per image, so that is the unit the
 budget counts.
 
-**Label budget** — the cap on *new* labels purchasable per cycle. The training set is the
-cumulative union of everything labeled to date, so a cycle that fails to promote still keeps its
-labels and the next challenger simply has more to learn from.
+**Label budget** — the cap on *new* labels purchasable per cycle, fixed for the whole run and
+recorded in its registration. The training set is the cumulative union of everything labeled to
+date, so a cycle that fails to promote still keeps its labels and the next challenger simply has
+more to learn from.
 
 **Selector** — the rule a run ranks the pool by, fixed for the whole run and recorded in its
 registration. `uncertainty` is the rule the loop runs by; `random` and `certainty` are controls.

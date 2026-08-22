@@ -86,8 +86,8 @@ One row per image: `image_id`, `split`, `weather`, `scene`, `timeofday`, `n_boxe
   S3 key component. `StrEnum` serializes identically, so the parquet columns remain `string` and the
   typing cost no re-ingest.
 
-The manifest precedes partitioning because cohort sizing, eval stratification and per-slice counts
-are all queries against it.
+The manifest precedes partitioning because cohort sizing, eval composition and per-slice counts are
+all queries against it.
 
 ### Verification
 
@@ -197,31 +197,35 @@ manifest joined to the assignments.
 python -m edge_ml_flywheel.partition assign --stage-dir ./stage --partition-version 0
 ```
 
-### Eval stratification
+### Eval composition
 
-`eval` is sampled in proportion to the pool rather than balanced across conditions, so that overall
-mAP is the fleet-weighted number it appears to be. Proportional sampling of 5,000 yields:
+`eval` is not stratified. No quota is placed on any slice, and the counts below are what the uniform
+draw over `val` yielded at `partition_version` 0 — a measurement of the cohort, not a target it was
+sampled to:
 
 | Axis | Slice | Images | Axis | Slice | Images |
 |---|---|---:|---|---|---:|
-| `weather` | `clear` | 2,672 | `scene` | `city street` | 3,106 |
-| | `overcast` | 626 | | `highway` | 1,244 |
-| | `undefined` | 581 | | `residential` | 585 |
-| | `snowy` | 396 | `timeofday` | `daytime` | 2,629 |
-| | `rainy` | 364 | | `night` | 1,997 |
-| | `partly cloudy` | 352 | | `dawn/dusk` | 363 |
+| `weather` | `clear` | 2,687 | `scene` | `city street` | 3,032 |
+| | `overcast` | 628 | | `highway` | 1,260 |
+| | `undefined` | 581 | | `residential` | 642 |
+| | `rainy` | 391 | `timeofday` | `daytime` | 2,613 |
+| | `partly cloudy` | 361 | | `night` | 1,995 |
+| | `snowy` | 349 | | `dawn/dusk` | 378 |
 
-Each axis sums to exactly 5,000, by largest-remainder apportionment rather than independent rounding
-of each share, which would leave the three axes disagreeing about the cohort's size. The targets are
-proportions of the 80,000-image pool but are drawn from `val` alone, so each is bounded by `val`'s own
-count for that slice; `val` tracks the pool within 1.0 point on every tag value, and the tightest
-slice, `snowy`, needs 396 against 769 available.
+Uniform rather than proportional because a draw at `val`'s own rates reproduces those rates in
+expectation, and `val` tracks the 80,000-image pool within 1.0 point on every tag value. Overall mAP
+is therefore the fleet-weighted number it appears to be, with no per-slice quota enforcing it. What
+that costs is exactness: nothing pins a slice to a count, so each lands somewhat off its pool share —
+`snowy` at 349 against 396, `city street` at 3,032 against 3,106. The gap is `val`'s share differing
+from the pool's plus the draw being one sample of it.
 
 A slice is gated only if it holds at least 300 images. Below that the bootstrap noise band is wide
 enough to admit almost any delta and the gate stops discriminating. Twelve slices clear the floor.
-Six do not and are reported without being gated: `foggy` (9), `parking lot` (27), `tunnel` (10),
-`gas stations` (2), and the `undefined` members of `scene` (26) and `timeofday` (11). Fog is not
-measurable at any eval size drawn from this dataset, at 143 images in the full 80,000.
+Six do not and are reported without being gated: `foggy` (3), `parking lot` (26), `tunnel` (13),
+`gas stations` (4), and the `undefined` members of `scene` (23) and `timeofday` (14). Which group a
+slice falls in is not the draw's decision to make: the lowest gated slice is `snowy` at 349 and the
+largest ungated one is `parking lot` at 26. Fog is not measurable at any eval size drawn from this
+dataset, at 143 images in the full 80,000.
 
 Class and object-scale slices are queries over the eval cohort's labels, not partition decisions,
 and the scale threshold belongs to the evaluation module that owns the metric: at 416 px, 87.8
@@ -258,6 +262,38 @@ selects the version, defaults to 0, and is overridable per build; a value outsid
 
 ---
 
+## Run registration
+
+A run opens before any cycle turns. Registration mints a `run_id`, claims it, and records the
+selector, the three version stamps and the label budget. Nothing downstream can write until it
+exists, since `run_id` is the partition key of every stateful table and the top prefix of every
+artifact.
+
+| Property | Rationale |
+|---|---|
+| The claim is a conditional put on `attribute_not_exists(run_id)` | An id is a UTC second plus a slug, so a collision is unlikely rather than impossible, and a second run under one adopts the first's ledger, champion and locks |
+| The role holds `PutItem` and `GetItem` on `runs`, and no S3 at all | The condition refuses a second write; the absent `UpdateItem` refuses an edit to a write-once item |
+| The job runs in CodeBuild, not as a script | `git_commit` is required and written once, and CodeBuild resolves the source, so the field cannot name a commit that did not produce the run |
+
+### Invocation
+
+```
+aws codebuild start-build --project-name edge-ml-flywheel-register \
+  --environment-variables-override \
+    name=RUN_SLUG,value=v1-uncertainty,type=PLAINTEXT \
+    name=RUN_NOTE,value="first real loop",type=PLAINTEXT
+```
+
+The build prints the minted `run_id`, which is the input to every later step. `RUN_SLUG` and
+`RUN_NOTE` have no defaults, since a default slug names two runs the same thing and a default note
+records nothing. `SELECTOR`, `LABEL_BUDGET`, `PARTITION_VERSION`, `CLASS_SET_VERSION` and
+`RECIPE_VERSION` default to the loop as designed and are overridable per build.
+
+There is no webhook, and unlike the two data jobs that is not a preference: those are idempotent,
+and this one mints a new `run_id` on every invocation, so a push to `main` would start a run.
+
+---
+
 ## Selection and purchase
 
 One cycle spends its budget in six steps:
@@ -274,9 +310,12 @@ One cycle spends its budget in six steps:
 6. The oracle checks the idempotency key, debits the ledger, releases those labels, and appends them
    to the cumulative labeled set.
 
+The budget is a property of the run, not a constant of the system: it is set at registration, and
+each cycle's ledger item is seeded from it.
+
 | Quantity | Value |
 |---|---|
-| Budget per cycle | 1,000 labels |
+| Budget per cycle | 1,000 labels, per the run registration |
 | Selected by uncertainty | 900 |
 | Drawn at random | 100 |
 | Per-condition cap | twice the bucket's share of the remaining pool |

@@ -85,11 +85,26 @@ check_untyped_defs = true
 module = ["pyarrow.*"]
 ignore_missing_imports = true
 
+# Same situation as pyarrow: neither ships a `py.typed` marker. `boto3-stubs`
+# exists and is deliberately not used -- it types a resource-level `Table` as
+# `Any` regardless, since the resource API is generated at runtime from JSON
+# service models, so the stubs would buy nothing for the one call shape this
+# project makes and would pin a second package to the SDK version.
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*"]
+ignore_missing_imports = true
+
 [dependency-groups]
 dev = [
     "mypy>=1.18",
     "pytest>=8",
     "ruff>=0.16.2",
+    # An in-process DynamoDB that honours condition expressions, which is the
+    # one behaviour the registration depends on. A hand-rolled fake would be a
+    # fake that returns whatever the test needs: the conditional put is the
+    # module's whole reason to exist, so the thing under test is precisely
+    # whether a real engine refuses the second write.
+    "moto[dynamodb]>=5",
 ]
 
 # A group rather than a project dependency, because these are the ingest
@@ -107,4 +122,13 @@ ingest = [
     # Decodes images for the integrity checks, and specifically for `draft`,
     # which decodes a JPEG at 1/8 scale straight out of the DCT coefficients.
     "pillow>=11",
+]
+
+# The AWS SDK, for the one module that makes an API call. A group rather than a
+# project dependency for `ingest`'s reason, and separate from it because the two
+# jobs share nothing: registration writes one DynamoDB item and reads no parquet.
+# `moto` brings boto3 transitively, so the dev group already has it and the test
+# suite runs without this group installed.
+run = [
+    "boto3>=1.35",
 ]
