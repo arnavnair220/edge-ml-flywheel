@@ -56,12 +56,6 @@ denominated in labels, so the pipeline reports accuracy gained per label spent a
 Start with the [architecture overview](docs/00-overview.md) — definitions, the loop diagram, and
 the nine planes the system is built from. Each plane has its own document under [docs/](docs/).
 
-## Status
-
-Ingest is deployed and has run: `raw/` holds the 80,000-image train and val pool with its derived
-image manifest, and every partition and eval-sizing question is now a query against that manifest.
-Partitioning is next.
-
 ## License
 
 Code: TBD. Data: BDD100K is UC Berkeley, free for non-commercial research use only; commercial
