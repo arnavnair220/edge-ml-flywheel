@@ -54,12 +54,21 @@ resource "aws_dynamodb_table" "runs" {
   deletion_protection_enabled = true
 }
 
-# The withheld ground truth for all 80,000 pool images: the boxes a training job
+# The withheld ground truth for the 62,000 `pool` images: the boxes a training job
 # is never allowed to read, served one image at a time by the oracle against a
-# budget. Loaded per run rather than once globally, at roughly 160 MB and $0.20 a
+# budget. Loaded per run rather than once globally, at roughly 125 MB and $0.15 a
 # load, because the alternative is a shared table that survives a run boundary --
 # and the run boundary is the project's blast-radius claim. A fresh run gets a
 # fresh load and cannot be served a label its own ledger never charged for.
+#
+# **`pool` only, not all 80,000.** The oracle resolves an `image_id` against this
+# table and applies no cohort predicate, so an `eval` label present here is an
+# `eval` label for sale; the overlap gate catches that a cycle later, with the
+# budget already spent and the training set already contaminated. Loading one
+# cohort makes the read return nothing instead. `bootstrap` is out for the
+# inverse reason: its labels are free, and a free path through the oracle is an
+# exception inside the one component whose premise is that no label is free, so
+# the loader writes them into the labeled set without calling the oracle.
 #
 # `image_id` as the sort key makes the oracle's access pattern a `BatchGetItem`
 # over (run_id, image_id) pairs, which is the only read this table ever serves.

@@ -381,7 +381,16 @@ by convention: the training role is denied `raw/labels/` in both its own policy 
 policy. The ledger is keyed by `run_id` and every purchase carries an idempotency key, since a
 retried purchase that double debits has no undo and overstates the cost of every cycle after it.
 
+`oracle_labels` is loaded with `pool` alone. The oracle resolves an image ID against the table and
+applies no cohort predicate, so any cohort loaded beside `pool` is a cohort for sale.
+
+`bootstrap` is absent for the inverse reason. Its 8,000 labels are free, and serving them through
+the oracle would place a zero-charge branch inside the component whose premise is that no label is
+free. The loader writes them into the labeled set directly, under the role that fills the table, so
+the oracle does one thing: charge, then serve.
+
 `eval` sits behind the same wall for a different reason. Its labels are read only by the evaluation
 plane, and are never purchasable, never appended to the training set and never re-drawn within a
-run. Zero image-ID overlap between the labeled set and `eval` is a hard gate failure with no
-override.
+run. It is unpurchasable because it is absent from the table, not because a check refuses it. Zero
+image-ID overlap between the labeled set and `eval` is a hard gate failure with no override, and is
+the backstop rather than the mechanism.
