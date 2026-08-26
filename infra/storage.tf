@@ -251,10 +251,15 @@ data "aws_iam_policy_document" "data_bucket" {
     }
   }
 
-  # The label wall. `oracle_labels` is where a label is *sold*, and the budget is
-  # only real if the labels cannot be read any other way -- a training job that
-  # can GET these 80,000 JSON files bypasses the oracle, the ledger, and the
-  # entire cost-per-label deliverable, while every gate still passes.
+  # The label wall. The oracle is where a label is *sold*, and the budget is only
+  # real if the labels cannot be read any other way -- a training job that can GET
+  # these 80,000 JSON files bypasses the oracle, the ledger, and the entire
+  # cost-per-label deliverable, while every gate still passes.
+  #
+  # This allowlist is the outer boundary and not the whole guarantee. Which
+  # cohorts the oracle may sell from is a line no policy can draw, since cohort
+  # lives in the assignments parquet rather than in any key; that is enforced in
+  # `edge_ml_flywheel.oracle.cohorts`. This keeps everyone else out.
   #
   # Denied here at the bucket as well as in each role's own policy. An explicit
   # deny in a bucket policy beats any allow, including one granted later in an

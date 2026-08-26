@@ -743,7 +743,6 @@ class Table(StrEnum):
     """
 
     RUNS = "runs"
-    ORACLE_LABELS = "oracle_labels"
     LABEL_BUDGET = "label_budget"
     FLEET_CONFIG = "fleet_config"
     AUDIT_LOG = "audit_log"
@@ -853,11 +852,15 @@ def parse_purchase_event(event: str) -> tuple[Cycle, str]:
 # Enforced by a bucket policy denying writes to every principal but the ingest
 # role, not by everyone remembering.
 #
-# `raw/labels/` carries the ground truth for all 80,000 images, where
-# `oracle_labels` is loaded with `pool` alone. A training job that can GET these
-# files bypasses the oracle entirely and reaches every cohort, so the training
-# role is denied this prefix in its own policy and again in the bucket policy. An
-# explicit deny beats any allow, including one granted later somewhere else.
+# `raw/labels/` carries the ground truth for all 80,000 images, of every cohort.
+# The oracle reads it directly and keeps `eval` out of reach in code, against the
+# assignments -- cohort is a column there and not a component of any key, so no
+# policy can draw that line. What a policy *can* do is keep everyone else out
+# entirely, and that is the division: a training job that could GET these files
+# would bypass the oracle, the ledger and the cost-per-label deliverable while
+# every gate still passed, so the training role is denied this prefix in its own
+# policy and again in the bucket policy. An explicit deny beats any allow,
+# including one granted later somewhere else.
 
 RAW_PREFIX: Final = "raw/"
 RAW_IMAGES_PREFIX: Final = "raw/images/100k/"
