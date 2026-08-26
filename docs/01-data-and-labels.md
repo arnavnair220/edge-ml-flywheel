@@ -60,7 +60,7 @@ s3://<project>-data-<account>/
 | Property | Rationale |
 |---|---|
 | `raw/` is immutable and writable only by the ingest role | All reprocessing reads from it, so inference outputs can be regenerated offline |
-| The training role is denied `raw/labels/` in both its own policy and the bucket policy | The `oracle_labels` table cannot prevent direct object access; an explicit deny can |
+| The training role is denied `raw/labels/` in both its own policy and the bucket policy | The cohort gate governs what the oracle sells; only an explicit deny governs what another job reads directly |
 | `_provenance/` is underscore-prefixed | Glue and Athena skip such paths, so a crawler over `raw/` does not index it |
 | All keys are constructed by `edge_ml_flywheel.conventions` | A key formatted at two call sites diverges silently, with the writer still succeeding |
 
@@ -109,7 +109,7 @@ Expected values are literals in the suite and are not derived from the code unde
 
 Ingest runs in CodeBuild outside any VPC, under an IAM role, with CloudWatch logs. Build containers
 are ephemeral, which keeps the extracted annotations inside the label wall: the wall is enforced by
-the bucket policy and the `oracle_labels` table, neither of which covers a copy held on a
+the bucket policy and by the oracle's cohort gate, neither of which covers a copy held on a
 workstation. No downstream step requires browsable local data, since the dataset counts are queries
 against the manifest.
 
@@ -311,7 +311,9 @@ One cycle spends its budget in six steps:
    to the cumulative labeled set.
 
 The budget is a property of the run, not a constant of the system: it is set at registration, and
-each cycle's ledger item is seeded from it.
+the oracle creates a cycle's ledger item on that cycle's first purchase, seeded from the registered
+figure. Creation and the first debit are one conditional write, so a budget item's only writer is
+the step that spends against it and its value never rises.
 
 | Quantity | Value |
 |---|---|
@@ -319,8 +321,8 @@ each cycle's ledger item is seeded from it.
 | Selected by uncertainty | 900 |
 | Drawn at random | 100 |
 | Per-condition cap | twice the bucket's share of the remaining pool |
-| Cycles per run | 8 |
-| Total purchased | 8,000 |
+| Cycles per run | 8, planned rather than enforced |
+| Total purchased | 8,000 at eight cycles |
 | Training set | 8,000 at cycle 0, 16,000 after cycle 8 |
 | Pool remaining | 62,000, falling to 54,000 |
 | Selectivity | 1,000 of 62,000, about 1.6 percent |
@@ -368,6 +370,11 @@ Redundancy inside a single condition bucket, and unlabelable frames, are not add
 finer signal than the manifest carries, and neither can be sized before the first cycles report what
 they bought.
 
+What ends a run is also open. No cycle count is recorded at registration and the ledger seeds a
+cycle whenever one asks, so the per-cycle cap holds and the run-level total does not. A fixed count,
+a stalled gate or a total-spend ceiling all remain available without a schema change, since
+cumulative spend is a sum over the run's ledger partition.
+
 | Addition | Condition that unlocks it |
 |---|---|
 | Dedup on image embeddings | The cap binds every cycle, or batches stay redundant inside one bucket |
@@ -381,16 +388,28 @@ by convention: the training role is denied `raw/labels/` in both its own policy 
 policy. The ledger is keyed by `run_id` and every purchase carries an idempotency key, since a
 retried purchase that double debits has no undo and overstates the cost of every cycle after it.
 
-`oracle_labels` is loaded with `pool` alone. The oracle resolves an image ID against the table and
-applies no cohort predicate, so any cohort loaded beside `pool` is a cohort for sale.
+The oracle reads labels out of `raw/labels/` directly, with no per-run copy and no intermediate
+table. Cohort is a column in the assignments parquet rather than a component of any key, so no
+storage boundary separates a purchasable `pool` label from the `eval` labels beside it, and no IAM
+policy can express one. `edge_ml_flywheel.oracle.cohorts` is what does, which makes it the single
+place the eval guarantee lives.
 
-`bootstrap` is absent for the inverse reason. Its 8,000 labels are free, and serving them through
-the oracle would place a zero-charge branch inside the component whose premise is that no label is
-free. The loader writes them into the labeled set directly, under the role that fills the table, so
-the oracle does one thing: charge, then serve.
+| Rule | Rationale |
+|---|---|
+| The gate runs before a key is built, and the key builder routes through it | A refused image is unread rather than unsold, and no function in the package returns a key under the split `eval` is drawn from |
+| One non-pool image refuses the whole batch | Filtering would charge a run for a batch it did not ask for, and would turn a selector reaching into `eval` into a cycle that quietly bought fewer labels |
+| A repeated image ID refuses the batch | The batch is a set of images to the oracle and a count to the budget, so a duplicate is one label billed twice |
+| `bootstrap` is refused with the rest | Its labels are already owned, and serving them would put a zero-value charge inside the component whose premise is that no label is free |
+
+`bootstrap` reaches training through its shards, so the oracle does one thing: charge, then serve.
 
 `eval` sits behind the same wall for a different reason. Its labels are read only by the evaluation
 plane, and are never purchasable, never appended to the training set and never re-drawn within a
-run. It is unpurchasable because it is absent from the table, not because a check refuses it. Zero
-image-ID overlap between the labeled set and `eval` is a hard gate failure with no override, and is
-the backstop rather than the mechanism.
+run. It is unpurchasable because the gate refuses it by cohort and because no key builder in the
+oracle can address the split it is drawn from. Zero image-ID overlap between the labeled set and
+`eval` is a hard gate failure with no override, and is the backstop rather than the mechanism.
+
+An eval shard bundles each image with its boxes, so the ground truth exists a second time under
+`shards/cohort=eval/`, outside the `raw/labels/` deny. The bucket policy denies reads on that prefix
+to every principal; the evaluation plane is named there when it is built. The exposure is
+contamination rather than a bypassed budget, since eval labels are never charged.
