@@ -315,6 +315,30 @@ the oracle creates a cycle's ledger item on that cycle's first purchase, seeded 
 figure. Creation and the first debit are one conditional write, so a budget item's only writer is
 the step that spends against it and its value never rises.
 
+### The charge
+
+Step 6 is a single `TransactWriteItems` over two tables, each carrying its own condition.
+
+| Item | Condition | Refuses |
+|---|---|---|
+| `audit_log` put, keyed `purchase#c<cycle>#<digest>` | `attribute_not_exists(event)` | The second charge for a batch already bought |
+| `label_budget` update, `SET remaining = if_not_exists(remaining, :budget) - :n` | `attribute_not_exists(remaining) OR remaining >= :n` | The overspend, and the negative balance |
+
+One write rather than two conditional writes in sequence. The idempotency key and the ledger are in
+different tables, so two writes leave a window in which one has landed and the other has not, and a
+crash there is unrecoverable because the retry cannot tell which half it is resuming. The
+transaction applies both or neither.
+
+The digest is over the sorted image IDs, so a retry that re-ranks a tie is the same purchase rather
+than a second one. A batch larger than the whole cycle's cap is refused before the call: on a first
+purchase there is no `remaining` for the condition to compare against, and the create branch would
+otherwise write a negative.
+
+When both conditions refuse, the audit condition is the one reported. That case is a retry of a
+purchase that already succeeded, and answering `over budget` would send the caller to buy less when
+the correct answer is that the work is done. A replay returns the original receipt and re-serves the
+same labels, which is what allows the shard write after it to be repeated over the same keys.
+
 | Quantity | Value |
 |---|---|
 | Budget per cycle | 1,000 labels, per the run registration |
