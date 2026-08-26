@@ -49,13 +49,35 @@ _CORNERS: Final = ("x1", "y1", "x2", "y2")
 
 
 @dataclass(frozen=True, slots=True)
-class ParsedLabel:
-    """What one label document contributes to a manifest row.
+class Box:
+    """One detection box, in the archive's native 1280x720 pixels.
 
-    `box_categories` is parallel to `box_areas` and exists only to be counted
-    into the vocabulary report; nothing downstream stores it per image, because
-    the class set is `class_set_version`'s business and not a fact about the
-    archive.
+    Corners rather than an area, because there are two readers and they need
+    different things from the same object. The manifest keeps areas only -- a
+    box's position tells it nothing about the image -- while the oracle sells
+    the boxes themselves, and a geometry reconstructed from an area is not the
+    label. Keeping the corners means one parser serves both instead of the
+    archive being read twice by two modules that can come to disagree about it.
+    """
+
+    category: str
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+
+    @property
+    def area(self) -> float:
+        return (self.x2 - self.x1) * (self.y2 - self.y1)
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedLabel:
+    """One label document, read once and served to both of its readers.
+
+    `boxes` is the whole of what the archive says about the objects in an image.
+    The manifest projects it down to areas and a category count; the oracle
+    stores it as-is, since a box is what a cycle pays for.
 
     `degenerate_boxes` counts boxes dropped for enclosing no area. A zero-width
     box is not a box, and `ManifestRow` refuses a non-positive area, so they
@@ -67,9 +89,22 @@ class ParsedLabel:
     weather: Weather
     scene: Scene
     timeofday: TimeOfDay
-    box_areas: tuple[float, ...]
-    box_categories: tuple[str, ...]
+    boxes: tuple[Box, ...]
     degenerate_boxes: int
+
+    @property
+    def box_areas(self) -> tuple[float, ...]:
+        """The manifest's projection. Parallel to `box_categories` by index."""
+        return tuple(box.area for box in self.boxes)
+
+    @property
+    def box_categories(self) -> tuple[str, ...]:
+        """Counted into the vocabulary report and stored nowhere per image.
+
+        Naming the classes is `class_set_version`'s business downstream, not a
+        fact the archive settles.
+        """
+        return tuple(box.category for box in self.boxes)
 
 
 def _attributes(document: dict[str, Any], image_id: ImageId) -> dict[str, Any]:
@@ -134,16 +169,27 @@ def _objects(document: dict[str, Any], image_id: ImageId) -> list[Any]:
     return objects
 
 
-def _area(box: dict[str, Any], image_id: ImageId) -> float:
+def _box(box: dict[str, Any], category: str, image_id: ImageId) -> Box:
+    """One `box2d` object, corners carried through unrepaired.
+
+    Native 1280x720 pixels, and the corners are taken in the order the archive
+    states them rather than normalized so `x1 < x2`. A box whose corners are the
+    wrong way round is not a box drawn backwards, it is a box we cannot
+    interpret; sorting the corners here would launder that into a plausible
+    rectangle. `Box.area` stays signed for the same reason, and `parse_label`
+    drops a non-positive one as degenerate rather than fixing it.
+    """
     for corner in _CORNERS:
         if not isinstance(box.get(corner), int | float):
             raise ValueError(f"{image_id}: box2d has no numeric {corner!r}")
 
-    # Native 1280x720 pixels, and signed rather than absolute. A box whose
-    # corners are the wrong way round is not a box drawn backwards, it is a box
-    # we cannot interpret, and repairing it here would launder that into a
-    # plausible number.
-    return (box["x2"] - box["x1"]) * (box["y2"] - box["y1"])
+    return Box(
+        category=category,
+        x1=float(box["x1"]),
+        y1=float(box["y1"]),
+        x2=float(box["x2"]),
+        y2=float(box["y2"]),
+    )
 
 
 def parse_label(document: Any, image_id: ImageId) -> ParsedLabel:
@@ -160,8 +206,7 @@ def parse_label(document: Any, image_id: ImageId) -> ParsedLabel:
 
     attributes = _attributes(document, image_id)
 
-    areas: list[float] = []
-    categories: list[str] = []
+    boxes: list[Box] = []
     degenerate = 0
 
     for obj in _objects(document, image_id):
@@ -178,20 +223,18 @@ def parse_label(document: Any, image_id: ImageId) -> ParsedLabel:
         if not isinstance(category, str):
             raise ValueError(f"{image_id}: boxed object has no category")
 
-        area = _area(box, image_id)
-        if area <= 0:
+        parsed = _box(box, category, image_id)
+        if parsed.area <= 0:
             degenerate += 1
             continue
 
-        areas.append(area)
-        categories.append(category)
+        boxes.append(parsed)
 
     return ParsedLabel(
         image_id=image_id,
         weather=_tag(attributes, "weather", Weather, image_id),
         scene=_tag(attributes, "scene", Scene, image_id),
         timeofday=_tag(attributes, "timeofday", TimeOfDay, image_id),
-        box_areas=tuple(areas),
-        box_categories=tuple(categories),
+        boxes=tuple(boxes),
         degenerate_boxes=degenerate,
     )

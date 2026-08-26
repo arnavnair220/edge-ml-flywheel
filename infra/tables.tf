@@ -1,4 +1,4 @@
-# The six DynamoDB tables. Names come from `conventions.Table`; keys are decided
+# The five DynamoDB tables. Names come from `conventions.Table`; keys are decided
 # here and cannot be changed afterwards -- a different key design is a different
 # table with a different name and a data migration, so this file is the one in the
 # stack worth reading twice.
@@ -54,36 +54,24 @@ resource "aws_dynamodb_table" "runs" {
   deletion_protection_enabled = true
 }
 
-# The withheld ground truth for all 80,000 pool images: the boxes a training job
-# is never allowed to read, served one image at a time by the oracle against a
-# budget. Loaded per run rather than once globally, at roughly 160 MB and $0.20 a
-# load, because the alternative is a shared table that survives a run boundary --
-# and the run boundary is the project's blast-radius claim. A fresh run gets a
-# fresh load and cannot be served a label its own ledger never charged for.
+# There is deliberately no table of withheld labels.
 #
-# `image_id` as the sort key makes the oracle's access pattern a `BatchGetItem`
-# over (run_id, image_id) pairs, which is the only read this table ever serves.
-resource "aws_dynamodb_table" "oracle_labels" {
-  name         = "${local.table_prefix}-oracle_labels"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "run_id"
-  range_key    = "image_id"
-
-  attribute {
-    name = "run_id"
-    type = "S"
-  }
-
-  attribute {
-    name = "image_id"
-    type = "S"
-  }
-
-  # No point-in-time recovery and no deletion protection, alone among these six.
-  # This table is derived data: every item is reproducible from `raw/labels/` by
-  # re-running the loader, so paying to back it up would be paying to store a
-  # third copy of the archive.
-}
+# An earlier design copied the 62,000 `pool` labels into one per run, so that an
+# `eval` label was unpurchasable by being absent from what the oracle could read.
+# That bought the guarantee with a fifteen-minute job at the start of every run
+# and a second copy of the archive per run, and it bought it in the wrong place:
+# the copy existed only because IAM cannot express the pool/eval line, since
+# cohort is a column in the assignments parquet and not a component of any key.
+#
+# The oracle now reads `raw/labels/` directly and enforces that line itself, in
+# `edge_ml_flywheel.oracle.cohorts`. The gate runs before a key is built and the
+# key builder routes through it, so a refused image is unread rather than merely
+# unsold and no function in the package returns a key under the split `eval` is
+# drawn from. `raw/labels/` stays denied at the bucket to everything but ingest
+# and the oracle, so the budget is still not bypassable from outside.
+#
+# Recorded here rather than silently omitted, because the absence is a decision:
+# five tables where the design once said six, and the sixth is not pending.
 
 # The ledger. One item per (run, cycle) holding what remains of that cycle's cap,
 # decremented by a conditional write that fails rather than going negative.

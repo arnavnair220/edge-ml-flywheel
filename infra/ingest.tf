@@ -111,23 +111,11 @@ data "aws_iam_policy_document" "ingest" {
     ]
   }
 
-  # Loading the withheld labels is the last Phase 1 step and the only write this
-  # table ever takes. Deliberately no read: the loader has no reason to query what
-  # it just wrote, and leaving the read out means the oracle is the only principal
-  # in the account that can get a label out of DynamoDB, matching the bucket-level
-  # wall on `raw/labels/`.
-  statement {
-    sid    = "LoadWithheldLabels"
-    effect = "Allow"
-
-    actions = [
-      "dynamodb:PutItem",
-      "dynamodb:BatchWriteItem",
-      "dynamodb:DescribeTable",
-    ]
-
-    resources = [aws_dynamodb_table.oracle_labels.arn]
-  }
+  # Deliberately no DynamoDB grant at all. Ingest held a write on a table of
+  # withheld labels while that table was the mechanism keeping `eval` out of
+  # reach; the oracle now enforces that in code against the assignments, and the
+  # table is gone (see `tables.tf`). Ingest writes the archive to `raw/` and
+  # nothing else.
 
   statement {
     sid    = "WriteOwnLogs"

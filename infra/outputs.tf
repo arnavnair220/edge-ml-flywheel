@@ -23,14 +23,13 @@ output "buckets" {
 }
 
 output "tables" {
-  description = "The six DynamoDB tables, keyed by the conventions.Table member."
+  description = "The five DynamoDB tables, keyed by the conventions.Table member."
   value = {
-    runs          = aws_dynamodb_table.runs.name
-    oracle_labels = aws_dynamodb_table.oracle_labels.name
-    label_budget  = aws_dynamodb_table.label_budget.name
-    fleet_config  = aws_dynamodb_table.fleet_config.name
-    audit_log     = aws_dynamodb_table.audit_log.name
-    run_locks     = aws_dynamodb_table.run_locks.name
+    runs         = aws_dynamodb_table.runs.name
+    label_budget = aws_dynamodb_table.label_budget.name
+    fleet_config = aws_dynamodb_table.fleet_config.name
+    audit_log    = aws_dynamodb_table.audit_log.name
+    run_locks    = aws_dynamodb_table.run_locks.name
   }
 }
 

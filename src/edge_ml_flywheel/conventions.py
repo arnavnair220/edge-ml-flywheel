@@ -30,8 +30,9 @@ range check that keeps it is part of the padding rather than a duty left to
 whichever call site remembers.
 """
 
+import hashlib
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, fields
 from datetime import UTC, date, datetime
 from enum import StrEnum
@@ -742,7 +743,6 @@ class Table(StrEnum):
     """
 
     RUNS = "runs"
-    ORACLE_LABELS = "oracle_labels"
     LABEL_BUDGET = "label_budget"
     FLEET_CONFIG = "fleet_config"
     AUDIT_LOG = "audit_log"
@@ -754,6 +754,97 @@ def table_name(table: Table) -> str:
     return f"{PROJECT}-{table.value}"
 
 
+# --- Audit log sort keys ------------------------------------------------------
+#
+# `Table.AUDIT_LOG` sorts on a composed `event` string rather than a timestamp,
+# and the choice is load-bearing rather than stylistic. The oracle's idempotency
+# key is `(run_id, cycle, sha256(sorted image ids))`; a conditional put on a sort
+# key built from exactly those three fields makes one write do three jobs --
+# record the charge, refuse the double charge, and cache what a retry replays. A
+# timestamp cannot, because a retry carries a different one and would land beside
+# the original as a second charge.
+#
+# The grammar lives here rather than in the module that writes it, for the reason
+# the whole module exists: a key spelled at two call sites drifts at one of them,
+# and this one cannot be corrected afterwards -- the item it addresses is the
+# evidence that a charge happened.
+#
+# **The cycle is padded inside the string.** A DynamoDB `N` attribute sorts
+# numerically and needs no padding, but this is an `S`, so `cycle=10` would sort
+# before `cycle=2` and a query for a run's events in order would be wrong.
+#
+# **The digest is over the sorted image IDs**, so the same batch proposed in a
+# different order is the same purchase. Selection ranks its output, and a retry
+# that re-ranks under a tie would otherwise pay twice for one batch.
+
+AUDIT_SEPARATOR: Final = "#"
+
+# Digest input is newline-joined rather than concatenated. Image IDs are fixed
+# width today, so the two agree; a separator means they still agree if a future
+# `label_source` ever changes that, instead of two different batches hashing
+# alike.
+_DIGEST_SEPARATOR: Final = "\n"
+
+
+class AuditEvent(StrEnum):
+    """What kind of thing an audit item records.
+
+    Leading component of the sort key, so a run's purchases are one `begins_with`
+    query and stay separable from the promotions and rejections that join them
+    later. Only the oracle's is defined; the registry adds its own.
+    """
+
+    PURCHASE = "purchase"
+
+
+def batch_digest(image_ids: Iterable[ImageId]) -> str:
+    """Identify a batch by its contents, independent of order.
+
+    Refuses a duplicate rather than folding it away. Deduplicating here would
+    make two genuinely different requests -- one image asked for once, and the
+    same image asked for twice -- hash to one key, and the second is a request
+    the budget would charge twice for. The oracle's gate refuses it upstream;
+    this refuses to give it a name.
+    """
+    ordered = sorted(image_ids)
+    if len(set(ordered)) != len(ordered):
+        raise ValueError("a batch digest is over distinct image IDs, and this batch repeats one")
+    if not ordered:
+        raise ValueError("a batch of no images has no digest")
+    return hashlib.sha256(_DIGEST_SEPARATOR.join(ordered).encode()).hexdigest()
+
+
+def purchase_event(cycle: Cycle, digest: str) -> str:
+    """The `audit_log` sort key one purchase claims.
+
+    Built from the two halves of the idempotency key that are not already the
+    partition key. `run_id` is deliberately absent: it is the partition, and
+    repeating it here would put the same fact in the item twice with no way to
+    say which is right when they disagree.
+    """
+    if not _SHA256.match(digest):
+        raise ValueError(f"not a lowercase hex sha256 batch digest: {digest!r}")
+    padded = _padded("cycle", cycle, CYCLE_DIGITS)
+    return AUDIT_SEPARATOR.join((AuditEvent.PURCHASE.value, f"c{padded}", digest))
+
+
+def parse_purchase_event(event: str) -> tuple[Cycle, str]:
+    """Split a purchase sort key back into its cycle and digest.
+
+    The inverse exists so that reading the ledger is not string surgery at the
+    call site, and so the format has a test that would fail on a one-sided
+    change to either half.
+    """
+    kind, cycle, digest = event.split(AUDIT_SEPARATOR, maxsplit=2)
+    if kind != AuditEvent.PURCHASE.value:
+        raise ValueError(f"not a {AuditEvent.PURCHASE.value} event: {event!r}")
+    if not cycle.startswith("c") or len(cycle) != CYCLE_DIGITS + 1:
+        raise ValueError(f"purchase event has no padded cycle: {event!r}")
+    if not _SHA256.match(digest):
+        raise ValueError(f"purchase event carries no sha256 digest: {event!r}")
+    return Cycle(int(cycle[1:])), digest
+
+
 # --- Data bucket: raw ---------------------------------------------------------
 #
 # Immutable after ingest. Every reprocessing reads from it, which is what makes
@@ -761,11 +852,15 @@ def table_name(table: Table) -> str:
 # Enforced by a bucket policy denying writes to every principal but the ingest
 # role, not by everyone remembering.
 #
-# `raw/labels/` carries the ground truth for all 80,000 images. The withheld-
-# label guarantee is enforced on the `oracle_labels` table, but a training job
-# that can GET these files bypasses the oracle entirely, so the training role is
-# denied this prefix in its own policy and again in the bucket policy. An
-# explicit deny beats any allow, including one granted later somewhere else.
+# `raw/labels/` carries the ground truth for all 80,000 images, of every cohort.
+# The oracle reads it directly and keeps `eval` out of reach in code, against the
+# assignments -- cohort is a column there and not a component of any key, so no
+# policy can draw that line. What a policy *can* do is keep everyone else out
+# entirely, and that is the division: a training job that could GET these files
+# would bypass the oracle, the ledger and the cost-per-label deliverable while
+# every gate still passed, so the training role is denied this prefix in its own
+# policy and again in the bucket policy. An explicit deny beats any allow,
+# including one granted later somewhere else.
 
 RAW_PREFIX: Final = "raw/"
 RAW_IMAGES_PREFIX: Final = "raw/images/100k/"

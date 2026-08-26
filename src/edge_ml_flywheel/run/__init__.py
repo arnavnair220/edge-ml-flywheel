@@ -1,7 +1,7 @@
 """Minting a run and claiming its name.
 
 The first step of every run, and the one that makes the rest addressable:
-`run_id` is the partition key of all six tables and the top prefix of every
+`run_id` is the partition key of all five tables and the top prefix of every
 artifact, so until the registration exists there is no key to write to.
 
 Unlike `ingest` and `partition`, this package talks to AWS. It has to -- the

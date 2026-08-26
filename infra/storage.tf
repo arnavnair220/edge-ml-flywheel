@@ -32,6 +32,17 @@ locals {
   raw_objects        = "${local.bucket_arns["data"]}/raw/*"
   raw_label_objects  = "${local.bucket_arns["data"]}/raw/labels/*"
   athena_results_arn = "${local.bucket_arns["telemetry"]}/athena-results/*"
+
+  # Wildcarded over `partition_version=` so a re-partition is covered by the
+  # statement that already exists rather than by an edit nobody makes. Mirrors
+  # `shards_prefix(version, Cohort.EVAL)` in `conventions`.
+  eval_shard_objects = "${local.bucket_arns["data"]}/derived/partition_version=*/shards/cohort=eval/*"
+
+  # Empty, and the emptiness is the current state rather than a placeholder: no
+  # role that exists today has a reason to read an eval shard. The scoring plane
+  # arrives in Phase 3 and adds its ARN here, which is the same one-line diff
+  # that would admit it to `label_reader_arns`.
+  eval_shard_reader_arns = []
 }
 
 resource "aws_s3_bucket" "this" {
@@ -240,10 +251,15 @@ data "aws_iam_policy_document" "data_bucket" {
     }
   }
 
-  # The label wall. `oracle_labels` is where a label is *sold*, and the budget is
-  # only real if the labels cannot be read any other way -- a training job that
-  # can GET these 80,000 JSON files bypasses the oracle, the ledger, and the
-  # entire cost-per-label deliverable, while every gate still passes.
+  # The label wall. The oracle is where a label is *sold*, and the budget is only
+  # real if the labels cannot be read any other way -- a training job that can GET
+  # these 80,000 JSON files bypasses the oracle, the ledger, and the entire
+  # cost-per-label deliverable, while every gate still passes.
+  #
+  # This allowlist is the outer boundary and not the whole guarantee. Which
+  # cohorts the oracle may sell from is a line no policy can draw, since cohort
+  # lives in the assignments parquet rather than in any key; that is enforced in
+  # `edge_ml_flywheel.oracle.cohorts`. This keeps everyone else out.
   #
   # Denied here at the bucket as well as in each role's own policy. An explicit
   # deny in a bucket policy beats any allow, including one granted later in an
@@ -270,6 +286,50 @@ data "aws_iam_policy_document" "data_bucket" {
       values   = local.label_reader_arns
     }
   }
+
+  # The second copy of the ground truth. A shard bundles an image with its boxes,
+  # so `shards/cohort=eval/` carries the answers for the 5,000 images every cycle
+  # is scored on, outside the prefix the statement above is scoped to.
+  #
+  # A different failure from the one the label wall catches. Eval labels are
+  # never withheld and never charged, so reading one bypasses neither the oracle
+  # nor the budget; what it costs is the eval. `ModelRecord` already refuses
+  # `eval` in `cohorts_trained_on`, but that is the training job attesting to its
+  # own inputs -- the class of guarantee this bucket policy exists to replace.
+  #
+  # Denied to every principal, and written ahead of the roles it constrains for
+  # the reason the statements above are allowlists. Reads only: the shards do not
+  # exist yet and something has to create them, so freezing them is the separate
+  # statement noted at the end of this file.
+  statement {
+    sid    = "EvalShardsAreScoringOnly"
+    effect = "Deny"
+
+    actions = [
+      "s3:GetObject",
+      "s3:GetObjectVersion",
+    ]
+
+    resources = [local.eval_shard_objects]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    # Absent while the allowlist is empty. An unconditional deny and a
+    # `StringNotLike` over no ARNs mean the same thing, but the second is a
+    # malformed policy, so the condition appears with its first reader.
+    dynamic "condition" {
+      for_each = length(local.eval_shard_reader_arns) > 0 ? [1] : []
+
+      content {
+        test     = "StringNotLike"
+        variable = "aws:PrincipalArn"
+        values   = local.eval_shard_reader_arns
+      }
+    }
+  }
 }
 
 resource "aws_s3_bucket_policy" "data" {
@@ -290,6 +350,10 @@ resource "aws_s3_bucket_policy" "other" {
   depends_on = [aws_s3_bucket_public_access_block.this]
 }
 
-# Freezing the eval cohort is a deny on its `shards/cohort=eval/` prefix, which
-# is expressible only because cohort is a path component rather than a column.
-# It lands with the partitioner, once there are shards to freeze.
+# Freezing the eval cohort is a second deny on `shards/cohort=eval/`, on writes
+# rather than on the reads `EvalShardsAreScoringOnly` already refuses. Both are
+# expressible only because cohort is a path component rather than a column.
+#
+# It waits for a reason the read deny does not share: the statement has to name
+# the writer, and nothing writes these shards yet. Until then the prefix is
+# readable by no one and writable by whatever holds `derived/`.
