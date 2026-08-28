@@ -41,7 +41,7 @@ from edge_ml_flywheel.conventions import (
     batch_digest,
     parse_purchase_event,
     purchase_event,
-    purchase_shards_prefix,
+    purchase_labels_prefix,
     raw_label_key,
     table_name,
 )
@@ -262,7 +262,7 @@ class TestChargingOnce:
         (item,) = audit_items(resource)
         assert item["event"] == receipt.event
         assert int(item["images"]) == 2
-        assert item["shard_prefix"] == purchase_shards_prefix(RUN, CYCLE)
+        assert item["labels_prefix"] == purchase_labels_prefix(RUN, CYCLE)
 
 
 class TestRefusingTheSecondCharge:
@@ -391,8 +391,8 @@ class TestChargeThenServe:
         assert fetch.asked == []
 
     def test_a_replay_serves_the_same_labels_again(self, oracle: buying.Oracle) -> None:
-        """Which is what lets the caller rewrite the same shards over the same
-        keys after a crash between the charge and the shard write."""
+        """Which is what lets the caller rewrite the same boxes over the same
+        keys after a crash between the charge and the label write."""
         _, first = oracle.purchase(CYCLE, POOL[:2])
         receipt, second = oracle.purchase(CYCLE, POOL[:2])
 

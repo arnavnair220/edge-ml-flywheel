@@ -2,7 +2,7 @@
 
 Every Phase 1 question is a query against this file -- cohort sizing, eval
 stratification, per-slice counts, the minimum-slice thresholds -- which is why
-it is built before the shards rather than alongside them. The shards cannot be
+it is built before the cohort labels rather than alongside them. Those cannot be
 written until the partitioner has assigned cohorts, and the partitioner cannot
 run until these counts exist.
 

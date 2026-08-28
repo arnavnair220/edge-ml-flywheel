@@ -35,14 +35,14 @@ locals {
 
   # Wildcarded over `partition_version=` so a re-partition is covered by the
   # statement that already exists rather than by an edit nobody makes. Mirrors
-  # `shards_prefix(version, Cohort.EVAL)` in `conventions`.
-  eval_shard_objects = "${local.bucket_arns["data"]}/derived/partition_version=*/shards/cohort=eval/*"
+  # `cohort_labels_prefix(version, Cohort.EVAL)` in `conventions`.
+  eval_label_objects = "${local.bucket_arns["data"]}/derived/partition_version=*/labels/cohort=eval/*"
 
   # Empty, and the emptiness is the current state rather than a placeholder: no
-  # role that exists today has a reason to read an eval shard. The scoring plane
-  # arrives in Phase 3 and adds its ARN here, which is the same one-line diff
-  # that would admit it to `label_reader_arns`.
-  eval_shard_reader_arns = []
+  # role that exists today has a reason to read the eval labels. The scoring
+  # plane arrives in Phase 3 and adds its ARN here, which is the same one-line
+  # diff that would admit it to `label_reader_arns`.
+  eval_label_reader_arns = []
 }
 
 resource "aws_s3_bucket" "this" {
@@ -287,9 +287,9 @@ data "aws_iam_policy_document" "data_bucket" {
     }
   }
 
-  # The second copy of the ground truth. A shard bundles an image with its boxes,
-  # so `shards/cohort=eval/` carries the answers for the 5,000 images every cycle
-  # is scored on, outside the prefix the statement above is scoped to.
+  # The second copy of the ground truth. `labels/cohort=eval/` carries the boxes
+  # for the 5,000 images every cycle is scored on, outside the prefix the
+  # statement above is scoped to.
   #
   # A different failure from the one the label wall catches. Eval labels are
   # never withheld and never charged, so reading one bypasses neither the oracle
@@ -298,11 +298,11 @@ data "aws_iam_policy_document" "data_bucket" {
   # own inputs -- the class of guarantee this bucket policy exists to replace.
   #
   # Denied to every principal, and written ahead of the roles it constrains for
-  # the reason the statements above are allowlists. Reads only: the shards do not
-  # exist yet and something has to create them, so freezing them is the separate
+  # the reason the statements above are allowlists. Reads only: the file does not
+  # exist yet and something has to create it, so freezing it is the separate
   # statement noted at the end of this file.
   statement {
-    sid    = "EvalShardsAreScoringOnly"
+    sid    = "EvalLabelsAreScoringOnly"
     effect = "Deny"
 
     actions = [
@@ -310,7 +310,7 @@ data "aws_iam_policy_document" "data_bucket" {
       "s3:GetObjectVersion",
     ]
 
-    resources = [local.eval_shard_objects]
+    resources = [local.eval_label_objects]
 
     principals {
       type        = "*"
@@ -321,12 +321,12 @@ data "aws_iam_policy_document" "data_bucket" {
     # `StringNotLike` over no ARNs mean the same thing, but the second is a
     # malformed policy, so the condition appears with its first reader.
     dynamic "condition" {
-      for_each = length(local.eval_shard_reader_arns) > 0 ? [1] : []
+      for_each = length(local.eval_label_reader_arns) > 0 ? [1] : []
 
       content {
         test     = "StringNotLike"
         variable = "aws:PrincipalArn"
-        values   = local.eval_shard_reader_arns
+        values   = local.eval_label_reader_arns
       }
     }
   }
@@ -350,10 +350,10 @@ resource "aws_s3_bucket_policy" "other" {
   depends_on = [aws_s3_bucket_public_access_block.this]
 }
 
-# Freezing the eval cohort is a second deny on `shards/cohort=eval/`, on writes
-# rather than on the reads `EvalShardsAreScoringOnly` already refuses. Both are
+# Freezing the eval cohort is a second deny on `labels/cohort=eval/`, on writes
+# rather than on the reads `EvalLabelsAreScoringOnly` already refuses. Both are
 # expressible only because cohort is a path component rather than a column.
 #
 # It waits for a reason the read deny does not share: the statement has to name
-# the writer, and nothing writes these shards yet. Until then the prefix is
+# the writer, and nothing writes these labels yet. Until then the prefix is
 # readable by no one and writable by whatever holds `derived/`.

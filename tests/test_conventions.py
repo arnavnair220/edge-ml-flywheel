@@ -18,10 +18,10 @@ import pytest
 
 from edge_ml_flywheel.conventions import (
     ATHENA_RESULTS_PREFIX,
+    LABELED_COHORTS,
     MANIFEST_PREFIX,
     PURCHASES_PREFIX,
     RAW_PROVENANCE_PREFIX,
-    SHARDED_COHORTS,
     AssignmentRow,
     Buckets,
     ClassSetVersion,
@@ -47,6 +47,8 @@ from edge_ml_flywheel.conventions import (
     _token,
     assignments_key,
     assignments_prefix,
+    cohort_labels_key,
+    cohort_labels_prefix,
     columns,
     cycle_prefix,
     eval_matches_key,
@@ -65,17 +67,16 @@ from edge_ml_flywheel.conventions import (
     parse_model_version,
     parse_run_id,
     partition_prefix,
-    purchase_shard_key,
-    purchase_shards_prefix,
+    purchase_labels_key,
+    purchase_labels_prefix,
     raw_image_key,
     raw_label_key,
     run_prefix,
     run_slug,
     run_started_at,
-    shard_key,
-    shards_prefix,
     table_name,
     telemetry_prefix,
+    training_manifest_key,
     uri,
 )
 
@@ -189,24 +190,24 @@ LAYOUT_CASES: list[tuple[str, Any, str]] = [
         "derived/partition_version=v001/assignments/part-00000.parquet",
     ),
     (
-        "shards_prefix",
-        lambda: shards_prefix(PV, Cohort.BOOTSTRAP),
-        "derived/partition_version=v001/shards/cohort=bootstrap/",
+        "cohort_labels_prefix",
+        lambda: cohort_labels_prefix(PV, Cohort.BOOTSTRAP),
+        "derived/partition_version=v001/labels/cohort=bootstrap/",
     ),
     (
-        "shard_key",
-        lambda: shard_key(PV, Cohort.EVAL, 7),
-        "derived/partition_version=v001/shards/cohort=eval/shard-00007.tar",
+        "cohort_labels_key",
+        lambda: cohort_labels_key(PV, Cohort.EVAL, 7),
+        "derived/partition_version=v001/labels/cohort=eval/part-00007.parquet",
     ),
     (
-        "purchase_shards_prefix",
-        lambda: purchase_shards_prefix(RUN, CYCLE),
+        "purchase_labels_prefix",
+        lambda: purchase_labels_prefix(RUN, CYCLE),
         "derived/purchases/run_id=20260812t143355z-v0-skeleton/cycle=003/",
     ),
     (
-        "purchase_shard_key",
-        lambda: purchase_shard_key(RUN, CYCLE, 7),
-        "derived/purchases/run_id=20260812t143355z-v0-skeleton/cycle=003/shard-00007.tar",
+        "purchase_labels_key",
+        lambda: purchase_labels_key(RUN, CYCLE, 7),
+        "derived/purchases/run_id=20260812t143355z-v0-skeleton/cycle=003/part-00007.parquet",
     ),
     (
         "run_prefix",
@@ -258,6 +259,11 @@ LAYOUT_CASES: list[tuple[str, Any, str]] = [
         "gate_report_key",
         lambda: gate_report_key(RUN, CYCLE),
         "run_id=20260812t143355z-v0-skeleton/cycle=003/gates/report.json",
+    ),
+    (
+        "training_manifest_key",
+        lambda: training_manifest_key(RUN, CYCLE),
+        "run_id=20260812t143355z-v0-skeleton/cycle=003/training/images.manifest",
     ),
     (
         "telemetry_prefix",
@@ -636,16 +642,16 @@ class TestImageTags:
 
 
 class TestCohorts:
-    def test_only_the_labeled_cohorts_are_sharded(self) -> None:
-        # A cohort added to the enum without a decision about sharding lands in
+    def test_only_the_partition_time_cohorts_are_labeled(self) -> None:
+        # A cohort added to the enum without a decision about its labels lands in
         # neither set, and this is where that shows up.
-        assert set(Cohort) - SHARDED_COHORTS == {Cohort.POOL, Cohort.RESERVE}
+        assert set(Cohort) - LABELED_COHORTS == {Cohort.POOL, Cohort.RESERVE}
         assert len(Cohort) == 4
-        assert {Cohort.BOOTSTRAP, Cohort.EVAL} == SHARDED_COHORTS
+        assert {Cohort.BOOTSTRAP, Cohort.EVAL} == LABELED_COHORTS
 
-    def test_eval_is_never_sharded_with_the_training_cohorts(self) -> None:
-        # Distinct prefixes are what lets the eval shards be frozen by policy.
-        assert shards_prefix(PV, Cohort.EVAL) != shards_prefix(PV, Cohort.BOOTSTRAP)
+    def test_eval_labels_do_not_share_a_prefix_with_the_training_cohorts(self) -> None:
+        # Distinct prefixes are what lets the eval labels be denied by policy.
+        assert cohort_labels_prefix(PV, Cohort.EVAL) != cohort_labels_prefix(PV, Cohort.BOOTSTRAP)
 
 
 class TestSplit:
@@ -743,17 +749,17 @@ class TestAssignmentRow:
 
 class TestDerivedKeys:
     @pytest.mark.parametrize("cohort", [Cohort.POOL, Cohort.RESERVE])
-    def test_an_unlabeled_cohort_has_no_shard_prefix(self, cohort: Cohort) -> None:
-        with pytest.raises(ValueError, match="never sharded"):
-            shards_prefix(PV, cohort)
+    def test_an_unlabeled_cohort_has_no_label_prefix(self, cohort: Cohort) -> None:
+        with pytest.raises(ValueError, match="no labels of its own"):
+            cohort_labels_prefix(PV, cohort)
 
     @pytest.mark.parametrize(
         "cohort",
-        sorted(SHARDED_COHORTS),
-        ids=[c.value for c in sorted(SHARDED_COHORTS)],
+        sorted(LABELED_COHORTS),
+        ids=[c.value for c in sorted(LABELED_COHORTS)],
     )
-    def test_every_sharded_cohort_has_a_prefix(self, cohort: Cohort) -> None:
-        assert shards_prefix(PV, cohort).endswith(f"cohort={cohort.value}/")
+    def test_every_labeled_cohort_has_a_prefix(self, cohort: Cohort) -> None:
+        assert cohort_labels_prefix(PV, cohort).endswith(f"cohort={cohort.value}/")
 
 
 # --- Artifacts bucket ---
@@ -873,16 +879,33 @@ OUT_OF_RANGE_CASES: list[tuple[str, Any]] = [
     ("assignments_prefix-1000", lambda: assignments_prefix(PartitionVersion(1000))),
     ("assignments_key-pv--1", lambda: assignments_key(PartitionVersion(-1))),
     ("assignments_key-pv-1000", lambda: assignments_key(PartitionVersion(1000))),
-    ("shards_prefix--1", lambda: shards_prefix(PartitionVersion(-1), Cohort.BOOTSTRAP)),
-    ("shards_prefix-1000", lambda: shards_prefix(PartitionVersion(1000), Cohort.BOOTSTRAP)),
-    ("shard_key-pv--1", lambda: shard_key(PartitionVersion(-1), Cohort.BOOTSTRAP, 0)),
-    ("shard_key-pv-1000", lambda: shard_key(PartitionVersion(1000), Cohort.BOOTSTRAP, 0)),
-    ("shard_key-index--1", lambda: shard_key(PV, Cohort.BOOTSTRAP, -1)),
-    ("shard_key-index-100000", lambda: shard_key(PV, Cohort.BOOTSTRAP, 100000)),
-    ("purchase_shard_key-index--1", lambda: purchase_shard_key(RUN, CYCLE, -1)),
-    ("purchase_shard_key-index-100000", lambda: purchase_shard_key(RUN, CYCLE, 100000)),
-    ("purchase_shard_key-cycle--1", lambda: purchase_shard_key(RUN, Cycle(-1), 0)),
-    ("purchase_shard_key-cycle-1000", lambda: purchase_shard_key(RUN, Cycle(1000), 0)),
+    (
+        "cohort_labels_prefix--1",
+        lambda: cohort_labels_prefix(PartitionVersion(-1), Cohort.BOOTSTRAP),
+    ),
+    (
+        "cohort_labels_prefix-1000",
+        lambda: cohort_labels_prefix(PartitionVersion(1000), Cohort.BOOTSTRAP),
+    ),
+    (
+        "cohort_labels_key-pv--1",
+        lambda: cohort_labels_key(PartitionVersion(-1), Cohort.BOOTSTRAP, 0),
+    ),
+    (
+        "cohort_labels_key-pv-1000",
+        lambda: cohort_labels_key(PartitionVersion(1000), Cohort.BOOTSTRAP, 0),
+    ),
+    ("cohort_labels_key-part--1", lambda: cohort_labels_key(PV, Cohort.BOOTSTRAP, -1)),
+    (
+        "cohort_labels_key-part-100000",
+        lambda: cohort_labels_key(PV, Cohort.BOOTSTRAP, 100000),
+    ),
+    ("purchase_labels_key-part--1", lambda: purchase_labels_key(RUN, CYCLE, -1)),
+    ("purchase_labels_key-part-100000", lambda: purchase_labels_key(RUN, CYCLE, 100000)),
+    ("purchase_labels_key-cycle--1", lambda: purchase_labels_key(RUN, Cycle(-1), 0)),
+    ("purchase_labels_key-cycle-1000", lambda: purchase_labels_key(RUN, Cycle(1000), 0)),
+    ("training_manifest_key-cycle--1", lambda: training_manifest_key(RUN, Cycle(-1))),
+    ("training_manifest_key-cycle-1000", lambda: training_manifest_key(RUN, Cycle(1000))),
     ("manifest_key--1", lambda: manifest_key(-1)),
     ("manifest_key-100000", lambda: manifest_key(100000)),
     ("assignments_key-part--1", lambda: assignments_key(PV, -1)),
@@ -915,14 +938,14 @@ BOUNDARY_CASES: list[tuple[str, Any, str]] = [
         "derived/partition_version=v999/",
     ),
     (
-        "shard-0",
-        lambda: shard_key(PV, Cohort.BOOTSTRAP, 0),
-        "derived/partition_version=v001/shards/cohort=bootstrap/shard-00000.tar",
+        "cohort-labels-0",
+        lambda: cohort_labels_key(PV, Cohort.BOOTSTRAP, 0),
+        "derived/partition_version=v001/labels/cohort=bootstrap/part-00000.parquet",
     ),
     (
-        "shard-99999",
-        lambda: shard_key(PV, Cohort.BOOTSTRAP, 99999),
-        "derived/partition_version=v001/shards/cohort=bootstrap/shard-99999.tar",
+        "cohort-labels-99999",
+        lambda: cohort_labels_key(PV, Cohort.BOOTSTRAP, 99999),
+        "derived/partition_version=v001/labels/cohort=bootstrap/part-99999.parquet",
     ),
     (
         "part-0",
@@ -980,8 +1003,9 @@ class TestNesting:
             lambda: model_prefix(VERSION),
             lambda: eval_prefix(VERSION),
             lambda: gate_report_key(RUN, CYCLE),
+            lambda: training_manifest_key(RUN, CYCLE),
         ],
-        ids=["model_prefix", "eval_prefix", "gate_report_key"],
+        ids=["model_prefix", "eval_prefix", "gate_report_key", "training_manifest_key"],
     )
     def test_sits_under_the_cycle(self, build: Any) -> None:
         assert build().startswith(cycle_prefix(RUN, CYCLE))
@@ -990,9 +1014,9 @@ class TestNesting:
         "build",
         [
             lambda: assignments_prefix(PV),
-            lambda: shards_prefix(PV, Cohort.BOOTSTRAP),
+            lambda: cohort_labels_prefix(PV, Cohort.BOOTSTRAP),
         ],
-        ids=["assignments_prefix", "shards_prefix"],
+        ids=["assignments_prefix", "cohort_labels_prefix"],
     )
     def test_sits_under_the_partition(self, build: Any) -> None:
         assert build().startswith(partition_prefix(PV))
@@ -1030,12 +1054,12 @@ class TestNesting:
         # Which images a cycle bought is a fact about the run, not the partition:
         # two runs over one partition buy differently, and the label-efficiency
         # A/B is the case where they must not collide.
-        prefix = purchase_shards_prefix(RUN, CYCLE)
+        prefix = purchase_labels_prefix(RUN, CYCLE)
         assert not prefix.startswith(partition_prefix(PartitionVersion(version)))
 
     def test_a_purchase_is_separated_by_run(self) -> None:
         other = RunId("20260812t143355z-v1-other")
-        assert purchase_shards_prefix(RUN, CYCLE) != purchase_shards_prefix(other, CYCLE)
+        assert purchase_labels_prefix(RUN, CYCLE) != purchase_labels_prefix(other, CYCLE)
 
 
 ALL_BUILT_KEYS: dict[str, str] = {
@@ -1045,10 +1069,10 @@ ALL_BUILT_KEYS: dict[str, str] = {
     "partition_prefix": partition_prefix(PV),
     "assignments_prefix": assignments_prefix(PV),
     "assignments_key": assignments_key(PV),
-    "shards_prefix": shards_prefix(PV, Cohort.BOOTSTRAP),
-    "shard_key": shard_key(PV, Cohort.EVAL, 7),
-    "purchase_shards_prefix": purchase_shards_prefix(RUN, CYCLE),
-    "purchase_shard_key": purchase_shard_key(RUN, CYCLE, 7),
+    "cohort_labels_prefix": cohort_labels_prefix(PV, Cohort.BOOTSTRAP),
+    "cohort_labels_key": cohort_labels_key(PV, Cohort.EVAL, 7),
+    "purchase_labels_prefix": purchase_labels_prefix(RUN, CYCLE),
+    "purchase_labels_key": purchase_labels_key(RUN, CYCLE, 7),
     "run_prefix": run_prefix(RUN),
     "cycle_prefix": cycle_prefix(RUN, CYCLE),
     "model_prefix": model_prefix(VERSION),
@@ -1058,6 +1082,7 @@ ALL_BUILT_KEYS: dict[str, str] = {
     "eval_metrics_key": eval_metrics_key(VERSION),
     "eval_matches_key": eval_matches_key(VERSION, Seed(1)),
     "gate_report_key": gate_report_key(RUN, CYCLE),
+    "training_manifest_key": training_manifest_key(RUN, CYCLE),
     "telemetry_prefix": telemetry_prefix(RUN, date(2026, 8, 12)),
     "MANIFEST_PREFIX": MANIFEST_PREFIX,
     "PURCHASES_PREFIX": PURCHASES_PREFIX,
@@ -1097,13 +1122,15 @@ class TestSortOrder:
     def test_purchases_sort_numerically_as_strings(self) -> None:
         # A cycle trains on every purchase up to it, so the cumulative labeled set
         # is only a key range if lexicographic order matches cycle order.
-        assert purchase_shards_prefix(RUN, Cycle(2)) < purchase_shards_prefix(RUN, Cycle(10))
+        assert purchase_labels_prefix(RUN, Cycle(2)) < purchase_labels_prefix(RUN, Cycle(10))
 
     def test_partition_versions_sort_numerically_as_strings(self) -> None:
         assert partition_prefix(PartitionVersion(2)) < partition_prefix(PartitionVersion(10))
 
-    def test_shard_indexes_sort_numerically_as_strings(self) -> None:
-        assert shard_key(PV, Cohort.BOOTSTRAP, 2) < shard_key(PV, Cohort.BOOTSTRAP, 10)
+    def test_label_parts_sort_numerically_as_strings(self) -> None:
+        assert cohort_labels_key(PV, Cohort.BOOTSTRAP, 2) < cohort_labels_key(
+            PV, Cohort.BOOTSTRAP, 10
+        )
 
     def test_seeds_sort_numerically_as_strings(self) -> None:
         assert model_artifact_key(VERSION, Seed(2), ModelArtifact.ONNX) < model_artifact_key(

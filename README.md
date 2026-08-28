@@ -33,7 +33,7 @@ denominated in labels, so the pipeline reports accuracy gained per label spent a
 | Cloud | AWS |
 | Edge | Simulated fleet, ARM64 containers on ECS Fargate (Graviton) |
 | Orchestration | Step Functions, single orchestrator |
-| Training | Fargate CPU, then SageMaker spot GPU |
+| Training | SageMaker training jobs, CPU then spot GPU |
 | Model | COCO-pretrained nano detector, frozen backbone, ONNX int8 |
 | IaC | Terraform, S3 backend with DynamoDB lock |
 | CI | GitHub Actions via OIDC, no long-lived keys |

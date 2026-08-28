@@ -7,8 +7,8 @@ from a cohort lookup, so there is no code path here that can address
 The gate is not a check this module performs before doing its work; it is the
 thing that produces the path the work is done on.
 
-Boxes are serialized to compact JSON on the way into a purchase shard. The
-encoding is here rather than in the shard writer because it is the same
+Boxes are serialized to compact JSON on the way into a purchase's parquet. The
+encoding is here rather than in the label writer because it is the same
 serialization the archive uses, and a box that reads back a hair off the corners
 BDD published is a different label from the one that was bought.
 """
@@ -60,7 +60,7 @@ class SoldLabel:
 
 
 def encode_boxes(boxes: Sequence[Box]) -> str:
-    """Boxes as the compact JSON a purchase shard carries beside the image."""
+    """Boxes as the compact JSON a purchase files beside the image ID."""
     return json.dumps(
         [[box.category, *(getattr(box, corner) for corner in _CORNERS)] for box in boxes],
         separators=_COMPACT,
@@ -70,7 +70,7 @@ def encode_boxes(boxes: Sequence[Box]) -> str:
 def decode_boxes(encoded: str) -> tuple[Box, ...]:
     """The inverse, strict about shape.
 
-    A row of the wrong width means the encoding changed under shards already
+    A row of the wrong width means the encoding changed under labels already
     written, which is unrecoverable rather than degraded: the boxes are the
     label. So it raises rather than yielding a box with a corner defaulted to
     zero, which would be a plausible rectangle in the wrong place.
