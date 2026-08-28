@@ -55,12 +55,22 @@ s3://<project>-data-<account>/
     _provenance/                              host, digests, fetch time, license, commit
   derived/
     manifest/part-*.parquet                   80,000 rows of image facts
+    partition_version=<v>/
+      assignments/part-*.parquet              80,000 rows of image_id and cohort
+      labels/cohort={bootstrap,eval}/         boxes for the two labeled cohorts
+    purchases/run_id=<id>/cycle=<n>/          boxes one cycle bought
 ```
+
+Only boxes are stored under `derived/`. Training reads its images from `raw/images/`, so no labeled
+image is held a second time. The cumulative labeled set is a scattered subset of that prefix rather
+than a range within it, so a cycle names its images object by object in a manifest at
+`training_manifest_key`, which a SageMaker `ManifestFile` channel reads directly.
 
 | Property | Rationale |
 |---|---|
 | `raw/` is immutable and writable only by the ingest role | All reprocessing reads from it, so inference outputs can be regenerated offline |
 | The training role is denied `raw/labels/` in both its own policy and the bucket policy | The cohort gate governs what the oracle sells; only an explicit deny governs what another job reads directly |
+| The training role reads `raw/images/100k/train/` and no wider | Split is a path component, so an eval image stays unreachable even if a manifest names one |
 | `_provenance/` is underscore-prefixed | Glue and Athena skip such paths, so a crawler over `raw/` does not index it |
 | All keys are constructed by `edge_ml_flywheel.conventions` | A key formatted at two call sites diverges silently, with the writer still succeeding |
 
@@ -337,7 +347,7 @@ otherwise write a negative.
 When both conditions refuse, the audit condition is the one reported. That case is a retry of a
 purchase that already succeeded, and answering `over budget` would send the caller to buy less when
 the correct answer is that the work is done. A replay returns the original receipt and re-serves the
-same labels, which is what allows the shard write after it to be repeated over the same keys.
+same labels, which is what allows the label write after it to be repeated over the same keys.
 
 | Quantity | Value |
 |---|---|
@@ -425,7 +435,8 @@ place the eval guarantee lives.
 | A repeated image ID refuses the batch | The batch is a set of images to the oracle and a count to the budget, so a duplicate is one label billed twice |
 | `bootstrap` is refused with the rest | Its labels are already owned, and serving them would put a zero-value charge inside the component whose premise is that no label is free |
 
-`bootstrap` reaches training through its shards, so the oracle does one thing: charge, then serve.
+`bootstrap` reaches training through its own label file, so the oracle does one thing: charge, then
+serve.
 
 `eval` sits behind the same wall for a different reason. Its labels are read only by the evaluation
 plane, and are never purchasable, never appended to the training set and never re-drawn within a
@@ -433,7 +444,7 @@ run. It is unpurchasable because the gate refuses it by cohort and because no ke
 oracle can address the split it is drawn from. Zero image-ID overlap between the labeled set and
 `eval` is a hard gate failure with no override, and is the backstop rather than the mechanism.
 
-An eval shard bundles each image with its boxes, so the ground truth exists a second time under
-`shards/cohort=eval/`, outside the `raw/labels/` deny. The bucket policy denies reads on that prefix
-to every principal; the evaluation plane is named there when it is built. The exposure is
-contamination rather than a bypassed budget, since eval labels are never charged.
+The eval boxes exist a second time under `labels/cohort=eval/`, outside the `raw/labels/` deny. The
+bucket policy denies reads on that prefix to every principal; the evaluation plane is named there
+when it is built. The exposure is contamination rather than a bypassed budget, since eval labels are
+never charged.

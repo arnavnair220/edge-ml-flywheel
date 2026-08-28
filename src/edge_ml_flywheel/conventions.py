@@ -10,9 +10,9 @@ question about where something new belongs.
 
 **Key a thing by exactly what its content is a function of.** Key by less and
 two different things collide at one path; key by more and identical bytes are
-stored once per surplus dimension. Shards are a function of the raw data and
-the partition version, so they carry ``partition_version`` and deliberately not
-``run_id`` -- two runs sharing a partition share the shards, which is safe
+stored once per surplus dimension. Cohort labels are a function of the raw data
+and the partition version, so they carry ``partition_version`` and deliberately
+not ``run_id`` -- two runs sharing a partition share them, which is safe
 precisely because a partition change already forces a fresh run and a
 re-baselined champion (design section 5). Model artifacts are a function of
 run, cycle, version and seed, so all four appear. The rule is also what splits
@@ -78,7 +78,6 @@ RecipeVersion = NewType("RecipeVersion", int)
 # question -- but change it before Phase 3 mints anything, or not at all.
 CYCLE_DIGITS: Final = 3
 PARTITION_VERSION_DIGITS: Final = 3
-SHARD_DIGITS: Final = 5
 PART_DIGITS: Final = 5
 
 # One digit, which is to say `seed=1` rather than `seed=01`. A cycle trains five
@@ -565,7 +564,7 @@ class Cohort(StrEnum):
     withheld remainder that the fleet drives through and selection ranks. An
     image leaves the pool by being bought, and which images a cycle bought is a
     fact about a run rather than about the partition, so a purchase is recorded
-    under its run -- see `purchase_shards_prefix` -- and never by reassigning a
+    under its run -- see `purchase_labels_prefix` -- and never by reassigning a
     cohort. Cohort assignment is immutable for the life of a partition version.
 
     `RESERVE` is deliberately inert. Growing `EVAL` mid-run moves the ruler every
@@ -580,10 +579,11 @@ class Cohort(StrEnum):
     RESERVE = "reserve"
 
 
-# `pool` is read one object at a time -- by the fleet, and by the selection pass
-# scoring it -- and `reserve` is not read at all, so neither earns a WebDataset
-# shard. What a cycle buys out of the pool is sharded under its run instead.
-SHARDED_COHORTS: Final = frozenset({Cohort.BOOTSTRAP, Cohort.EVAL})
+# The two cohorts the partitioner labels, and so the two with boxes of their own
+# under the partition prefix. `pool` labels are withheld and sold a batch at a
+# time, so what a cycle buys is filed under its run instead; `reserve` is inert
+# and has labels nowhere.
+LABELED_COHORTS: Final = frozenset({Cohort.BOOTSTRAP, Cohort.EVAL})
 
 # Which split each cohort draws from: everything trainable out of `train`,
 # everything held out of `val`. The leakage rule as data rather than as a
@@ -916,8 +916,8 @@ class ManifestRow:
     """One row per image in `derived/manifest/`. Written once, at ingest.
 
     Every Phase 1 question is a query over this: cohort sizing, eval
-    stratification, per-slice counts. It has to exist before the shards, which
-    cannot be written until the partitioner has assigned cohorts.
+    stratification, per-slice counts. It has to exist before the cohort labels,
+    which cannot be written until the partitioner has assigned cohorts.
 
     `weather`, `scene` and `timeofday` are enums because their vocabularies were
     measured over all 80,000 images before being written down. Eval
@@ -1037,61 +1037,71 @@ def assignments_key(partition_version: PartitionVersion, part: int = 0) -> str:
     """80,000 rows of two columns, well under a megabyte.
 
     `cohort` is a column here, not a prefix: splitting a file this small four
-    ways would make every query slower and buy nothing. The shards under this
-    same partition prefix do use `cohort=` as a prefix, because there the pruning
-    is the point.
+    ways would make every query slower and buy nothing. The cohort labels under
+    this same partition prefix do use `cohort=` as a prefix, because there an IAM
+    policy prunes on it.
     """
     name = _padded("part", part, PART_DIGITS)
     return f"{assignments_prefix(partition_version)}part-{name}.parquet"
 
 
-def shards_prefix(partition_version: PartitionVersion, cohort: Cohort) -> str:
-    """Sharded by cohort, so a bulk read is a prefix selection rather than a
-    filter over everything.
+def cohort_labels_prefix(partition_version: PartitionVersion, cohort: Cohort) -> str:
+    """Where the boxes for one labeled cohort live.
 
-    Only the two cohorts labeled at partition time are sharded. `eval` is frozen
-    after Phase 1 by denying writes under its prefix -- which is only expressible
-    because cohort is a prefix.
+    `cohort=` is a prefix rather than a column for one reason, and it is not query
+    pruning: `eval`'s boxes are a second copy of ground truth outside the
+    `raw/labels/` deny, and an IAM policy can only name a path. Freezing `eval`
+    after Phase 1 is the same statement about writes.
     """
-    if cohort not in SHARDED_COHORTS:
-        raise ValueError(f"{cohort.value} is never sharded")
-    return f"{partition_prefix(partition_version)}shards/cohort={cohort.value}/"
+    if cohort not in LABELED_COHORTS:
+        raise ValueError(f"{cohort.value} has no labels of its own")
+    return f"{partition_prefix(partition_version)}labels/cohort={cohort.value}/"
 
 
-def shard_key(partition_version: PartitionVersion, cohort: Cohort, index: int) -> str:
-    """One ~200 MB WebDataset shard.
+def cohort_labels_key(partition_version: PartitionVersion, cohort: Cohort, part: int = 0) -> str:
+    """One cohort's boxes: `image_id` and its encoded boxes, and nothing else.
 
-    Two representations of the same images, because there are two access
-    patterns: random single-object GET for the fleet and for scoring the pool,
-    bulk sequential reads for five seeds of training every cycle. Only the
-    labeled images are duplicated -- 13,000 at partition time, growing by what
-    each cycle buys -- so the second copy is about 1.5 GB, a few cents a month.
+    Labels only, because the images are already in `raw/images/` and training
+    reads them from there. 13,000 images at roughly 18 boxes each is a few
+    megabytes, against the ~750 MB that bundling the same images beside their
+    boxes would have duplicated.
+
+    One object per cohort rather than a packed set, which `File` input mode
+    settles: the channel is copied to local disk once per job, so every epoch
+    after it reads disk. Whether object count makes that copy slow enough to
+    revisit is measured on v0 rather than guessed (design section 11).
     """
-    name = _padded("index", index, SHARD_DIGITS)
-    return f"{shards_prefix(partition_version, cohort)}shard-{name}.tar"
+    name = _padded("part", part, PART_DIGITS)
+    return f"{cohort_labels_prefix(partition_version, cohort)}part-{name}.parquet"
 
 
 PURCHASES_PREFIX: Final = "derived/purchases/"
 
 
-def purchase_shards_prefix(run_id: RunId, cycle: Cycle) -> str:
-    """One cycle's bought labels, sharded for the same bulk read the cohort
-    shards serve.
+def purchase_labels_prefix(run_id: RunId, cycle: Cycle) -> str:
+    """One cycle's bought boxes.
 
     Keyed by run and cycle rather than by partition version, because which images
     a cycle bought is a fact about that run's selector and budget: two runs over
     one partition buy different images, and the label-efficiency A/B is exactly
     the case where they must not collide. A cycle's training set is therefore the
-    bootstrap shards plus every purchase prefix from cycle 1 up to it, which
-    states the cumulative labeled set as a key range.
+    bootstrap labels plus every purchase prefix from cycle 1 up to it, which
+    states the cumulative labeled set as a key range. That holds for the boxes
+    only; the images it names are scattered across one flat prefix and are
+    addressed by `training_manifest_key` instead.
     """
     return f"{PURCHASES_PREFIX}{cycle_prefix(run_id, cycle)}"
 
 
-def purchase_shard_key(run_id: RunId, cycle: Cycle, index: int) -> str:
-    """One shard of a single cycle's purchase, padded to sort with the rest."""
-    name = _padded("index", index, SHARD_DIGITS)
-    return f"{purchase_shards_prefix(run_id, cycle)}shard-{name}.tar"
+def purchase_labels_key(run_id: RunId, cycle: Cycle, part: int = 0) -> str:
+    """A cycle's purchase in one file, padded to sort with the rest.
+
+    A thousand images of boxes is well under a megabyte, so the part number is
+    here to match `cohort_labels_key` rather than because a cycle is expected to
+    need a second file.
+    """
+    name = _padded("part", part, PART_DIGITS)
+    return f"{purchase_labels_prefix(run_id, cycle)}part-{name}.parquet"
 
 
 # --- Artifacts bucket ---------------------------------------------------------
@@ -1283,8 +1293,7 @@ def eval_matches_key(version: ModelVersion, seed: Seed) -> str:
 
     One file per model-seed, not per image. The bootstrap reads it a thousand
     times, so it has to arrive in a single GET and live in memory; 16,000
-    separate objects would be unusable. Same access-pattern reasoning that
-    produces shards.
+    separate objects would be unusable.
     """
     return f"{eval_prefix(version)}seed={_padded('seed', seed, SEED_DIGITS)}/matches.npz"
 
@@ -1297,6 +1306,27 @@ def gate_report_key(run_id: RunId, cycle: Cycle, suffix: str = "json") -> str:
     pointing here.
     """
     return f"{cycle_prefix(run_id, cycle)}gates/report.{_token('suffix', suffix)}"
+
+
+def training_manifest_key(run_id: RunId, cycle: Cycle) -> str:
+    """The image keys one cycle trains on, in SageMaker `ManifestFile` form.
+
+    The labels are a key range -- bootstrap plus every purchase prefix up to this
+    cycle -- but the images are not. They sit flat under `raw_image_key`'s train
+    prefix among all 70,000, and the cumulative labeled set is a scattered subset
+    of those. An `S3Prefix` channel would take the whole prefix, so the subset has
+    to be named object by object, which is what `ManifestFile` is for.
+
+    The document is a JSON array whose first element is `{"prefix": <s3 uri>}`
+    and whose rest are keys relative to it. Every listed object therefore shares
+    one prefix, which holds here because `raw_image_key` varies only by split and
+    a training set never crosses one.
+
+    Written at prepare time and read by all five seeds, so it doubles as the
+    record of what the challenger trained on: one list under a write-once cycle
+    prefix, rather than a set reconstructed later from a ledger and a partition.
+    """
+    return f"{cycle_prefix(run_id, cycle)}training/images.manifest"
 
 
 # --- Telemetry bucket ---------------------------------------------------------

@@ -35,7 +35,7 @@ opened.
 **A replay is a return value, not an error.** Retrying a purchase that already
 happened is the normal case this is built for, so it returns the original
 receipt marked `replayed` and re-serves the same labels. The caller re-writes the
-same shards over the same keys, which is why the shard write is idempotent.
+same boxes over the same keys, which is why the label write is idempotent.
 """
 
 import logging
@@ -55,7 +55,7 @@ from edge_ml_flywheel.conventions import (
     Table,
     batch_digest,
     purchase_event,
-    purchase_shards_prefix,
+    purchase_labels_prefix,
     table_name,
 )
 from edge_ml_flywheel.oracle.cohorts import Cohorts, check_purchasable
@@ -108,7 +108,7 @@ class Receipt:
     event: str
     digest: str
     images: int
-    shard_prefix: str
+    labels_prefix: str
     replayed: bool
 
     @property
@@ -134,7 +134,7 @@ def _audit_item(
 
     Deliberately holds a count and a digest rather than the image IDs. A
     thousand IDs is well inside the 400 KB item limit and still the wrong place
-    for them: the shards under `shard_prefix` are the record of *which* images
+    for them: the boxes under `labels_prefix` are the record of *which* images
     were bought, and the digest is what lets a claimed batch be checked against
     this item without storing it twice. Same split as the gate report, which
     lives in S3 with a pointer here.
@@ -145,7 +145,7 @@ def _audit_item(
         "cycle": cycle,
         "digest": digest,
         "images": images,
-        "shard_prefix": purchase_shards_prefix(run_id, cycle),
+        "labels_prefix": purchase_labels_prefix(run_id, cycle),
         # Normalized to UTC so the column sorts chronologically, which is the
         # only reason anyone reads it -- the sort key already orders by cycle.
         "created_at": at.astimezone(UTC).isoformat(),
@@ -243,7 +243,7 @@ def charge(
                 event=event,
                 digest=digest,
                 images=images,
-                shard_prefix=purchase_shards_prefix(run.run_id, cycle),
+                labels_prefix=purchase_labels_prefix(run.run_id, cycle),
                 replayed=True,
             )
 
@@ -262,7 +262,7 @@ def charge(
         event=event,
         digest=digest,
         images=images,
-        shard_prefix=purchase_shards_prefix(run.run_id, cycle),
+        labels_prefix=purchase_labels_prefix(run.run_id, cycle),
         replayed=False,
     )
 
@@ -325,9 +325,9 @@ class Oracle:
         `eval` is refused before a key exists. The charge runs second, so a batch
         nobody can pay for reads nothing. Only then is a label fetched.
 
-        Returns the receipt beside the labels rather than writing shards here:
-        what a purchase *is* is the charge, and where its labels are filed is the
-        shard writer's business.
+        Returns the receipt beside the labels rather than writing them here: what
+        a purchase *is* is the charge, and where its labels are filed is the
+        label writer's business.
         """
         check_purchasable(self.cohorts, image_ids)
         receipt = self.charge(cycle, image_ids)
