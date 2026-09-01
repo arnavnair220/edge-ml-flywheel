@@ -60,14 +60,13 @@ cancels. Seed 1 is always the artifact that ships.
 and leaves the champion in place.
 
 **Slice** — a subset of the eval set defined by one factor, scored separately: all night images,
-all snowy images, one object class, small objects only. Slices catch the failure the average hides:
-overall accuracy rising while one condition degrades sharply.
+all snowy images, one object class, small objects only. Slices show what the average hides — overall
+accuracy rising while one condition degrades — and they are reported and charted rather than gated.
 
 **`eval`** — 5,000 images drawn from BDD's `val` split, labeled once at partition time and never
 trained on. It is fixed for the life of a run, so cycle eight's number is comparable to cycle one's.
 It is sampled in proportion to the pool, so overall accuracy is fleet-weighted, and at that size the
-twelve major weather, time-of-day and scene slices each clear the minimum count the regression gate
-requires.
+paired bootstrap band on the overall metric is narrow enough for a cycle's delta to clear it.
 
 **Shadow mode** — the challenger scores the same frames as the champion at the same time, with no
 effect on anything downstream, so the comparison is exact rather than statistical.
@@ -102,11 +101,11 @@ flowchart TB
 
     subgraph EVAL["Evaluation plane"]
         SCORE["score once, cache per-image match arrays"]
-        BOOT["paired bootstrap + per-slice noise bands"]
+        BOOT["paired bootstrap on the overall metric<br/>per-slice scores reported"]
     end
 
-    subgraph GATE["Gating plane — five pure checks"]
-        G["data · quality · edge · regression · canary"]
+    subgraph GATE["Gating plane — four pure checks"]
+        G["data · quality · edge · canary"]
     end
 
     subgraph REG["Registry and promotion plane"]
@@ -163,7 +162,7 @@ Listed in the order a cycle passes through them.
 | 1 | **Data and label supply** | Partitions the dataset once, ranks the unlabeled pool by mean per-object uncertainty over what the fleet actually saw, caps how much of a batch any one condition may take, buys a tenth of every batch at random, and sells labels against a hard budget | Labels can only be obtained by paying the oracle, and `eval` is not purchasable at any price |
 | 2 | **Training** | Trains the challenger on the cumulative labeled set with five fixed seeds, from the COCO base every time, and exports an int8 ONNX artifact | Seed *k* reproduces bit-for-bit; seed 1 is the artifact that ships, never the best-scoring seed |
 | 3 | **Evaluation** | Scores each model once, persists per-image match arrays, then answers every later question from that cache — paired deltas, confidence bands, per-slice metrics | Bootstrap the *paired* delta on a shared eval resample, never each model independently |
-| 4 | **Gating** | Runs five pass/fail checks in order — data, quality, edge, regression, canary. Any hard failure stops the cycle and the champion stays put; the labels stay bought | Zero image-ID overlap with either eval set is a hard fail with no override |
+| 4 | **Gating** | Runs four pass/fail checks in order — data, quality, edge, canary — and emits the per-slice regression report. Any hard failure stops the cycle and the champion stays put; the labels stay bought | Zero image-ID overlap with either eval set is a hard fail with no override |
 | 5 | **Control** | Sequences the cycle, owns retries, branching and short-circuit on gate failure, and holds a single-flight lock so two cycles cannot overlap | Control flow exists exactly once, in ASL — there is no second local orchestrator to diverge from |
 | 6 | **Registry and promotion** | Advances a version through an explicit state machine and records every rejection with its reason | No manifest, no promotion; all five champion seed artifacts are retained, not just the deployed one |
 | 7 | **Edge and fleet** | Publishes deployment intent, and the device agent picks it up: verify checksum, smoke test, atomic swap. One device, then two, then the fleet | Deployment is a pointer flip, never a container rebuild; rollback is a single write |

@@ -27,7 +27,7 @@ from edge_ml_flywheel.conventions import (
     partition_prefix,
     partition_spec,
 )
-from edge_ml_flywheel.partition import assign
+from edge_ml_flywheel.partition import assign, cohort_labels
 
 log = logging.getLogger("edge_ml_flywheel.partition")
 
@@ -72,6 +72,18 @@ def _parser() -> argparse.ArgumentParser:
     drawn = sub.add_parser("assign", help="draw cohorts and write the assignments parquet")
     drawn.add_argument("--stage-dir", type=Path, required=True)
     _add_version(drawn)
+
+    listed = sub.add_parser(
+        "label-keys", help="print the raw label keys the labeled cohorts need, one per line"
+    )
+    listed.add_argument("--stage-dir", type=Path, required=True)
+    _add_version(listed)
+
+    labelled = sub.add_parser(
+        "labels", help="write the bootstrap and eval boxes from staged label documents"
+    )
+    labelled.add_argument("--stage-dir", type=Path, required=True)
+    _add_version(labelled)
 
     return parser
 
@@ -124,6 +136,26 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "assign":
         rows = assign.write(args.stage_dir, PartitionVersion(args.partition_version))
         log.info("assigned %d images to a cohort", len(rows))
+
+    elif args.command == "label-keys":
+        # To stdout, one per line, for the shell to copy -- the same division as
+        # `prefix`. The list is derived from the assignments rather than from the
+        # sizes, so it names the images this version actually drew.
+        rows = assign.read_assignments(args.stage_dir, PartitionVersion(args.partition_version))
+        needed = cohort_labels.keys(rows)
+        log.info("%d label documents to stage", len(needed))
+        print("\n".join(needed))
+
+    elif args.command == "labels":
+        rows = assign.read_assignments(args.stage_dir, PartitionVersion(args.partition_version))
+        written = cohort_labels.write(
+            args.stage_dir, PartitionVersion(args.partition_version), rows
+        )
+        log.info(
+            "labeled %d images across %s",
+            sum(written.values()),
+            ", ".join(cohort.value for cohort in written),
+        )
 
 
 if __name__ == "__main__":

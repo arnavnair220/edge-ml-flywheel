@@ -1,4 +1,4 @@
-# Cohort assignment for one partition_version.
+# Cohort assignment for one partition_version, and the labels it fixes.
 #
 # Run it with:
 #   aws codebuild start-build --project-name edge-ml-flywheel-partition
@@ -76,15 +76,50 @@ phases:
       - uv run python -m edge_ml_flywheel.partition assign --stage-dir "$WORK/stage" --partition-version "$PARTITION_VERSION"
       - ls -lR "$WORK/stage/$PARTITION_PREFIX"
 
+      # The labels `bootstrap` and `eval` own. Three steps rather than one because
+      # which documents to fetch is a function of the draw that just happened: the
+      # package names them, the shell copies them, and the package reads back only
+      # what it named.
+      #
+      # `label-keys` reads the assignments off the staged tree, so the list is the
+      # partition's own answer rather than a size arithmetic that could agree with
+      # it by coincidence. It cannot name a `pool` label -- `cohort_labels.label_key`
+      # raises on any cohort outside `LABELED_COHORTS` -- which makes this file the
+      # audit artifact for what the widened `raw/labels/` grant was spent on.
+      - uv run python -m edge_ml_flywheel.partition label-keys --stage-dir "$WORK/stage" --partition-version "$PARTITION_VERSION" > "$WORK/label-keys.txt"
+      - echo "staging $(wc -l < "$WORK/label-keys.txt") label documents of the 80,000 this role can read"
+
+      # One GET per document, which is what the archive's per-image JSON costs and
+      # the reason `build_timeout` is 30 minutes rather than 20. Parallel because
+      # this is request latency and not bytes -- 13,000 documents are a few
+      # megabytes in total. `--recursive` over the label prefix would be one
+      # command and would put all 80,000 on local disk, including the 62,000 the
+      # oracle exists to sell.
+      #
+      # xargs exits non-zero if any copy did, so a partial stage fails here rather
+      # than becoming a short label file below.
+      - xargs -P 32 -I {} aws s3 cp "s3://$DATA_BUCKET/{}" "$WORK/stage/{}" --only-show-errors < "$WORK/label-keys.txt"
+
+      # Asserts each cohort's file holds exactly that cohort's images before
+      # writing it. Same ordering as the draw above: nothing is uploaded by a run
+      # whose checks did not pass.
+      - uv run python -m edge_ml_flywheel.partition labels --stage-dir "$WORK/stage" --partition-version "$PARTITION_VERSION"
+      - ls -lR "$WORK/stage/$PARTITION_PREFIX"
+
   post_build:
     commands:
       # post_build runs whether or not build succeeded, and this phase writes to
       # the bucket. This is the guard.
       - test "$CODEBUILD_BUILD_SUCCEEDING" = "1"
 
-      # Two objects, and only the partition prefix: the manifest was copied into
-      # the staged tree to be read, and writing it back is a permission this role
-      # deliberately does not hold.
+      # Only the partition prefix: the manifest and the label documents were
+      # copied into the staged tree to be read, and writing either back is a
+      # permission this role deliberately does not hold -- `raw/` is denied it by
+      # the bucket policy whatever this copy addresses.
+      #
+      # Four objects now rather than two. The two cohort label files land under
+      # `labels/cohort=` inside this same prefix, so they are covered by the copy
+      # that already exists rather than by a second one.
       - PARTITION_PREFIX=$(uv run python -m edge_ml_flywheel.partition prefix partition --partition-version "$PARTITION_VERSION")
       - aws s3 cp "$WORK/stage/$PARTITION_PREFIX" "s3://$DATA_BUCKET/$PARTITION_PREFIX" --recursive --only-show-errors
       - aws s3 ls "s3://$DATA_BUCKET/$PARTITION_PREFIX" --recursive

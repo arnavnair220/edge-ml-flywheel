@@ -4,7 +4,7 @@ Closed-loop retraining and deployment pipeline for an edge perception model.
 
 A model runs on a simulated edge fleet, scores unlabeled imagery, and returns the frames it is
 least certain about. The cloud buys ground truth for that batch against a hard label budget,
-retrains, and checks the challenger against five pass/fail gates. A passing model is promoted,
+retrains, and checks the challenger against four pass/fail gates. A passing model is promoted,
 converted to an edge format, deployed to one device, watched, then rolled out or rolled back. That
 deployment produces new observations, and the cycle repeats.
 
@@ -22,8 +22,10 @@ denominated in labels, so the pipeline reports accuracy gained per label spent a
 - **The evaluation machinery is itself under test.** An A/A control trains a challenger on zero new
   information and asserts that the gate refuses it, measuring the gate's false-positive rate
   directly.
-- **Regressions are caught per slice.** Every weather, time-of-day, class and object-scale slice is
-  gated on its own noise band, so overall accuracy cannot rise while one condition degrades.
+- **Slice regressions are reported, not gated.** Every weather, time-of-day, class and object-scale
+  slice is scored and charted, so overall accuracy rising while one condition degrades is visible.
+  Promotion turns on the overall metric alone, since selection is condition-blind and a cycle makes
+  no per-condition bet.
 
 ## Stack
 

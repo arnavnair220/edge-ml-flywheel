@@ -24,10 +24,24 @@ locals {
   # statements are the ones a reviewer most needs to read *before* they take
   # effect, and a role ARN is fully determined by the account and the name -- so
   # the only thing the indirection bought was hiding them. Both spellings derive
-  # from `ingest_role_name`, so the ARN cannot name a role this stack does not
+  # from a role name, so an ARN here cannot name a role this stack does not
   # create.
+  #
+  # The partitioner is a label reader and not a raw writer, which is the shape
+  # these two lists exist to express. It writes the boxes for `bootstrap` and
+  # `eval` under its own partition prefix, and reading `raw/labels/` is the only
+  # way to obtain them: cohort is a column in the assignments parquet, so no
+  # narrower prefix names a cohort's labels. That widens the wall from one
+  # principal to two, which is the floor rather than a concession -- something has
+  # to read a raw label to write those files, and a separate job for it would hold
+  # the identical grant behind an additional role and buildspec.
+  #
+  # What keeps the widening bounded is not IAM. `cohort_labels_prefix` raises on
+  # any cohort outside `LABELED_COHORTS`, so no key this role can construct
+  # addresses a `pool` label, and the partitioner asserts each file holds exactly
+  # its cohort's IDs before writing either one.
   raw_writer_arns   = [local.ingest_role_arn]
-  label_reader_arns = [local.ingest_role_arn]
+  label_reader_arns = [local.ingest_role_arn, local.partition_role_arn]
 }
 
 # Conditioned on the calling project, not just the service. Without

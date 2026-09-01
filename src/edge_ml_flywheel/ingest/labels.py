@@ -128,7 +128,7 @@ def _tag[Tag: StrEnum](
     overlooked; it means the host is serving data this code was not written
     against, which is worth failing an hour-long ingest over. Carrying it through
     would put a tag in the manifest that no eval slice and no condition cap can
-    ever match, and an empty slice reads downstream as a clean pass.
+    ever match, and an empty slice charts as a flat line rather than as a gap.
 
     Generic over the vocabulary so each of the three returns its own type. A
     common `StrEnum` return would type-check a weather value into the scene

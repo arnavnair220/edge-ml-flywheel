@@ -1,13 +1,23 @@
-# The partition identity: reads the manifest, writes one partition version, and
-# can reach nothing else in the data bucket.
+# The partition identity: reads the manifest and the raw labels, writes one
+# partition version, and can reach nothing else in the data bucket.
 #
 # A separate role rather than a reuse of ingest's, which can already write every
-# `derived/` prefix. Ingest is the only principal permitted to write `raw/` or
-# read a withheld label, and those two grants are the whole label wall; a job
-# that needs neither should not hold them because it happens to write to the same
-# bucket. This role is deliberately absent from `raw_writer_arns` and
-# `label_reader_arns`, so the data bucket policy denies it both, and its own
-# policy never mentions `raw/` at all.
+# `derived/` prefix. The two grants that make up the label wall are writing `raw/`
+# and reading a withheld label out of it, and this role holds exactly one of them:
+# it is in `label_reader_arns` and deliberately absent from `raw_writer_arns`, so
+# the bucket policy denies it every write to `raw/` while permitting the reads
+# below.
+#
+# The read is what `bootstrap` and `eval` labels cost. Their boxes have to come
+# from `raw/labels/`, and cohort is a column in the assignments parquet rather
+# than a path component, so no prefix narrower than the whole label tree names
+# them -- the grant is all 80,000 or nothing. Splitting the write into its own job
+# would move that grant rather than shrink it.
+#
+# So the bound on what this role does with the grant is in the package, not in
+# IAM. `cohort_labels_prefix` raises on any cohort outside `LABELED_COHORTS`, so
+# no key this role can build addresses a `pool` label, and the assertion that each
+# file holds exactly its cohort's IDs runs before either is written.
 
 locals {
   partition_project_name = "${var.project}-partition"
@@ -54,7 +64,7 @@ data "aws_iam_policy_document" "partition_trust" {
 
 resource "aws_iam_role" "partition" {
   name               = local.partition_role_name
-  description        = "Cohort assignment. Reads derived/manifest/, writes one partition version."
+  description        = "Cohort assignment and the labels it fixes. Reads derived/manifest/ and raw/labels/, writes one partition version."
   assume_role_policy = data.aws_iam_policy_document.partition_trust.json
 }
 
@@ -62,6 +72,13 @@ data "aws_iam_policy_document" "partition" {
   # Scoped to `derived/`, so this role cannot enumerate `raw/` even to discover
   # what is there. The trailing-slash entries are the prefixes themselves, which
   # a `--recursive` copy lists before it reads.
+  #
+  # Deliberately not widened alongside `ReadRawLabels` below. A label key is
+  # `raw/labels/scalabel/<split>/<image_id>.json`, so the assignments name every
+  # object this job needs and it never has to ask the bucket what exists. The
+  # difference is what a bug can reach: reading a key built from an assignment row
+  # is bounded by that table, while a listing would let a walk of the label tree
+  # find the 62,000 `pool` labels that table refuses to name.
   statement {
     sid       = "ListDerived"
     effect    = "Allow"
@@ -90,6 +107,21 @@ data "aws_iam_policy_document" "partition" {
     effect    = "Allow"
     actions   = ["s3:GetObject"]
     resources = [local.manifest_objects]
+  }
+
+  # The boxes for `bootstrap` and `eval`, which this job copies out to their own
+  # cohort prefixes. Named as `local.raw_label_objects` -- the same string the
+  # `WithheldLabelsAreOracleOnly` deny is scoped to -- so the allow and the deny it
+  # is exempted from cannot drift onto different prefixes.
+  #
+  # No write of any kind on `raw/`, which the bucket policy denies this role
+  # regardless. Both halves are stated because an inline policy is what a reader
+  # checks first and the absence of an action is not something a reader notices.
+  statement {
+    sid       = "ReadRawLabels"
+    effect    = "Allow"
+    actions   = ["s3:GetObject"]
+    resources = [local.raw_label_objects]
   }
 
   # The read is what the redraw guard needs: the buildspec fetches any
@@ -174,12 +206,16 @@ resource "aws_cloudwatch_log_group" "partition" {
 # redraw guard in the buildspec exists to refuse.
 resource "aws_codebuild_project" "partition" {
   name          = local.partition_project_name
-  description   = "Cohort assignment for one partition_version. Started by hand."
+  description   = "Cohort assignment for one partition_version, and the bootstrap and eval labels it fixes. Started by hand."
   service_role  = aws_iam_role.partition.arn
-  build_timeout = 20
+  build_timeout = 30
 
-  # A ceiling on a hang, not an estimate. The work is a 5 MB download, 80,000
-  # digests and a 715 KB upload -- under two minutes including the uv sync.
+  # A ceiling on a hang, not an estimate. The draw is a 5 MB download, 80,000
+  # digests and a 715 KB upload, which ran under two minutes including the uv
+  # sync. The label copy is what the ceiling now has to cover: 13,000 individual
+  # GETs against `raw/labels/`, which is request latency rather than bytes and is
+  # the one part of this job that scales with the cohort sizes rather than with
+  # the manifest.
 
   source {
     type            = "GITHUB"
