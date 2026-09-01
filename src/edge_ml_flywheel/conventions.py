@@ -501,10 +501,12 @@ def model_version_cycle(version: ModelVersion) -> Cycle:
 class Weather(StrEnum):
     """Pool shares run from `clear` at 53% down to `foggy` at 143 images.
 
-    That spread is why the regression gate carries a slice floor rather than
-    gating every member it can name: `foggy` is not measurable at any eval size
-    drawn from this archive, so a slice too small to discriminate is reported and
-    never vetoes (design section 4.4).
+    That spread is why the regression gate is written against overall eval and
+    not against these values: `foggy` is 143 images in the whole archive and a
+    few in any eval drawn from it, so a per-value verdict would be noise wearing
+    a threshold. The vocabulary is here because ingest validates against it and
+    the selection condition cap is a predicate over it, not because anything
+    gates on it.
     """
 
     CLEAR = "clear"
@@ -650,10 +652,11 @@ class PartitionSpec:
 
 PARTITIONS: Final[Mapping[PartitionVersion, PartitionSpec]] = {
     # The sizes are the decision, and each one is load-bearing on its own.
-    # `eval` at 5,000 is what puts twelve slices over the 300-image gating floor;
-    # `bootstrap` at 8,000 leaves the model headroom for a 1,000-label cycle to
-    # move the metric; `pool` at 62,000 makes one cycle 1.6% of what was scored,
-    # which is the selectivity a ranking needs to diverge from a random draw.
+    # `eval` at 5,000 is what puts the overall metric's noise band narrow enough
+    # for a cycle's gain to clear it; `bootstrap` at 8,000 leaves the model
+    # headroom for a 1,000-label cycle to move the metric; `pool` at 62,000 makes
+    # one cycle 1.6% of what was scored, which is the selectivity a ranking needs
+    # to diverge from a random draw.
     #
     # The seed is the date the cohort sizes were settled, which is a way of
     # saying it means nothing -- recorded so that its arbitrariness is on the
@@ -915,16 +918,17 @@ _SHA256: Final = re.compile(r"^[0-9a-f]{64}$")
 class ManifestRow:
     """One row per image in `derived/manifest/`. Written once, at ingest.
 
-    Every Phase 1 question is a query over this: cohort sizing, eval
-    stratification, per-slice counts. It has to exist before the cohort labels,
-    which cannot be written until the partitioner has assigned cohorts.
+    Every Phase 1 question is a query over this: cohort sizing, eval composition,
+    per-slice counts. It has to exist before the cohort labels, which cannot be
+    written until the partitioner has assigned cohorts.
 
     `weather`, `scene` and `timeofday` are enums because their vocabularies were
-    measured over all 80,000 images before being written down. Eval
-    stratification and the selection condition cap are predicates over these
+    measured over all 80,000 images before being written down. The regression
+    report's slices and the selection condition cap are predicates over these
     three columns, and a misspelled tag is the one kind of wrong predicate that
     does not fail: it matches nothing, so the slice empties or the cap never
-    binds, and both read downstream as a clean pass. The parquet column stays
+    binds, and neither says so -- an empty series charts as a flat line and an
+    unbinding cap as a selector nobody constrained. The parquet column stays
     `string` either way -- `StrEnum` serializes to the identical value -- so the
     typing is a parse-boundary guarantee bought without a re-ingest.
 

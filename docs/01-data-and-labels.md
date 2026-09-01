@@ -70,6 +70,8 @@ than a range within it, so a cycle names its images object by object in a manife
 |---|---|
 | `raw/` is immutable and writable only by the ingest role | All reprocessing reads from it, so inference outputs can be regenerated offline |
 | The training role is denied `raw/labels/` in both its own policy and the bucket policy | The cohort gate governs what the oracle sells; only an explicit deny governs what another job reads directly |
+| `bootstrap` labels are copied out of `raw/labels/` rather than read from it | `bootstrap` and `pool` are siblings under `train/` and cohort is a column, so the grant that would give training its own 8,000 labels would give it the 62,000 it is supposed to buy |
+| `labels/cohort=` is writable only by the partition role, on every partition version | The two files are the ruler and the starting line for every cycle of a run, and `derived/` is otherwise writable by ingest too |
 | The training role reads `raw/images/100k/train/` and no wider | Split is a path component, so an eval image stays unreachable even if a manifest names one |
 | `_provenance/` is underscore-prefixed | Glue and Athena skip such paths, so a crawler over `raw/` does not index it |
 | All keys are constructed by `edge_ml_flywheel.conventions` | A key formatted at two call sites diverges silently, with the writer still succeeding |
@@ -91,7 +93,7 @@ One row per image: `image_id`, `split`, `weather`, `scene`, `timeofday`, `n_boxe
   written down: seven weather values, seven scene values, four for time of day, with `undefined` a
   populated member of each rather than a null. Every eval slice and the selection condition cap is a
   predicate over these three columns, and a misspelled value raises nothing and matches nothing, so
-  the slice empties and reports as a pass. The literals are the archive's own — `dawn/dusk` carries a
+  the slice empties and charts as a flat line. The literals are the archive's own — `dawn/dusk` carries a
   slash, `gas stations` is plural — which also makes a tag the one categorical here that is never an
   S3 key component. `StrEnum` serializes identically, so the parquet columns remain `string` and the
   typing cost no re-ingest.
@@ -207,6 +209,32 @@ manifest joined to the assignments.
 python -m edge_ml_flywheel.partition assign --stage-dir ./stage --partition-version 0
 ```
 
+### The labels the draw fixes
+
+`bootstrap` and `eval` own labels from the moment they are drawn, so their boxes are copied out of
+`raw/labels/` into `labels/cohort=<name>/part-00000.parquet` under the same partition prefix. Two
+columns: `image_id`, and the boxes in the compact encoding `oracle.labels` writes a purchase in, so
+training decodes an owned label and a bought one with one function.
+
+The copy runs as three steps, because which documents to fetch is a function of the draw that just
+happened. `label-keys` names them off the assignments, the shell copies exactly that list, and
+`labels` reads back only what it named. Nothing enumerates `raw/labels/` — `ListBucket` on the
+partition role stays scoped to `derived/`, so a key is reachable only by being named from the
+assignments, and `cohort_labels.label_key` raises on any cohort outside `LABELED_COHORTS`.
+
+| Property | Rationale |
+|---|---|
+| `bootstrap` is copied because it must be | Its labels sit beside `pool`'s under `train/` with cohort as a column, so no prefix names them and `raw/labels/scalabel/train/` is ungrantable to training |
+| `eval` is copied although it need not be | `val` holds only `eval` and `reserve`, so a raw grant would leak nothing. Copying it anyway makes both labeled cohorts one mechanism rather than a second path existing to save a file |
+| The partition role reads all of `raw/labels/` | The grant is the whole label tree or nothing, for the reason `bootstrap` needs the copy. A separate job for the write would hold the identical grant behind another role and buildspec |
+| Each file is checked for exactly its cohort's IDs before it is written | Set equality, not a count: a count passes a file holding one `pool` image and missing one `bootstrap` image, which is the shape a wrong key list produces |
+| Both prefixes are write-denied to everything but the partitioner | Immutability under the one exempt writer is the redraw guard, which is what `assignments/` already runs under |
+
+```
+python -m edge_ml_flywheel.partition label-keys --stage-dir ./stage --partition-version 0
+python -m edge_ml_flywheel.partition labels --stage-dir ./stage --partition-version 0
+```
+
 ### Eval composition
 
 `eval` is not stratified. No quota is placed on any slice, and the counts below are what the uniform
@@ -229,13 +257,19 @@ that costs is exactness: nothing pins a slice to a count, so each lands somewhat
 `snowy` at 349 against 396, `city street` at 3,032 against 3,106. The gap is `val`'s share differing
 from the pool's plus the draw being one sample of it.
 
-A slice is gated only if it holds at least 300 images. Below that the bootstrap noise band is wide
-enough to admit almost any delta and the gate stops discriminating. Twelve slices clear the floor.
-Six do not and are reported without being gated: `foggy` (3), `parking lot` (26), `tunnel` (13),
-`gas stations` (4), and the `undefined` members of `scene` (23) and `timeofday` (14). Which group a
-slice falls in is not the draw's decision to make: the lowest gated slice is `snowy` at 349 and the
-largest ungated one is `parking lot` at 26. Fog is not measurable at any eval size drawn from this
-dataset, at 143 images in the full 80,000.
+No slice votes. Promotion is decided on the overall metric over all 5,000 images, and the per-slice
+scores are computed and charted. Acquisition is condition-blind — the selector ranks on uncertainty
+and never targets a slice — so a cycle makes no per-condition bet for a per-condition gate to
+settle. The spread above is the second reason: slices run from `city street` at 3,032 images down to
+`gas stations` at 4, and a veto from the small end would fire on chance alone, while excluding them
+would take a size floor, a per-slice noise band and a persistence rule.
+
+The slices feed the composition chart, which reads a cycle's purchase mix against how each
+condition's score then moved. None carries a minimum, since none of them votes.
+
+Slices are keyed `axis=value`, since `undefined` is a populated member of all three vocabularies and
+names three different slices. Fog is a permanent limit rather than a sizing choice: 143 images in
+the full 80,000, so no draw from this dataset makes the slice large.
 
 Class and object-scale slices are queries over the eval cohort's labels, not partition decisions,
 and the scale threshold belongs to the evaluation module that owns the metric: at 416 px, 87.8
@@ -245,8 +279,17 @@ more than any partition choice does.
 ### Execution environment
 
 The partitioner runs in CodeBuild under its own role, not ingest's. It reads `derived/manifest/` and
-writes one `derived/partition_version=` prefix. It holds no grant on `raw/` and appears in neither
-the raw-writer nor the label-reader allowlist, so the bucket policy denies it both.
+`raw/labels/`, and writes one `derived/partition_version=` prefix. It appears in
+`label_reader_arns` and not in `raw_writer_arns`, so the bucket policy permits those reads and
+denies it every write to `raw/`. `ListBucket` stays scoped to `derived/`, so it can read a label key
+it can name and cannot walk the label tree to discover one.
+
+That makes two principals on the label-reader allowlist rather than one. The widening is the floor
+rather than a concession: some job has to read a raw label to write the cohort files, and a separate
+job for it would hold the identical grant behind another role and buildspec. What bounds it is in
+the package — `cohort_labels.label_key` refuses any cohort outside `LABELED_COHORTS`, the staged key
+list is derived from the assignments, and each output file is checked for exactly its cohort's IDs
+before it is written.
 
 `buildspecs/partition.yml` defines the sequence and contains no S3 keys: `partition prefix` prints
 both prefixes out of `conventions`, and each copy is a recursive copy of one of them. The manifest is
@@ -444,7 +487,13 @@ run. It is unpurchasable because the gate refuses it by cohort and because no ke
 oracle can address the split it is drawn from. Zero image-ID overlap between the labeled set and
 `eval` is a hard gate failure with no override, and is the backstop rather than the mechanism.
 
-The eval boxes exist a second time under `labels/cohort=eval/`, outside the `raw/labels/` deny. The
-bucket policy denies reads on that prefix to every principal; the evaluation plane is named there
-when it is built. The exposure is contamination rather than a bypassed budget, since eval labels are
-never charged.
+The eval boxes exist a second time under `labels/cohort=eval/`, outside the `raw/labels/` deny.
+`EvalLabelsAreScoringOnly` denies reads on that prefix to every principal; the evaluation plane is
+named there when it is built. The exposure is contamination rather than a bypassed budget, since
+eval labels are never charged.
+
+`cohort=bootstrap/` is the other half of that copy and carries no read deny, because training owns
+those 8,000 labels and reading them is the point. Both prefixes are write-denied to every principal
+but the partitioner by `LabelsAreFrozenExceptThePartitioner`, which is what makes cycle eight's
+number comparable to cycle one's: the ruler and the starting line are two objects nothing else in
+the account can replace, and `derived/` is otherwise writable by ingest as well.

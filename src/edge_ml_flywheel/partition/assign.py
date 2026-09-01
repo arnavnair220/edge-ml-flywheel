@@ -92,6 +92,33 @@ def read_manifest(stage_dir: Path) -> pa.Table:
     )
 
 
+def read_assignments(
+    stage_dir: Path, partition_version: PartitionVersion
+) -> tuple[AssignmentRow, ...]:
+    """The draw read back out of the staged tree.
+
+    The label copy runs as its own step, after the shell has staged the documents
+    the draw says to fetch, so it reads the assignments this module wrote rather
+    than being handed them. Sorted by `image_id` for `assign`'s reason, which
+    makes the round trip through parquet an identity on ordering as well as on
+    content.
+    """
+    path = stage_dir / assignments_key(partition_version)
+    if not path.is_file():
+        raise ValueError(f"no assignments parquet at {path}")
+
+    table = pq.read_table(path, columns=list(columns(AssignmentRow)))
+    rows = [
+        AssignmentRow(image_id=parse_image_id(value), cohort=Cohort(cohort))
+        for value, cohort in zip(
+            table.column("image_id").to_pylist(),
+            table.column("cohort").to_pylist(),
+            strict=True,
+        )
+    ]
+    return tuple(sorted(rows, key=lambda row: row.image_id))
+
+
 def ticket(seed: PartitionSeed, image_id: ImageId) -> str:
     """One image's place in the draw, as lowercase hex.
 
@@ -331,6 +358,7 @@ def write(stage_dir: Path, partition_version: PartitionVersion) -> tuple[Assignm
 
     for cohort, size in spec.sizes.items():
         log.info("%s: %d images from %s", cohort.value, size, COHORT_SPLIT[cohort].value)
+
     _log_composition(composition(manifest, rows))
     log.info("wrote %s", assignments_key(partition_version))
     return rows

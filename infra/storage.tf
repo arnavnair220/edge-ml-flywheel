@@ -38,11 +38,24 @@ locals {
   # `cohort_labels_prefix(version, Cohort.EVAL)` in `conventions`.
   eval_label_objects = "${local.bucket_arns["data"]}/derived/partition_version=*/labels/cohort=eval/*"
 
+  # Both labeled cohorts, which the read statements above and below deliberately
+  # do not treat alike: `bootstrap` is read by training and `eval` must not be,
+  # while neither may be overwritten once drawn. One prefix rather than two
+  # because `LABELED_COHORTS` is the set that has labels at all, so a cohort added
+  # to it lands inside this statement without an edit here.
+  cohort_label_objects = "${local.bucket_arns["data"]}/derived/partition_version=*/labels/*"
+
   # Empty, and the emptiness is the current state rather than a placeholder: no
   # role that exists today has a reason to read the eval labels. The scoring
   # plane arrives in Phase 3 and adds its ARN here, which is the same one-line
   # diff that would admit it to `label_reader_arns`.
   eval_label_reader_arns = []
+
+  # The partitioner writes these files and nothing else may. Not empty for the
+  # reason the list above is: a deny with no exemption would refuse the job that
+  # creates them, so the freeze is a boundary around one writer rather than an
+  # absence of writers.
+  cohort_label_writer_arns = [local.partition_role_arn]
 }
 
 resource "aws_s3_bucket" "this" {
@@ -298,9 +311,10 @@ data "aws_iam_policy_document" "data_bucket" {
   # own inputs -- the class of guarantee this bucket policy exists to replace.
   #
   # Denied to every principal, and written ahead of the roles it constrains for
-  # the reason the statements above are allowlists. Reads only: the file does not
-  # exist yet and something has to create it, so freezing it is the separate
-  # statement noted at the end of this file.
+  # the reason the statements above are allowlists. Reads only -- what may write
+  # these files is `LabelsAreFrozenExceptThePartitioner` below, which is a
+  # separate statement because it covers `bootstrap` too and exempts a writer this
+  # one has no reason to admit.
   statement {
     sid    = "EvalLabelsAreScoringOnly"
     effect = "Deny"
@@ -330,6 +344,46 @@ data "aws_iam_policy_document" "data_bucket" {
       }
     }
   }
+
+  # The freeze. Every cycle of a run is scored against the same 5,000 eval images
+  # and starts from the same 8,000 bootstrap ones, and "the same" is a claim about
+  # two files that has to survive every job that can write `derived/` -- ingest
+  # among them, which can write every prefix under it. This is what makes cycle
+  # eight's number comparable to cycle one's rather than merely intended to be.
+  #
+  # `RawIsWriteOnceExceptIngest` says this about the archive and this statement
+  # says it about the two derived copies, which is the same property stated at the
+  # two places ground truth lives.
+  #
+  # The exemption is the partitioner, so immutability here is not what the policy
+  # enforces -- the policy keeps everyone else out, and the redraw guard is what
+  # stops the one exempt writer from replacing a version already in the bucket.
+  # That is the arrangement `assignments/` already runs under, and splitting the
+  # labels away from it would mean two answers to "can this partition version
+  # change".
+  statement {
+    sid    = "LabelsAreFrozenExceptThePartitioner"
+    effect = "Deny"
+
+    actions = [
+      "s3:PutObject",
+      "s3:DeleteObject",
+      "s3:DeleteObjectVersion",
+    ]
+
+    resources = [local.cohort_label_objects]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    condition {
+      test     = "StringNotLike"
+      variable = "aws:PrincipalArn"
+      values   = local.cohort_label_writer_arns
+    }
+  }
 }
 
 resource "aws_s3_bucket_policy" "data" {
@@ -350,10 +404,13 @@ resource "aws_s3_bucket_policy" "other" {
   depends_on = [aws_s3_bucket_public_access_block.this]
 }
 
-# Freezing the eval cohort is a second deny on `labels/cohort=eval/`, on writes
-# rather than on the reads `EvalLabelsAreScoringOnly` already refuses. Both are
-# expressible only because cohort is a path component rather than a column.
+# What the data bucket policy still does not say, so that its absence is on the
+# record rather than an omission:
 #
-# It waits for a reason the read deny does not share: the statement has to name
-# the writer, and nothing writes these labels yet. Until then the prefix is
-# readable by no one and writable by whatever holds `derived/`.
+# Training's read of `labels/cohort=bootstrap/` is a grant in the training role's
+# own policy and has no statement here. It needs none -- `EvalLabelsAreScoringOnly`
+# names `cohort=eval/` alone, so the bootstrap prefix is already reachable by
+# whatever `derived/` grant a role carries, and a deny that admitted training
+# would be an allowlist restating the role policy rather than bounding it. The
+# asymmetry is the point: reading the wrong one of these two prefixes is a
+# contaminated eval, so only that one is denied at the bucket.
