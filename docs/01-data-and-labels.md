@@ -91,7 +91,7 @@ One row per image: `image_id`, `split`, `weather`, `scene`, `timeofday`, `n_boxe
 - **`weather`, `scene` and `timeofday` are enums over the measured vocabularies.** Their value
   domains are properties of the archive, so they were counted over all 80,000 images before being
   written down: seven weather values, seven scene values, four for time of day, with `undefined` a
-  populated member of each rather than a null. Every eval slice and the selection condition cap is a
+  populated member of each rather than a null. Every eval slice and the selection mix record is a
   predicate over these three columns, and a misspelled value raises nothing and matches nothing, so
   the slice empties and charts as a flat line. The literals are the archive's own — `dawn/dusk` carries a
   slash, `gas stations` is plural — which also makes a tag the one categorical here that is never an
@@ -349,18 +349,16 @@ and this one mints a new `run_id` on every invocation, so a push to `main` would
 
 ## Selection and purchase
 
-One cycle spends its budget in six steps:
+One cycle spends its budget in five steps:
 
 1. The champion scores every remaining pool image. This is inference over image features only; no
    label is read, so the step sits entirely inside the label wall.
 2. Each image gets a **mean per-object uncertainty** score. Per-object rather than per-image,
    because an image-level maximum is decided by its single worst box and ranks a frame with one
    ambiguous detection above a frame the model is uniformly unsure of.
-3. Selection walks the ranked list from the top, taking an image only while its `weather` and
-   `timeofday` bucket is under its cap, and stops at 900.
-4. A further 100 are drawn at random from the rest of the pool.
-5. The 1,000 go to the oracle.
-6. The oracle checks the idempotency key, debits the ledger, releases those labels, and appends them
+3. The top 1,000 of the ranked list are the batch.
+4. The batch's `weather` and `timeofday` mix is recorded beside the remaining pool's.
+5. The oracle checks the idempotency key, debits the ledger, releases those labels, and appends them
    to the cumulative labeled set.
 
 The budget is a property of the run, not a constant of the system: it is set at registration, and
@@ -383,9 +381,9 @@ crash there is unrecoverable because the retry cannot tell which half it is resu
 transaction applies both or neither.
 
 The digest is over the sorted image IDs, so a retry that re-ranks a tie is the same purchase rather
-than a second one. A batch larger than the whole cycle's cap is refused before the call: on a first
-purchase there is no `remaining` for the condition to compare against, and the create branch would
-otherwise write a negative.
+than a second one. A batch larger than the whole cycle's budget is refused before the call: on a
+first purchase there is no `remaining` for the condition to compare against, and the create branch
+would otherwise write a negative.
 
 When both conditions refuse, the audit condition is the one reported. That case is a retry of a
 purchase that already succeeded, and answering `over budget` would send the caller to buy less when
@@ -395,9 +393,7 @@ same labels, which is what allows the label write after it to be repeated over t
 | Quantity | Value |
 |---|---|
 | Budget per cycle | 1,000 labels, per the run registration |
-| Selected by uncertainty | 900 |
-| Drawn at random | 100 |
-| Per-condition cap | twice the bucket's share of the remaining pool |
+| Selected by uncertainty | 1,000, the whole batch |
 | Cycles per run | 8, planned rather than enforced |
 | Total purchased | 8,000 at eight cycles |
 | Training set | 8,000 at cycle 0, 16,000 after cycle 8 |
@@ -411,7 +407,7 @@ gate's noise band, so cycles would fail to promote for lack of signal rather tha
 
 ### The selector is a config value
 
-Steps 2 to 4 are one swappable function. All three rules are named before any of them is needed, so
+Steps 2 and 3 are one swappable function. All three rules are named before any of them is needed, so
 the deferred label-efficiency arm — see [planned additions](00-overview.md#planned-additions) —
 changes one field rather than adding a second code path. A selector change deliberately does not
 force a fresh champion baseline, since the arms are paired against one.
@@ -419,9 +415,9 @@ force a fresh champion baseline, since the arms are paired against one.
 `random` needs only the remaining pool and a seed, with no inference at all, which also makes it the
 smoke test for the ranking-to-purchase path before a champion exists to score with.
 
-### Why the ranked list is not bought directly
+### Why the ranked list is bought unfiltered
 
-Raw top-N on uncertainty degrades in two ways, with unequal consequences:
+Raw top-N on uncertainty is known to degrade in two ways, with unequal consequences:
 
 - **The top of the list is redundant.** Images are uncertain for shared reasons, so an unfiltered
   top 1,000 can be a thousand near-identical night highway frames. The budget is spent and the
@@ -430,33 +426,37 @@ Raw top-N on uncertainty degrades in two ways, with unequal consequences:
   ambiguous objects all score highly and teach nothing that generalizes. This costs a fraction of a
   batch, and the fraction is unmeasured.
 
-The cap addresses the first at the coarsest granularity the manifest supports. The random draw bounds
-both, since a tenth of every batch is bought without reference to the champion's confusions.
+Neither is corrected. Any correction is a threshold — how much of a batch one condition may take, how
+blurred is too blurred — and no cycle has yet reported what those thresholds should be. Selection
+buys the ranking as it stands, and the mix record is what turns the first failure into a number.
 
-The cap is measured against the remaining pool, recomputed each cycle. A fleet gathering its own
-footage has no other reference: condition tags come from the vehicle, so they exist on unbought
-frames, but a true population proportion does not.
+Step 4 records the batch's `weather` and `timeofday` mix beside the remaining pool's. The pool is the
+only available reference: condition tags come from the vehicle, so they exist on unbought frames, but
+a true population proportion does not. A batch collapsed onto one condition is visible in that record
+the cycle it happens; a batch whose mix tracks the pool's shows redundancy is not the problem.
 
-Every cycle records the batch's condition mix beside the pool's, and the count each stage rejected. A
-cap that binds every cycle reports a ranking collapsed onto one condition; a batch whose mix already
-matches the pool's reports a cap that never engaged.
+The record is also what disambiguates a null result. A cycle that gains nothing over the random
+control is either a ranking that does not work or a batch that was a thousand copies of one scene,
+and the two call for opposite responses.
 
 ### Deferred
 
-Redundancy inside a single condition bucket, and unlabelable frames, are not addressed. Both need a
-finer signal than the manifest carries, and neither can be sized before the first cycles report what
-they bought.
+Both degradation modes above are left in place, along with redundancy inside a single condition
+bucket. All three need a threshold or a finer signal than the manifest carries, and none can be sized
+before the first cycles report what they bought.
 
 What ends a run is also open. No cycle count is recorded at registration and the ledger seeds a
-cycle whenever one asks, so the per-cycle cap holds and the run-level total does not. A fixed count,
-a stalled gate or a total-spend ceiling all remain available without a schema change, since
+cycle whenever one asks, so the per-cycle budget holds and the run-level total does not. A fixed
+count, a stalled gate or a total-spend ceiling all remain available without a schema change, since
 cumulative spend is a sum over the run's ledger partition.
 
 | Addition | Condition that unlocks it |
 |---|---|
-| Dedup on image embeddings | The cap binds every cycle, or batches stay redundant inside one bucket |
+| A per-condition cap on the batch, sized off the remaining pool | The mix record shows a batch collapsed onto one condition |
+| A random fraction of every batch, bought without reference to the champion | The uncertainty arm fails to beat the random control and the mix record does not explain why |
+| Dedup on image embeddings | The cap is in place and batches stay redundant inside one bucket |
 | A blur and exposure screen over a derived quality table | Unlabelable frames appear in what was bought |
-| Seed disagreement in place of single-model uncertainty | Both of the above are in place and cycles still fail the quality gate |
+| Seed disagreement in place of single-model uncertainty | The above are in place and cycles still fail the quality gate |
 
 ### The label wall
 
