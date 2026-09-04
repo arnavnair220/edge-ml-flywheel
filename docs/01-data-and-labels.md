@@ -101,6 +101,34 @@ One row per image: `image_id`, `split`, `weather`, `scene`, `timeofday`, `n_boxe
 The manifest precedes partitioning because cohort sizing, eval composition and per-slice counts are
 all queries against it.
 
+### Object class vocabulary
+
+The label parser selects boxes by structure — an object carrying `box2d` rather than an `area/*` or
+`lane/*` polygon — so the boxed vocabulary is measured at ingest and recorded in
+`_provenance/integrity.json`. Ten categories carry boxes, from `car` at 816,423 to `train` at 151.
+
+`class_set_version` names which of them a model predicts, and so which the metric covers:
+
+| `class_set_version` | Classes |
+|---|---|
+| 1 | `car`, `person`, `truck`, `bus` |
+| 2 | version 1 plus `traffic sign`, `traffic light`, `bike`, `rider`, `motor` |
+
+Both are declared before either is needed, on `partition_version`'s rule: add a version, never edit
+one. Three properties:
+
+- **Category IDs are 1-based positions in the version's tuple, ordered by measured frequency.** The
+  IDs are stored in every cached match array, which holds `2` and not `truck`, so reordering a
+  version re-labels existing eval artifacts without raising.
+- **A class set is validated against the measured vocabulary.** The legacy archive spells three
+  categories `person`, `motor` and `bike` where `det_20` says `pedestrian`, `motorcycle` and
+  `bicycle`. A `det_20` spelling matches no ground truth, so that class scores 0.0 AP every cycle
+  and nothing fails; the check makes it a construction-time error.
+- **`train` is in neither set**, at 151 boxes archive-wide.
+
+There is no version 0. The v0 skeleton predicts the tag columns above rather than boxes, so its runs
+declare `class_set_version=0`, which names no entry and resolves to an error.
+
 ### Verification
 
 Two archives on this host do not match their filenames, and the images archive publishes no digest.

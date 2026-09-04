@@ -4,7 +4,19 @@ version = "0.0.0"
 description = "Closed-loop retraining and deployment pipeline for an edge perception model"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+
+# Project dependencies rather than a group, unlike `ingest` and `run` below.
+# Those two are one job's needs; these are the pure-logic layer's, which the
+# training container, the gate step and the test suite all import.
+#
+# `pycocotools` supplies the greedy IoU matching: a reimplementation is a few
+# hundred lines of subtle code whose numbers compare to no published COCO
+# result. `numpy` arrives with it transitively and is listed anyway, since every
+# match-cache annotation in this layer is an `NDArray`.
+dependencies = [
+    "numpy>=2",
+    "pycocotools>=2.0.8",
+]
 
 # One lockfile covers both the local test environment and the training
 # container, and a lock resolves against requires-python. So this range tracks
@@ -94,11 +106,27 @@ ignore_missing_imports = true
 module = ["boto3.*", "botocore.*"]
 ignore_missing_imports = true
 
+# The Phase 2 ratchet, promised by the comment above `[tool.mypy]`. Scoped per
+# package rather than set globally, so an older module complaining is not a
+# reason to switch it off everywhere.
+#
+# A match array is `NDArray[np.float64]` of a stated rank, so accumulation cannot
+# be handed the ignore mask in place of the scores -- a substitution that yields a
+# plausible number rather than an exception, and surfaces as a wrong promotion
+# decision after a four-hour training job.
+[[tool.mypy.overrides]]
+module = ["edge_ml_flywheel.evaluation.*"]
+strict = true
+
 [dependency-groups]
 dev = [
     "mypy>=1.18",
     "pytest>=8",
     "ruff>=0.16.2",
+    # From typeshed rather than an `ignore_missing_imports` override: an untyped
+    # `COCOeval` returns `Any`, and every match-array shape downstream of it then
+    # type-checks against anything.
+    "types-pycocotools>=2.0.0.20250809",
     # An in-process DynamoDB that honours condition expressions, which is the
     # one behaviour the registration depends on. A hand-rolled fake would be a
     # fake that returns whatever the test needs: the conditional put is the
