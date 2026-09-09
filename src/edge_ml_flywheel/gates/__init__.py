@@ -15,11 +15,11 @@ and a rejection with its reason is the artifact the project is built to produce
 costs a training run, so short-circuiting turns one diagnosis into two cycles.
 
 `Gate` names four checks and this package implements two. `EDGE` and `CANARY`
-read p95 latency on an ARM64 task and two replay hours of device telemetry, and
-nothing produces either yet -- writing them now would mean inventing their input
-shape and testing against the invention. They land with their producers, in
-phases 6 and 7; `thresholds.Gate` reserves the names in the meantime so the
-report format and the state machine can already be written against them.
+read p95 latency on a Graviton device and two replay hours of device telemetry,
+and nothing produces either yet -- writing them now would mean inventing their
+input shape and testing against the invention. They land with their producers in
+phase 5; `thresholds.Gate` reserves the names in the meantime so the report
+format and the state machine can already be written against them.
 """
 
 from edge_ml_flywheel.gates.data import data_gate

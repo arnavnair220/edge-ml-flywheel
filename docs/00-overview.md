@@ -95,12 +95,12 @@ flowchart TB
     end
 
     subgraph TRAIN["Training plane"]
-        SEEDS["YOLO11n, 5 matched seeds from the COCO base<br/>deterministic, spot, discard on interrupt"]
+        SEEDS["YOLO11n, 5 matched seeds from the COCO base<br/>seeded, spot, discard on interrupt"]
         EXPORT["ONNX int8 export for ARM64"]
     end
 
     subgraph EVAL["Evaluation plane"]
-        SCORE["score once, cache per-image match arrays"]
+        SCORE["batch transform over eval and pool<br/>score once, cache per-image match arrays"]
         BOOT["paired bootstrap on the overall metric<br/>per-slice scores reported"]
     end
 
@@ -114,11 +114,11 @@ flowchart TB
 
     subgraph EDGE["Edge and fleet plane"]
         CFG[("fleet_config<br/>desired_version per device")]
-        AGENT["device agent, 5 ARM64 tasks<br/>poll · verify sha256 · smoke test · hot swap"]
+        AGENT["IoT Greengrass on Graviton devices<br/>verify digest · staged deploy · roll back"]
     end
 
     subgraph OBS["Telemetry and reporting plane"]
-        TEL["agent writes parquet to S3"]
+        TEL["IoT Core to Firehose to parquet in S3"]
         DASH["Athena queries<br/>six charts as static images"]
     end
 
@@ -136,7 +136,6 @@ flowchart TB
     SM --> CFG
     CFG --> AGENT
     AGENT -->|"per-detection confidence"| TEL
-    TEL --> SEL
     TEL --> DASH
 
     SFN -.-> DATA
@@ -156,14 +155,14 @@ Listed in the order a cycle passes through them.
 
 | # | Plane | What it does in a cycle | Invariant it owns |
 |---|---|---|---|
-| 1 | **Data and label supply** | Partitions the dataset once, ranks the unlabeled pool by mean per-object uncertainty over what the fleet actually saw, buys the top of that ranking, records the batch's condition mix beside the pool's, and sells labels against a hard budget | Labels can only be obtained by paying the oracle, and `eval` is not purchasable at any price |
-| 2 | **Training** | Fine-tunes YOLO11n on the cumulative labeled set with five fixed seeds, from the COCO base every time, and exports an int8 ONNX artifact | Seed *k* reproduces bit-for-bit; seed 1 is the artifact that ships, never the best-scoring seed |
-| 3 | **Evaluation** | Scores each model once, persists per-image match arrays, then answers every later question from that cache — paired deltas, confidence bands, per-slice metrics | Bootstrap the *paired* delta on a shared eval resample, never each model independently |
+| 1 | **Data and label supply** | Partitions the dataset once, ranks the remaining pool by mean per-object uncertainty from the champion's offline scoring pass, buys the top of that ranking, records the batch's condition mix beside the pool's, and sells labels against a hard budget | Labels can only be obtained by paying the oracle, and `eval` is not purchasable at any price |
+| 2 | **Training** | Fine-tunes YOLO11n on the cumulative labeled set with five fixed seeds, from the COCO base every time, and exports an int8 ONNX artifact | Seed *k* is fixed and recorded; seed 1 is the artifact that ships, never the best-scoring seed |
+| 3 | **Evaluation** | Scores each model once over `eval` and the pool, persists per-image match arrays, then answers every later question from that cache — paired deltas, confidence bands, per-slice metrics | Bootstrap the *paired* delta on a shared eval resample, never each model independently |
 | 4 | **Gating** | Runs four pass/fail checks in order — data, quality, edge, canary — and emits the per-slice regression report. Any hard failure stops the cycle and the champion stays put; the labels stay bought | Zero image-ID overlap with either eval set is a hard fail with no override |
 | 5 | **Control** | Sequences the cycle, owns retries, branching and short-circuit on gate failure, and holds a single-flight lock so two cycles cannot overlap | Control flow exists exactly once, in ASL — there is no second local orchestrator to diverge from |
 | 6 | **Registry and promotion** | Advances a version through an explicit state machine and records every rejection with its reason | No manifest, no promotion; all five champion seed artifacts are retained, not just the deployed one |
-| 7 | **Edge and fleet** | Publishes deployment intent, and the device agent picks it up: verify checksum, smoke test, atomic swap. One device, then two, then the fleet | Deployment is a pointer flip, never a container rebuild; rollback is a single write |
-| 8 | **Telemetry and reporting** | Captures what the fleet saw, feeding next cycle's selection signal and the charts | Every promotion and rejection is charted with its evidence, so the loop's behaviour is read off the record rather than described |
+| 7 | **Edge and fleet** | Publishes the promoted artifact as a Greengrass component, and the service deploys it: verify digest, one device, then two, then the fleet, rolling back on a failed health check | Deployment is a pointer flip, never a container rebuild; rollback is a single command |
+| 8 | **Telemetry and reporting** | Captures what the fleet saw and feeds the charts. The fleet's own ranking is a realism check, not a selector | Every promotion and rejection is charted with its evidence, so the loop's behaviour is read off the record rather than described |
 | 9 | **Experiment and validation** | Runs cycles *as experiments* rather than running inside one: the A/A control and the confidence-ordered control | The gate's false-positive rate is measured, not assumed |
 
 ---
@@ -220,10 +219,10 @@ Properties every plane honors, rather than components living anywhere:
   cannot be changed after table creation, so this is decided before the first table exists.
 - **Idempotency keys on anything that spends budget.** Retries and redeliveries are normal; a
   double charge against the label ledger has no undo.
-- **Determinism is load-bearing.** Both the matched-seed quality gate and the champion seed-run
-  cache assume bit-exact reproduction, which bounds model size, input resolution and dataset
-  size so an interrupted run can always be discarded and restarted rather than resumed. The
-  training loop is a dependency rather than owned code, so bit-exactness is asserted by test.
+- **Training is seeded and short.** Seed *k* fixes initialization and augmentation order, which is
+  what the matched-seed comparison shares between champion and challenger. An interrupted job is
+  discarded and restarted rather than resumed, which bounds model size, input resolution and
+  dataset size.
 - **`class_set_version`, `recipe_version`, `partition_version`.** A change to any one means the
   paired comparison is no longer the same test on the same data universe, and forces a fresh
   champion baseline instead of a promotion decision.
@@ -236,15 +235,8 @@ Properties every plane honors, rather than components living anywhere:
 
 ## Companion docs
 
+Each plane's document lands with the plane.
+
 | Doc | Plane |
 |---|---|
 | `01-data-and-labels.md` | 1 |
-| `02-training.md` | 2 |
-| `03-evaluation.md` | 3 |
-| `04-gates.md` | 4 |
-| `05-control-plane.md` | 5 |
-| `06-registry-and-promotion.md` | 6 |
-| `07-edge-and-fleet.md` | 7 |
-| `08-telemetry-and-reporting.md` | 8 |
-| `09-experiments-and-validation.md` | 9 |
-| `10-cross-cutting.md` | `run_id`, idempotency, determinism, versioning, IAM, cost |

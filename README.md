@@ -17,19 +17,19 @@ denominated in labels, so the pipeline reports accuracy gained per label spent a
 |---|---|
 | Data | BDD100K (Berkeley DeepDrive) — non-commercial research license |
 | Cloud | AWS |
-| Edge | Simulated fleet, ARM64 containers on ECS Fargate (Graviton) |
+| Edge | Simulated fleet, AWS IoT Greengrass on Graviton EC2 |
 | Orchestration | Step Functions, single orchestrator |
-| Training | SageMaker training jobs, CPU then spot GPU |
+| Training | SageMaker training jobs on spot GPU, prebuilt PyTorch container |
 | Model | COCO-pretrained Ultralytics YOLO11n, frozen backbone, ONNX int8 |
-| IaC | Terraform, S3 backend with DynamoDB lock |
+| IaC | Terraform, S3 backend with native S3 locking |
 | CI | GitHub Actions via OIDC, no long-lived keys |
-| Running cost | Approximately $17/month |
+| Running cost | Approximately $20/month |
 
 ## Scope
 
-- The fleet is simulated: five ARM64 containers replaying unlabeled pool imagery on real ARM
-  silicon. Latency and quantization numbers are measured, not estimated, but the tasks are not
-  thermally constrained the way physical hardware would be.
+- The fleet is simulated: Greengrass devices on Graviton instances replaying unlabeled pool
+  imagery on real ARM silicon. Latency and quantization numbers are measured, not estimated, but
+  the instances are not thermally constrained the way physical hardware would be.
 - No new data is collected or annotated. BDD100K ships its own ground truth, and the pipeline is
   denied read access to it, so a frame can only be labeled by buying it from the oracle against a
   metered budget.

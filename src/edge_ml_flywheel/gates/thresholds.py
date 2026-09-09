@@ -36,13 +36,12 @@ class Gate(StrEnum):
     state machine can be written against before the thing behind it exists.
 
     `EDGE` and `CANARY` have no predicate here, and the omission is deliberate
-    rather than pending. Their inputs are p95 latency on an ARM64 task and two
-    replay hours of device telemetry, and nothing in the project produces either
-    yet. A predicate written now would be a pure function over a measurement
-    shape invented to suit it, tested against that same invention, and rewritten
-    when the device agent reports what it can actually measure. They land with
-    their producers: `CANARY` in phase 6, beside shadow mode and the staged
-    rollout, and `EDGE` in phase 7, where the int8 ONNX export first exists.
+    rather than pending. Their inputs are p95 latency on a Graviton device and
+    two replay hours of device telemetry, and nothing in the project produces
+    either yet. A predicate written now would be a pure function over a
+    measurement shape invented to suit it, tested against that same invention,
+    and rewritten when the devices report what they can actually measure. Both
+    land with their producers in phase 5, where the fleet first exists.
     """
 
     DATA = "data"

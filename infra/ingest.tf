@@ -14,7 +14,7 @@ locals {
   ingest_role_arn  = "arn:aws:iam::${var.account_id}:role/${local.ingest_role_name}"
 
   # The two allowlists the data bucket policy denies against. Separate lists
-  # because they answer different questions and grow at different times: Phase 4's
+  # because they answer different questions and grow at different times: Phase 3's
   # oracle Lambda becomes a label reader and never a raw writer, and a future
   # re-ingest under a new `label_source` is a raw writer.
   #
