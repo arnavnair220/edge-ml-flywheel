@@ -478,7 +478,7 @@ def model_version_cycle(version: ModelVersion) -> Cycle:
 
 # --- Image tags ---------------------------------------------------------------
 #
-# The three BDD100K attributes the eval slices and the selection condition cap
+# The three BDD100K attributes the eval slices and the batch's condition mix
 # are written against. Each vocabulary is exhaustive because it was counted over
 # all 80,000 images rather than recalled, which is also what makes an unexpected
 # value at ingest a statement that the archive changed rather than a gap here.
@@ -505,7 +505,7 @@ class Weather(StrEnum):
     not against these values: `foggy` is 143 images in the whole archive and a
     few in any eval drawn from it, so a per-value verdict would be noise wearing
     a threshold. The vocabulary is here because ingest validates against it and
-    the selection condition cap is a predicate over it, not because anything
+    the selection mix record tallies over it, not because anything
     gates on it.
     """
 
@@ -1060,11 +1060,11 @@ class ManifestRow:
 
     `weather`, `scene` and `timeofday` are enums because their vocabularies were
     measured over all 80,000 images before being written down. The regression
-    report's slices and the selection condition cap are predicates over these
+    report's slices and the selection mix record are written against these
     three columns, and a misspelled tag is the one kind of wrong predicate that
-    does not fail: it matches nothing, so the slice empties or the cap never
-    binds, and neither says so -- an empty series charts as a flat line and an
-    unbinding cap as a selector nobody constrained. The parquet column stays
+    does not fail: it matches nothing, so the slice empties or the mix row reads
+    zero, and neither says so -- an empty series charts as a flat line and a zero
+    row as a condition the selector simply did not buy. The parquet column stays
     `string` either way -- `StrEnum` serializes to the identical value -- so the
     typing is a parse-boundary guarantee bought without a re-ingest.
 
