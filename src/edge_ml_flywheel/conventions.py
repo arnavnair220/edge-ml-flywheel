@@ -1448,6 +1448,18 @@ def gate_report_key(run_id: RunId, cycle: Cycle, suffix: str = "json") -> str:
     return f"{cycle_prefix(run_id, cycle)}gates/report.{_token('suffix', suffix)}"
 
 
+def selection_report_key(run_id: RunId, cycle: Cycle) -> str:
+    """What this cycle's batch was made of, beside what it left in the pool.
+
+    Per cycle rather than per model, like the gate report: it describes the
+    purchase, and a cycle makes exactly one. Under the write-once cycle prefix
+    because it is evidence about a decision already taken -- a batch's condition
+    mix is not recoverable later from the ledger, which records which images were
+    bought and nothing about the pool they were drawn out of.
+    """
+    return f"{cycle_prefix(run_id, cycle)}selection/report.json"
+
+
 def training_manifest_key(run_id: RunId, cycle: Cycle) -> str:
     """The image keys one cycle trains on, in SageMaker `ManifestFile` form.
 
