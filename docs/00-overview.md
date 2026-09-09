@@ -95,7 +95,7 @@ flowchart TB
     end
 
     subgraph TRAIN["Training plane"]
-        SEEDS["5 matched seeds from the COCO base<br/>deterministic, spot, discard on interrupt"]
+        SEEDS["YOLO11n, 5 matched seeds from the COCO base<br/>deterministic, spot, discard on interrupt"]
         EXPORT["ONNX int8 export for ARM64"]
     end
 
@@ -157,7 +157,7 @@ Listed in the order a cycle passes through them.
 | # | Plane | What it does in a cycle | Invariant it owns |
 |---|---|---|---|
 | 1 | **Data and label supply** | Partitions the dataset once, ranks the unlabeled pool by mean per-object uncertainty over what the fleet actually saw, buys the top of that ranking, records the batch's condition mix beside the pool's, and sells labels against a hard budget | Labels can only be obtained by paying the oracle, and `eval` is not purchasable at any price |
-| 2 | **Training** | Trains the challenger on the cumulative labeled set with five fixed seeds, from the COCO base every time, and exports an int8 ONNX artifact | Seed *k* reproduces bit-for-bit; seed 1 is the artifact that ships, never the best-scoring seed |
+| 2 | **Training** | Fine-tunes YOLO11n on the cumulative labeled set with five fixed seeds, from the COCO base every time, and exports an int8 ONNX artifact | Seed *k* reproduces bit-for-bit; seed 1 is the artifact that ships, never the best-scoring seed |
 | 3 | **Evaluation** | Scores each model once, persists per-image match arrays, then answers every later question from that cache — paired deltas, confidence bands, per-slice metrics | Bootstrap the *paired* delta on a shared eval resample, never each model independently |
 | 4 | **Gating** | Runs four pass/fail checks in order — data, quality, edge, canary — and emits the per-slice regression report. Any hard failure stops the cycle and the champion stays put; the labels stay bought | Zero image-ID overlap with either eval set is a hard fail with no override |
 | 5 | **Control** | Sequences the cycle, owns retries, branching and short-circuit on gate failure, and holds a single-flight lock so two cycles cannot overlap | Control flow exists exactly once, in ASL — there is no second local orchestrator to diverge from |
@@ -222,7 +222,8 @@ Properties every plane honors, rather than components living anywhere:
   double charge against the label ledger has no undo.
 - **Determinism is load-bearing.** Both the matched-seed quality gate and the champion seed-run
   cache assume bit-exact reproduction, which bounds model size, input resolution and dataset
-  size so an interrupted run can always be discarded and restarted rather than resumed.
+  size so an interrupted run can always be discarded and restarted rather than resumed. The
+  training loop is a dependency rather than owned code, so bit-exactness is asserted by test.
 - **`class_set_version`, `recipe_version`, `partition_version`.** A change to any one means the
   paired comparison is no longer the same test on the same data universe, and forces a fresh
   champion baseline instead of a promotion decision.
