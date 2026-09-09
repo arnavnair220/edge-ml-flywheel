@@ -63,6 +63,11 @@ output "register_project_name" {
   value       = aws_codebuild_project.register.name
 }
 
+output "training_role_arn" {
+  description = "SageMaker training jobs run as this. Pass it as RoleArn; it is denied every withheld label."
+  value       = aws_iam_role.training.arn
+}
+
 # PENDING until the GitHub App authorization is completed by hand in the
 # console. An output rather than a note in a doc, because it is the one piece of
 # this stack that applying cannot finish, and a build against a pending

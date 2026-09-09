@@ -231,6 +231,10 @@ ingest = [
 run = [
     { name = "boto3" },
 ]
+training = [
+    { name = "boto3" },
+    { name = "pyarrow" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -251,6 +255,10 @@ ingest = [
     { name = "pyarrow", specifier = ">=18" },
 ]
 run = [{ name = "boto3", specifier = ">=1.35" }]
+training = [
+    { name = "boto3", specifier = ">=1.35" },
+    { name = "pyarrow", specifier = ">=18" },
+]
 
 [[package]]
 name = "idna"

@@ -1,0 +1,22 @@
+# What the prebuilt PyTorch container is missing, installed by the SageMaker
+# training toolkit before `train.py` runs. Three lines rather than an ECR image:
+# there is nothing to build, scan or keep patched, and the container tag in
+# `training.job` plus this file is the whole environment.
+#
+# Pinned exactly, for the lockfile's reason. A training run is comparable to the
+# one before it only if the thing that trained it is the same, so `>=` here would
+# be a `recipe_version` that changes without anyone changing it.
+#
+# This is not the project lockfile and cannot be: pip installs into an
+# environment that already holds the container's torch build, and resolving
+# `uv.lock` on top would replace the CUDA-matched wheel the image was built
+# around. The lockfile covers the local test environment and this covers the
+# container, which is why `requires-python` in pyproject.toml tracks the
+# container's interpreter -- 3.12, the same one the image ships.
+
+# The detector. Brings its own opencv, pillow, pyyaml and torchvision pins.
+ultralytics==8.4.146
+
+# Reads the label parquet the bootstrap cohort and every purchase are written
+# as. The same version the `ingest` dependency group resolves.
+pyarrow>=18

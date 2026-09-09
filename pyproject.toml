@@ -65,7 +65,7 @@ testpaths = ["tests"]
 # `tests/` is out of scope: a test that builds a deliberately invalid row to
 # assert it raises is a type error by design.
 [tool.mypy]
-files = ["src"]
+files = ["src", "container"]
 python_version = "3.12"
 strict = true
 
@@ -86,6 +86,16 @@ ignore_missing_imports = true
 # project makes and would pin a second package to the SDK version.
 [[tool.mypy.overrides]]
 module = ["boto3.*", "botocore.*"]
+ignore_missing_imports = true
+
+# The training container's two packages, which are deliberately not in the
+# lockfile: they are installed by pip inside the prebuilt image from
+# `container/requirements.txt`, against a torch build the image was assembled
+# around. So they are absent locally by design rather than by omission, and the
+# alternative to this override is a multi-gigabyte CUDA install in CI to type
+# check one module. `entrypoint` is the only module that imports either.
+[[tool.mypy.overrides]]
+module = ["ultralytics.*", "torch.*"]
 ignore_missing_imports = true
 
 [dependency-groups]
@@ -129,4 +139,15 @@ ingest = [
 # suite runs without this group installed.
 run = [
     "boto3>=1.35",
+]
+
+# The operator's side of a training job: reading the labeled set out of parquet
+# to write the image manifest, and the SageMaker and S3 calls that start the job.
+# A group for `ingest`'s reason, and it holds neither `ultralytics` nor `torch` --
+# those are the container's, installed by pip from `container/requirements.txt`
+# inside an image that already carries a CUDA-matched torch. Nothing outside that
+# container ever runs the model.
+training = [
+    "boto3>=1.35",
+    "pyarrow>=18",
 ]
