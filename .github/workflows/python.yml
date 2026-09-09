@@ -7,6 +7,7 @@ on:
   pull_request:
     paths:
       - "src/**"
+      - "container/**"
       - "tests/**"
       - "verification/**"
       - "pyproject.toml"
@@ -17,6 +18,7 @@ on:
     branches: [main]
     paths:
       - "src/**"
+      - "container/**"
       - "tests/**"
       - "verification/**"
       - "pyproject.toml"
@@ -52,14 +54,19 @@ jobs:
       # caught here rather than by whoever syncs next. The interpreter comes
       # from .python-version, which uv downloads if the runner lacks it.
       #
-      # --group ingest and --group run so that both CodeBuild-only modules are
-      # linted, typed and unit tested here rather than only in the job that
-      # runs them. Code whose only execution is inside a build is exactly the
-      # code that needs checking somewhere cheaper. `run` is named explicitly
-      # even though `moto` pulls boto3 in anyway -- a test dependency is not a
-      # statement about what the job installs.
+      # --group ingest, run and training so that every module whose only
+      # execution is inside a build or a training job is linted, typed and unit
+      # tested here rather than only where it runs. Code that runs nowhere
+      # cheaper is exactly the code that needs checking somewhere cheaper. `run`
+      # is named explicitly even though `moto` pulls boto3 in anyway -- a test
+      # dependency is not a statement about what the job installs.
+      #
+      # `ultralytics` and `torch` are deliberately not installed. They are the
+      # container's, pinned in `container/requirements.txt` against the torch
+      # build that image ships, and mypy reads them through an override --
+      # against a multi-gigabyte CUDA install in CI to type check one module.
       - name: sync
-        run: uv sync --frozen --group ingest --group run
+        run: uv sync --frozen --group ingest --group run --group training
 
       # --output-format=github annotates the offending lines in the PR diff
       # instead of burying them in log output.

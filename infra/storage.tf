@@ -33,6 +33,11 @@ locals {
   raw_label_objects  = "${local.bucket_arns["data"]}/raw/labels/*"
   athena_results_arn = "${local.bucket_arns["telemetry"]}/athena-results/*"
 
+  # `raw_image_key(image_id, Split.TRAIN)`'s directory. Split is a path component
+  # here where cohort is not, which is what lets the training role be granted the
+  # 70,000 images a training set can draw from and none of the `val` ones.
+  raw_train_images_prefix = "raw/images/100k/train/"
+
   # Wildcarded over `partition_version=` so a re-partition is covered by the
   # statement that already exists rather than by an edit nobody makes. Mirrors
   # `cohort_labels_prefix(version, Cohort.EVAL)` in `conventions`.

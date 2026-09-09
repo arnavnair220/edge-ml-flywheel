@@ -1218,6 +1218,18 @@ def cohort_labels_key(partition_version: PartitionVersion, cohort: Cohort, part:
 PURCHASES_PREFIX: Final = "derived/purchases/"
 
 
+def purchases_run_prefix(run_id: RunId) -> str:
+    """Everything one run has ever bought, as a single prefix.
+
+    The cumulative labeled set stated as one string, which is what a training
+    channel needs: a cycle trains on the bootstrap plus every purchase before it,
+    and this prefix holds exactly those because a cycle buys after it trains. A
+    channel per cycle would be the same objects named `cycle` times over, and
+    would put a cap on how many cycles a run can have.
+    """
+    return f"{PURCHASES_PREFIX}{run_prefix(run_id)}"
+
+
 def purchase_labels_prefix(run_id: RunId, cycle: Cycle) -> str:
     """One cycle's bought boxes.
 
@@ -1249,6 +1261,23 @@ def purchase_labels_key(run_id: RunId, cycle: Cycle, part: int = 0) -> str:
 # Write-once. Nothing under a cycle prefix is ever rewritten and a re-run is a
 # new `run_id`, which is what makes gate reports and model manifests audit
 # evidence rather than current state.
+
+# The COCO-pretrained checkpoint every seed of every cycle fine-tunes from, held
+# in the bucket rather than downloaded by the training job. Two reasons, and the
+# second is the one that matters: a download is an unpinned dependency on a host
+# outside this project, and "from the COCO base every time" (design section 3) is
+# a claim about the same bytes, which only a stored file can settle. Its digest
+# is logged by every job.
+#
+# Outside the run prefixes because it is a function of the recipe rather than of
+# any run, and named by file because the file name *is* the model: a
+# `recipe_version` that changes the base changes this string.
+BASE_WEIGHTS_PREFIX: Final = "base/"
+BASE_WEIGHTS_FILE: Final = "yolo11n.pt"
+
+
+def base_weights_key(file: str = BASE_WEIGHTS_FILE) -> str:
+    return f"{BASE_WEIGHTS_PREFIX}{_token('base weights', file)}"
 
 
 def run_prefix(run_id: RunId) -> str:
@@ -1402,14 +1431,19 @@ class ModelManifest:
         return bool(self.gates) and all(gate.passed for gate in self.gates)
 
 
-def model_artifact_key(version: ModelVersion, seed: Seed, artifact: ModelArtifact) -> str:
-    """Per seed, because all five champion artifacts are retained.
+def model_seed_prefix(version: ModelVersion, seed: Seed) -> str:
+    """One seed's own prefix, which is what a training job is pointed at.
 
-    Seed 1 is the one that ships, by convention. The other four are what the
-    matched-seed cost saving in design section 7 depends on -- keeping only seed
-    1 quietly removes it.
+    Per seed, because all five champion artifacts are retained. Seed 1 is the one
+    that ships, by convention. The other four are what the matched-seed cost
+    saving in design section 7 depends on -- keeping only seed 1 quietly removes
+    it.
     """
-    return f"{model_prefix(version)}seed={_padded('seed', seed, SEED_DIGITS)}/{artifact.value}"
+    return f"{model_prefix(version)}seed={_padded('seed', seed, SEED_DIGITS)}/"
+
+
+def model_artifact_key(version: ModelVersion, seed: Seed, artifact: ModelArtifact) -> str:
+    return f"{model_seed_prefix(version, seed)}{artifact.value}"
 
 
 def eval_prefix(version: ModelVersion) -> str:
@@ -1479,6 +1513,22 @@ def training_manifest_key(run_id: RunId, cycle: Cycle) -> str:
     prefix, rather than a set reconstructed later from a ledger and a partition.
     """
     return f"{cycle_prefix(run_id, cycle)}training/images.manifest"
+
+
+def training_code_key(run_id: RunId, cycle: Cycle) -> str:
+    """The package as the training container receives it.
+
+    SageMaker's script mode takes the code as one archive in S3 and unpacks it
+    beside the entry point, so the archive exists whatever else is true. Filing
+    it under the write-once cycle prefix rather than in a scratch location is
+    what makes it evidence: the manifest records a `git_commit`, and this is the
+    tree that commit produced, uploaded before the job that read it started.
+
+    Beside `training_manifest_key` because they are the two objects one cycle
+    hands its five seeds, and they are read by the same role under the same
+    grant.
+    """
+    return f"{cycle_prefix(run_id, cycle)}training/sourcedir.tar.gz"
 
 
 # --- Telemetry bucket ---------------------------------------------------------
