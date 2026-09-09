@@ -22,6 +22,7 @@ from PIL import Image
 
 from edge_ml_flywheel.conventions import (
     LABEL_SOURCE,
+    NATIVE_IMAGE_SIZE,
     ImageId,
     ManifestRow,
     Scene,
@@ -35,7 +36,7 @@ from edge_ml_flywheel.conventions import (
 )
 from edge_ml_flywheel.ingest import manifest as manifest_module
 from edge_ml_flywheel.ingest.__main__ import _listed_keys, _parser, _require_host, _staged_keys
-from edge_ml_flywheel.ingest.images import EXPECTED_SIZE, inspect_image
+from edge_ml_flywheel.ingest.images import inspect_image
 from edge_ml_flywheel.ingest.labels import parse_label
 from edge_ml_flywheel.ingest.provenance import verify_archive
 from edge_ml_flywheel.ingest.source import IMAGES, LABELS
@@ -288,10 +289,10 @@ class TestParseLabel:
 class TestInspectImage:
     def test_reports_the_digest_and_the_size(self, tmp_path: Path) -> None:
         path = tmp_path / "a.jpg"
-        an_image(path, EXPECTED_SIZE)
+        an_image(path, NATIVE_IMAGE_SIZE)
         facts = inspect_image(path)
         assert facts.decode_error is None
-        assert facts.size == EXPECTED_SIZE
+        assert facts.size == NATIVE_IMAGE_SIZE
         assert len(facts.sha256) == 64
 
     def test_a_gradient_is_not_blank(self, tmp_path: Path) -> None:

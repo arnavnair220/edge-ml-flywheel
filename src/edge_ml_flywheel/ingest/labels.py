@@ -28,7 +28,7 @@ rather than asserted.
 then written down, as the vocabularies in `conventions`. The difference is what
 reads them. No predicate is written against a box category here -- naming the
 classes is `class_set_version`'s job downstream -- whereas every eval slice and
-the selection condition cap is a predicate over the three tags, and a predicate
+the selection mix record is written against the three tags, and a predicate
 is exactly what an enum protects.
 
 **Everything else is strict and raises.** A missing attribute, a tag outside its
@@ -127,7 +127,7 @@ def _tag[Tag: StrEnum](
     over all 80,000 images, so a value outside one does not mean a member was
     overlooked; it means the host is serving data this code was not written
     against, which is worth failing an hour-long ingest over. Carrying it through
-    would put a tag in the manifest that no eval slice and no condition cap can
+    would put a tag in the manifest that no eval slice and no mix row can
     ever match, and an empty slice charts as a flat line rather than as a gap.
 
     Generic over the vocabulary so each of the three returns its own type. A

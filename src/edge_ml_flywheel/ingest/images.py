@@ -28,12 +28,11 @@ from typing import Final, cast
 
 from PIL import Image
 
-# BDD100K's stated resolution. The eval module resizes to 416 px and the
-# `box_areas` column is in native pixels, so an image at another resolution
-# would silently redefine what every stored area means.
-EXPECTED_SIZE: Final = (1280, 720)
-
-# 1/8 of the expected size, which is the largest reduction libjpeg offers.
+# 1/8 of `conventions.NATIVE_IMAGE_SIZE`, which is the largest reduction libjpeg
+# offers. Not derived from it arithmetically: this is an argument to `draft`,
+# which snaps to its own 1/2, 1/4, 1/8 ladder, so a computed value would look
+# like a knob that follows the native size when it is really one of three
+# choices.
 _DRAFT_SIZE: Final = (160, 90)
 
 

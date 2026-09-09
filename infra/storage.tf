@@ -179,9 +179,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "telemetry" {
 
   # Deliberately no expiry on `fleet/`. It is the bucket's real content and the
   # one thing here a retention rule could actually destroy: the champion-over-time
-  # and drift charts are read at the end of the project and want the earliest
-  # cycles' frames, so any rule short enough to bound cost would delete exactly
-  # the data that makes the curve a curve. At parquet volumes this is cents a month.
+  # and label-efficiency charts are read at the end of the project and want the
+  # earliest cycles' frames, so any rule short enough to bound cost would delete
+  # exactly the data that makes the curve a curve. At parquet volumes this is
+  # cents a month.
 }
 
 # ---------------------------------------------------------------------------

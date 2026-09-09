@@ -478,7 +478,7 @@ def model_version_cycle(version: ModelVersion) -> Cycle:
 
 # --- Image tags ---------------------------------------------------------------
 #
-# The three BDD100K attributes the eval slices and the selection condition cap
+# The three BDD100K attributes the eval slices and the batch's condition mix
 # are written against. Each vocabulary is exhaustive because it was counted over
 # all 80,000 images rather than recalled, which is also what makes an unexpected
 # value at ingest a statement that the archive changed rather than a gap here.
@@ -505,7 +505,7 @@ class Weather(StrEnum):
     not against these values: `foggy` is 143 images in the whole archive and a
     few in any eval drawn from it, so a per-value verdict would be noise wearing
     a threshold. The vocabulary is here because ingest validates against it and
-    the selection condition cap is a predicate over it, not because anything
+    the selection mix record tallies over it, not because anything
     gates on it.
     """
 
@@ -537,6 +537,142 @@ class TimeOfDay(StrEnum):
     NIGHT = "night"
     DAWN_DUSK = "dawn/dusk"
     UNDEFINED = "undefined"
+
+
+# --- Raw image geometry -------------------------------------------------------
+
+# BDD100K's stated resolution, and the frame every box coordinate in this
+# project is expressed in. Here rather than in `ingest` because three components
+# depend on it: ingest rejects an image of another size, `ManifestRow.box_areas`
+# is in these pixels, and eval defines its small-object slice at this resolution
+# rather than at the model's 416 px (design section 4.4).
+NATIVE_IMAGE_SIZE: Final = (1280, 720)
+
+
+# --- Object classes -----------------------------------------------------------
+#
+# Which object categories a model predicts, and so which ones the metric covers.
+# Versioned for `PARTITIONS`' reason: a change to `class_set_version` redefines
+# what the headline number means and forces a fresh champion baseline (design
+# section 5).
+#
+# The names are the archive's, measured at ingest and recorded in
+# `raw/_provenance/integrity.json`. A class set is checked against them because
+# the legacy Scalabel archive spells three categories `person`, `motor` and
+# `bike` where the `det_20` release says `pedestrian`, `motorcycle` and
+# `bicycle`: a `det_20` spelling matches no box in the archive, so that class
+# scores 0.0 AP every cycle and nothing raises.
+#
+# A category ID is a position in a tuple, so declaration order is permanent --
+# the IDs are stored in every cached match array, which holds `2` and not
+# `truck`. Order is measured frequency descending, the order the integrity
+# report records.
+
+# The ten categories carrying a `box2d` in the legacy archive. Not a class set:
+# this is what the archive contains, and a class set is what a model predicts.
+# `train` is here and in neither class set (design section 3), at 151 boxes
+# archive-wide.
+BOX_CATEGORIES: Final[frozenset[str]] = frozenset(
+    {
+        "car",
+        "traffic sign",
+        "traffic light",
+        "person",
+        "truck",
+        "bus",
+        "bike",
+        "rider",
+        "motor",
+        "train",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ClassSet:
+    """What one `class_set_version` means. Add a version, never edit one.
+
+    Editing an entry redefines a class set that models have already been trained
+    and scored against; every cached match array keyed by that version then
+    names a different class rather than failing to load.
+
+    IDs are 1-based, as COCO's own categories are.
+    """
+
+    names: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.names:
+            raise ValueError("a class set with no classes is not a class set")
+        duplicates = sorted({name for name in self.names if self.names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"class set repeats a class: {duplicates}")
+        unknown = sorted(set(self.names) - BOX_CATEGORIES)
+        if unknown:
+            listed = ", ".join(sorted(BOX_CATEGORIES))
+            raise ValueError(
+                f"class set names categories the archive has no boxes for: {unknown}. "
+                f"Measured at ingest: {listed}"
+            )
+
+    @property
+    def category_ids(self) -> Mapping[str, int]:
+        """Name to COCO category ID, for a caller converting many boxes.
+
+        `category_id` is the one-off form.
+        """
+        return {name: index for index, name in enumerate(self.names, start=1)}
+
+    def category_id(self, name: str) -> int:
+        try:
+            return self.names.index(name) + 1
+        except ValueError:
+            raise ValueError(f"{name!r} is not in this class set: {list(self.names)}") from None
+
+    def category_name(self, category_id: int) -> str:
+        """The inverse. A cached match array holds IDs, and a report needs names."""
+        if not 1 <= category_id <= len(self.names):
+            raise ValueError(
+                f"category ID {category_id} is outside a class set of {len(self.names)}"
+            )
+        return self.names[category_id - 1]
+
+
+CLASS_SETS: Final[Mapping[ClassSetVersion, ClassSet]] = {
+    # The four classes v1 starts on and the nine it expands to (design section
+    # 3). Both declared now rather than the second added at week 6, since
+    # appending to version 1's tuple is the edit this table's rule forbids.
+    ClassSetVersion(1): ClassSet(names=("car", "person", "truck", "bus")),
+    ClassSetVersion(2): ClassSet(
+        names=(
+            "car",
+            "traffic sign",
+            "traffic light",
+            "person",
+            "truck",
+            "bus",
+            "bike",
+            "rider",
+            "motor",
+        )
+    ),
+    # No version 0. The v0 skeleton is a three-head classifier over `weather`,
+    # `scene` and `timeofday` (design section 3) and predicts no boxes, so its
+    # runs declare `class_set_version=0`, which names no entry and raises here.
+}
+
+
+def class_set(version: ClassSetVersion) -> ClassSet:
+    """The classes a version predicts, or a refusal.
+
+    `partition_spec`'s rule on the other half of the version trio: a class set
+    nobody wrote down is a metric nobody can reproduce.
+    """
+    classes = CLASS_SETS.get(version)
+    if classes is None:
+        listed = ", ".join(str(known) for known in sorted(CLASS_SETS))
+        raise ValueError(f"class set version {version} is not defined. Defined: {listed}")
+    return classes
 
 
 # --- Cohorts and splits ------------------------------------------------------
@@ -924,11 +1060,11 @@ class ManifestRow:
 
     `weather`, `scene` and `timeofday` are enums because their vocabularies were
     measured over all 80,000 images before being written down. The regression
-    report's slices and the selection condition cap are predicates over these
+    report's slices and the selection mix record are written against these
     three columns, and a misspelled tag is the one kind of wrong predicate that
-    does not fail: it matches nothing, so the slice empties or the cap never
-    binds, and neither says so -- an empty series charts as a flat line and an
-    unbinding cap as a selector nobody constrained. The parquet column stays
+    does not fail: it matches nothing, so the slice empties or the mix row reads
+    zero, and neither says so -- an empty series charts as a flat line and a zero
+    row as a condition the selector simply did not buy. The parquet column stays
     `string` either way -- `StrEnum` serializes to the identical value -- so the
     typing is a parse-boundary guarantee bought without a re-ingest.
 
@@ -1310,6 +1446,18 @@ def gate_report_key(run_id: RunId, cycle: Cycle, suffix: str = "json") -> str:
     pointing here.
     """
     return f"{cycle_prefix(run_id, cycle)}gates/report.{_token('suffix', suffix)}"
+
+
+def selection_report_key(run_id: RunId, cycle: Cycle) -> str:
+    """What this cycle's batch was made of, beside what it left in the pool.
+
+    Per cycle rather than per model, like the gate report: it describes the
+    purchase, and a cycle makes exactly one. Under the write-once cycle prefix
+    because it is evidence about a decision already taken -- a batch's condition
+    mix is not recoverable later from the ledger, which records which images were
+    bought and nothing about the pool they were drawn out of.
+    """
+    return f"{cycle_prefix(run_id, cycle)}selection/report.json"
 
 
 def training_manifest_key(run_id: RunId, cycle: Cycle) -> str:

@@ -30,6 +30,7 @@ import pyarrow.parquet as pq
 
 from edge_ml_flywheel.conventions import (
     LABEL_SOURCE,
+    NATIVE_IMAGE_SIZE,
     RAW_IMAGES_PREFIX,
     RAW_LABELS_PREFIX,
     RAW_PROVENANCE_PREFIX,
@@ -41,7 +42,7 @@ from edge_ml_flywheel.conventions import (
     parse_image_id,
     raw_image_key,
 )
-from edge_ml_flywheel.ingest.images import EXPECTED_SIZE, ImageFacts, inspect_image
+from edge_ml_flywheel.ingest.images import ImageFacts, inspect_image
 from edge_ml_flywheel.ingest.labels import parse_label
 
 log = logging.getLogger(__name__)
@@ -116,13 +117,13 @@ def _findings(image_id: ImageId, split: Split, facts: ImageFacts) -> list[Integr
         ]
 
     found: list[IntegrityFinding] = []
-    if facts.size != EXPECTED_SIZE:
+    if facts.size != NATIVE_IMAGE_SIZE:
         found.append(
             IntegrityFinding(
                 image_id=image_id,
                 split=split.value,
                 problem="resolution",
-                detail=f"{facts.size} is not {EXPECTED_SIZE}",
+                detail=f"{facts.size} is not {NATIVE_IMAGE_SIZE}",
             )
         )
     if facts.is_blank:

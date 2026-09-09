@@ -4,7 +4,19 @@ version = "0.0.0"
 description = "Closed-loop retraining and deployment pipeline for an edge perception model"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+
+# Project dependencies rather than a group, unlike `ingest` and `run` below.
+# Those two are one job's needs; these are the pure-logic layer's, which the
+# training container, the gate step and the test suite all import.
+#
+# `pycocotools` supplies the greedy IoU matching: a reimplementation is a few
+# hundred lines of subtle code whose numbers compare to no published COCO
+# result. `numpy` arrives with it transitively and is listed anyway, since every
+# match-cache annotation in this layer is an `NDArray`.
+dependencies = [
+    "numpy>=2",
+    "pycocotools>=2.0.8",
+]
 
 # One lockfile covers both the local test environment and the training
 # container, and a lock resolves against requires-python. So this range tracks
@@ -47,33 +59,15 @@ select = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
-# Non-strict over `src/` here, strict from Phase 2. The distinction is about what
-# types describe: this layer is key formats and row schemas, where the value is
-# catching a field renamed on one side of a read, and untyped third-party stubs
-# are not yet in play. Phase 2 is gate predicates, match-array shapes and
-# manifest schemas, where a type error otherwise surfaces as a failed four-hour
-# training job -- so that is where the ratchet tightens.
+# Strict over all of `src/`. Set globally rather than per package so a new
+# package cannot arrive below the line unnoticed.
 #
-# `tests/` is deliberately out of scope. A test that constructs a deliberately
-# invalid row to assert it raises is a type error by design, and silencing those
-# one `# type: ignore` at a time teaches the reader nothing.
+# `tests/` is out of scope: a test that builds a deliberately invalid row to
+# assert it raises is a type error by design.
 [tool.mypy]
 files = ["src"]
 python_version = "3.12"
-
-# The three warnings that pay for themselves at any strictness. `warn_unused_ignores`
-# is the one that matters most over time: it fails on a suppression whose
-# underlying error is gone, so the ignores in the tree stay honest instead of
-# accumulating as folklore.
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_unused_configs = true
-
-# An unannotated function body is invisible to mypy by default, which means a
-# module can pass while being almost entirely unchecked. This is the one
-# strict-adjacent flag worth having before Phase 2, because it makes the coverage
-# honest -- without it, "mypy passes" and "mypy read this" are different claims.
-check_untyped_defs = true
+strict = true
 
 # pyarrow ships no `py.typed` marker, so mypy refuses to look inside it and
 # every import is an error rather than an unknown. Scoped to the one package
@@ -99,6 +93,10 @@ dev = [
     "mypy>=1.18",
     "pytest>=8",
     "ruff>=0.16.2",
+    # From typeshed rather than an `ignore_missing_imports` override: an untyped
+    # `COCOeval` returns `Any`, and every match-array shape downstream of it then
+    # type-checks against anything.
+    "types-pycocotools>=2.0.0.20250809",
     # An in-process DynamoDB that honours condition expressions, which is the
     # one behaviour the registration depends on. A hand-rolled fake would be a
     # fake that returns whatever the test needs: the conditional put is the

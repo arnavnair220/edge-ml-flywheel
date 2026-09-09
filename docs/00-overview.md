@@ -74,8 +74,8 @@ effect on anything downstream, so the comparison is exact rather than statistica
 **Canary** — the challenger genuinely deployed to one device out of five, watched before the
 rollout continues.
 
-**Drift** — measurable change in what the deployed champion is seeing and predicting, measured
-against that same champion's own deployment window rather than a fixed historical baseline.
+**Saturation** — the point at which another cycle stops being worth its labels, read off the label
+efficiency curve flattening rather than off a detector.
 
 ---
 
@@ -89,13 +89,13 @@ flowchart TB
 
     subgraph DATA["Data and label supply plane"]
         PART["partitioner<br/>bootstrap / pool / eval / reserve"]
-        SEL["selection<br/>mean per-object uncertainty + condition cap<br/>plus a random tenth"]
+        SEL["selection<br/>mean per-object uncertainty<br/>batch condition mix recorded"]
         ORACLE["oracle<br/>budget ledger, idempotent, audited"]
         POOL[("cumulative labeled set")]
     end
 
     subgraph TRAIN["Training plane"]
-        SEEDS["5 matched seeds from the COCO base<br/>deterministic, spot, discard on interrupt"]
+        SEEDS["YOLO11n, 5 matched seeds from the COCO base<br/>deterministic, spot, discard on interrupt"]
         EXPORT["ONNX int8 export for ARM64"]
     end
 
@@ -117,10 +117,9 @@ flowchart TB
         AGENT["device agent, 5 ARM64 tasks<br/>poll · verify sha256 · smoke test · hot swap"]
     end
 
-    subgraph OBS["Telemetry, drift and reporting plane"]
-        TEL["telemetry to S3 parquet"]
-        DRIFT["drift detector<br/>PSI · detections per frame · zero-detect rate"]
-        DASH["Athena + dashboard, seven charts"]
+    subgraph OBS["Telemetry and reporting plane"]
+        TEL["agent writes parquet to S3"]
+        DASH["Athena queries<br/>six charts as static images"]
     end
 
     PART --> SEL
@@ -138,9 +137,7 @@ flowchart TB
     CFG --> AGENT
     AGENT -->|"per-detection confidence"| TEL
     TEL --> SEL
-    TEL --> DRIFT
-    DRIFT --> DASH
-    DRIFT -.->|"retrain trigger"| SFN
+    TEL --> DASH
 
     SFN -.-> DATA
     SFN -.-> TRAIN
@@ -159,14 +156,14 @@ Listed in the order a cycle passes through them.
 
 | # | Plane | What it does in a cycle | Invariant it owns |
 |---|---|---|---|
-| 1 | **Data and label supply** | Partitions the dataset once, ranks the unlabeled pool by mean per-object uncertainty over what the fleet actually saw, caps how much of a batch any one condition may take, buys a tenth of every batch at random, and sells labels against a hard budget | Labels can only be obtained by paying the oracle, and `eval` is not purchasable at any price |
-| 2 | **Training** | Trains the challenger on the cumulative labeled set with five fixed seeds, from the COCO base every time, and exports an int8 ONNX artifact | Seed *k* reproduces bit-for-bit; seed 1 is the artifact that ships, never the best-scoring seed |
+| 1 | **Data and label supply** | Partitions the dataset once, ranks the unlabeled pool by mean per-object uncertainty over what the fleet actually saw, buys the top of that ranking, records the batch's condition mix beside the pool's, and sells labels against a hard budget | Labels can only be obtained by paying the oracle, and `eval` is not purchasable at any price |
+| 2 | **Training** | Fine-tunes YOLO11n on the cumulative labeled set with five fixed seeds, from the COCO base every time, and exports an int8 ONNX artifact | Seed *k* reproduces bit-for-bit; seed 1 is the artifact that ships, never the best-scoring seed |
 | 3 | **Evaluation** | Scores each model once, persists per-image match arrays, then answers every later question from that cache — paired deltas, confidence bands, per-slice metrics | Bootstrap the *paired* delta on a shared eval resample, never each model independently |
 | 4 | **Gating** | Runs four pass/fail checks in order — data, quality, edge, canary — and emits the per-slice regression report. Any hard failure stops the cycle and the champion stays put; the labels stay bought | Zero image-ID overlap with either eval set is a hard fail with no override |
 | 5 | **Control** | Sequences the cycle, owns retries, branching and short-circuit on gate failure, and holds a single-flight lock so two cycles cannot overlap | Control flow exists exactly once, in ASL — there is no second local orchestrator to diverge from |
 | 6 | **Registry and promotion** | Advances a version through an explicit state machine and records every rejection with its reason | No manifest, no promotion; all five champion seed artifacts are retained, not just the deployed one |
 | 7 | **Edge and fleet** | Publishes deployment intent, and the device agent picks it up: verify checksum, smoke test, atomic swap. One device, then two, then the fleet | Deployment is a pointer flip, never a container rebuild; rollback is a single write |
-| 8 | **Telemetry, drift and reporting** | Captures what the fleet saw — feeding next cycle's selection signal, the drift detector, and the charts | Drift is measured against the current champion's own deployment window, not a fixed baseline |
+| 8 | **Telemetry and reporting** | Captures what the fleet saw, feeding next cycle's selection signal and the charts | Every promotion and rejection is charted with its evidence, so the loop's behaviour is read off the record rather than described |
 | 9 | **Experiment and validation** | Runs cycles *as experiments* rather than running inside one: the A/A control and the confidence-ordered control | The gate's false-positive rate is measured, not assumed |
 
 ---
@@ -225,7 +222,8 @@ Properties every plane honors, rather than components living anywhere:
   double charge against the label ledger has no undo.
 - **Determinism is load-bearing.** Both the matched-seed quality gate and the champion seed-run
   cache assume bit-exact reproduction, which bounds model size, input resolution and dataset
-  size so an interrupted run can always be discarded and restarted rather than resumed.
+  size so an interrupted run can always be discarded and restarted rather than resumed. The
+  training loop is a dependency rather than owned code, so bit-exactness is asserted by test.
 - **`class_set_version`, `recipe_version`, `partition_version`.** A change to any one means the
   paired comparison is no longer the same test on the same data universe, and forces a fresh
   champion baseline instead of a promotion decision.
@@ -247,6 +245,6 @@ Properties every plane honors, rather than components living anywhere:
 | `05-control-plane.md` | 5 |
 | `06-registry-and-promotion.md` | 6 |
 | `07-edge-and-fleet.md` | 7 |
-| `08-telemetry-drift-reporting.md` | 8 |
+| `08-telemetry-and-reporting.md` | 8 |
 | `09-experiments-and-validation.md` | 9 |
 | `10-cross-cutting.md` | `run_id`, idempotency, determinism, versioning, IAM, cost |

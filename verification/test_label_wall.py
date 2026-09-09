@@ -1,4 +1,4 @@
-"""The label wall, checked against the deployed bucket policy.
+"""The label walls, checked against the deployed bucket policy.
 
 Every cost-per-label number this project reports rests on one statement:
 `WithheldLabelsAreOracleOnly` in `infra/storage.tf`, which denies `s3:GetObject`
@@ -6,6 +6,14 @@ on `raw/labels/*` to every principal outside `label_reader_arns`. If that deny
 stops holding, a training job reads 80,000 label files directly, the ledger
 measures nothing, and every gate still passes -- a failure with no symptom. So it
 is checked rather than assumed.
+
+Two further statements carry that same shape now that a partition is drawn, and
+are checked here for the same reason. `EvalLabelsAreScoringOnly` denies reads of
+`labels/cohort=eval/`, the second copy of the ground truth that lives outside the
+prefix above; what a read there costs is the eval rather than the budget.
+`LabelsAreFrozenExceptThePartitioner` denies writes to both labeled cohorts, and
+is what makes cycle eight's number comparable to cycle one's rather than merely
+intended to be. Neither failure has a symptom either.
 
 Not under `tests/`, for `test_real_extract.py`'s reason: this needs real
 credentials and a deployed stack, so `pytest` with no arguments must not collect
@@ -21,16 +29,24 @@ standing exemption anybody would be tempted to grant.
 
 **A negative test needs a positive control.** `AccessDenied` on its own is also
 what a typo in the key, an expired session and a wrong bucket name produce. So
-the suite reads an image before it reads a label. The image succeeding is what
-makes the label failing evidence rather than coincidence.
+the suite reads an image before it reads a label, and a `bootstrap` label before
+an `eval` one. The read that succeeds is what makes the read that fails evidence
+rather than coincidence.
 
-**What is deliberately not checked here.** That the allowlist still *admits* its
-members, and that Phase 3's training role is refused. The first is exercised by
-the oracle loader -- a real job, on the list, whose whole function is reading
-these files -- and the second joins this suite when that role exists. Creating a
-stand-in for either would mean a standing role that can read labels and be
-assumed from anywhere in the account, which is the exemption `storage.tf`
-refuses on purpose.
+**Writes are probed at a key nothing claims.** A frozen prefix is checked by
+attempting to write into it, and the whole point of the test is that the attempt
+should fail -- so it names a part number no writer emits. If the freeze ever
+stops holding, the damage is a stray object beside the labels rather than a
+frozen file overwritten by its own test.
+
+**What is deliberately not checked here.** That an allowlist still *admits* its
+members: the oracle loader exercises `label_reader_arns` as a real job whose
+whole function is reading those files, `eval_label_reader_arns` is empty and so
+admits nobody to check, and the partitioner's write exemption is exercised by the
+partitioner. Nor that Phase 3's training role is refused, which joins this suite
+when that role exists. Creating a stand-in for any of them would mean a standing
+role that can read or rewrite ground truth and be assumed from anywhere in the
+account, which is the exemption `storage.tf` refuses on purpose.
 """
 
 import os
@@ -41,9 +57,14 @@ import pytest
 from botocore.exceptions import ClientError
 
 from edge_ml_flywheel.conventions import (
+    PARTITIONS,
     RAW_IMAGES_PREFIX,
     RAW_LABELS_PREFIX,
+    Cohort,
+    PartitionVersion,
     Split,
+    cohort_labels_key,
+    cohort_labels_prefix,
     parse_image_id,
     raw_image_key,
     raw_label_key,
@@ -58,6 +79,11 @@ ACCESS_DENIED = "AccessDenied"
 # trainable cohorts do not come from means a stray success here is not a read of
 # something a model could have been trained on.
 PROBE_SPLIT = Split.VAL
+
+# The part number the write probes aim at. A cohort's boxes are one file,
+# `part-000`, so nothing writes this one and a failure of the freeze leaves an
+# object beside the labels rather than on top of one.
+UNCLAIMED_PART = 999
 
 
 def _required(variable: str) -> str:
@@ -80,6 +106,18 @@ def bucket() -> str:
 def s3() -> Any:
     """S3 as whoever is running the suite. Normally an account administrator."""
     return boto3.client("s3")
+
+
+@pytest.fixture(scope="session")
+def partition_version() -> PartitionVersion:
+    """The newest version anyone has defined, which is the one in the bucket.
+
+    Read from `PARTITIONS` rather than from an environment variable: a version
+    absent from that registry is one nobody could have written, and the deny is
+    wildcarded over `partition_version=` anyway, so the check does not depend on
+    which version this happens to be.
+    """
+    return max(PARTITIONS)
 
 
 @pytest.fixture(scope="session")
@@ -126,6 +164,33 @@ class TestThePositiveControl:
         listing = s3.list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1)
         assert [entry["Key"] for entry in listing.get("Contents", [])] == [key]
 
+    def test_a_bootstrap_label_reads(
+        self, s3: Any, bucket: str, partition_version: PartitionVersion
+    ) -> None:
+        """The control for the eval deny, and the asymmetry it turns on.
+
+        These two files sit side by side under one partition prefix and are
+        treated as opposites on purpose: `bootstrap` is training's input and is
+        reachable by whatever `derived/` grant a role carries, while `eval` is
+        denied to everyone. Reading this one is what makes the refusal next door
+        a statement about `cohort=eval/` rather than about `derived/`.
+        """
+        key = cohort_labels_key(partition_version, Cohort.BOOTSTRAP)
+        assert s3.get_object(Bucket=bucket, Key=key)["ContentLength"] > 0
+
+    def test_the_eval_labels_that_are_denied_below_actually_exist(
+        self, s3: Any, bucket: str, partition_version: PartitionVersion
+    ) -> None:
+        """So the denial is a denial and not a 404, as above.
+
+        Listed rather than headed for the same reason: `HeadObject` is denied
+        alongside `GetObject`, and the deny covers objects rather than the
+        listing.
+        """
+        prefix = cohort_labels_prefix(partition_version, Cohort.EVAL)
+        listing = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+        assert listing["KeyCount"] > 0
+
 
 class TestTheWall:
     def test_a_withheld_label_cannot_be_read(self, s3: Any, bucket: str, image_id: str) -> None:
@@ -163,6 +228,61 @@ class TestTheWall:
         key = raw_label_key(parse_image_id("00000000-00000000"), Split.TRAIN)
         with pytest.raises(ClientError) as raised:
             s3.get_object(Bucket=bucket, Key=key)
+        assert _error_code(raised.value) == ACCESS_DENIED
+
+
+class TestTheEvalWall:
+    """`EvalLabelsAreScoringOnly`: the copy of ground truth the scorer reads."""
+
+    def test_an_eval_label_cannot_be_read(
+        self, s3: Any, bucket: str, partition_version: PartitionVersion
+    ) -> None:
+        """Nobody at all, rather than nobody outside an allowlist.
+
+        `eval_label_reader_arns` is empty today, so this deny carries no
+        condition and the identity running the suite is refused for the same
+        reason every other identity is. A reader added in Phase 3 makes this the
+        allowlist test the label wall above already is.
+        """
+        key = cohort_labels_key(partition_version, Cohort.EVAL)
+        with pytest.raises(ClientError) as raised:
+            s3.get_object(Bucket=bucket, Key=key)
+        assert _error_code(raised.value) == ACCESS_DENIED
+
+
+class TestTheFreeze:
+    """`LabelsAreFrozenExceptThePartitioner`: one statement over both cohorts.
+
+    So both are checked. The two prefixes differ in every other way -- one is
+    training's input and one is denied to everybody -- and it would be easy to
+    narrow this deny to `cohort=eval/` while believing the freeze intact.
+
+    `PutObject` alone, though the statement also names the delete actions. An
+    overwrite is what a job does by accident; a delete is not, and probing it
+    would mean pointing a destructive call at a prefix whose contents no rerun
+    can reproduce.
+    """
+
+    def test_the_eval_labels_cannot_be_overwritten(
+        self, s3: Any, bucket: str, partition_version: PartitionVersion
+    ) -> None:
+        key = cohort_labels_key(partition_version, Cohort.EVAL, part=UNCLAIMED_PART)
+        with pytest.raises(ClientError) as raised:
+            s3.put_object(Bucket=bucket, Key=key, Body=b"")
+        assert _error_code(raised.value) == ACCESS_DENIED
+
+    def test_the_bootstrap_labels_cannot_be_overwritten(
+        self, s3: Any, bucket: str, partition_version: PartitionVersion
+    ) -> None:
+        """Readable by training and still frozen, which is the whole claim.
+
+        The cohort a job may read is the one it might be tempted to rewrite, and
+        a bootstrap set that changed between cycles would make the label
+        efficiency curve a comparison of two different experiments.
+        """
+        key = cohort_labels_key(partition_version, Cohort.BOOTSTRAP, part=UNCLAIMED_PART)
+        with pytest.raises(ClientError) as raised:
+            s3.put_object(Bucket=bucket, Key=key, Body=b"")
         assert _error_code(raised.value) == ACCESS_DENIED
 
 
