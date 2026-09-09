@@ -118,6 +118,14 @@ ignore_missing_imports = true
 module = ["edge_ml_flywheel.evaluation.*"]
 strict = true
 
+# The gates for the same reason, and it is the reason the ratchet was written
+# for: a predicate returning pass/fail-plus-reason is the last thing that runs
+# before a promotion, and a wrong type here surfaces as a wrong decision after a
+# four-hour training job rather than as a crash.
+[[tool.mypy.overrides]]
+module = ["edge_ml_flywheel.gates.*"]
+strict = true
+
 [dependency-groups]
 dev = [
     "mypy>=1.18",
