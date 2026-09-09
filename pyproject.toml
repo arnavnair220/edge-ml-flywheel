@@ -59,33 +59,15 @@ select = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
-# Non-strict over `src/` here, strict from Phase 2. The distinction is about what
-# types describe: this layer is key formats and row schemas, where the value is
-# catching a field renamed on one side of a read, and untyped third-party stubs
-# are not yet in play. Phase 2 is gate predicates, match-array shapes and
-# manifest schemas, where a type error otherwise surfaces as a failed four-hour
-# training job -- so that is where the ratchet tightens.
+# Strict over all of `src/`. Set globally rather than per package so a new
+# package cannot arrive below the line unnoticed.
 #
-# `tests/` is deliberately out of scope. A test that constructs a deliberately
-# invalid row to assert it raises is a type error by design, and silencing those
-# one `# type: ignore` at a time teaches the reader nothing.
+# `tests/` is out of scope: a test that builds a deliberately invalid row to
+# assert it raises is a type error by design.
 [tool.mypy]
 files = ["src"]
 python_version = "3.12"
-
-# The three warnings that pay for themselves at any strictness. `warn_unused_ignores`
-# is the one that matters most over time: it fails on a suppression whose
-# underlying error is gone, so the ignores in the tree stay honest instead of
-# accumulating as folklore.
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_unused_configs = true
-
-# An unannotated function body is invisible to mypy by default, which means a
-# module can pass while being almost entirely unchecked. This is the one
-# strict-adjacent flag worth having before Phase 2, because it makes the coverage
-# honest -- without it, "mypy passes" and "mypy read this" are different claims.
-check_untyped_defs = true
+strict = true
 
 # pyarrow ships no `py.typed` marker, so mypy refuses to look inside it and
 # every import is an error rather than an unknown. Scoped to the one package
@@ -105,26 +87,6 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["boto3.*", "botocore.*"]
 ignore_missing_imports = true
-
-# The Phase 2 ratchet, promised by the comment above `[tool.mypy]`. Scoped per
-# package rather than set globally, so an older module complaining is not a
-# reason to switch it off everywhere.
-#
-# A match array is `NDArray[np.float64]` of a stated rank, so accumulation cannot
-# be handed the ignore mask in place of the scores -- a substitution that yields a
-# plausible number rather than an exception, and surfaces as a wrong promotion
-# decision after a four-hour training job.
-[[tool.mypy.overrides]]
-module = ["edge_ml_flywheel.evaluation.*"]
-strict = true
-
-# The gates for the same reason, and it is the reason the ratchet was written
-# for: a predicate returning pass/fail-plus-reason is the last thing that runs
-# before a promotion, and a wrong type here surfaces as a wrong decision after a
-# four-hour training job rather than as a crash.
-[[tool.mypy.overrides]]
-module = ["edge_ml_flywheel.gates.*"]
-strict = true
 
 [dependency-groups]
 dev = [
