@@ -27,7 +27,7 @@ env:
     SELECTOR: "uncertainty"
     LABEL_BUDGET: "1000"
     PARTITION_VERSION: "0"
-    CLASS_SET_VERSION: "1"
+    CLASS_SET_VERSION: "2"
     RECIPE_VERSION: "1"
 
     # Deliberately empty. A default slug is how two runs come to be named the

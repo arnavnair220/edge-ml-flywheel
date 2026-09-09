@@ -210,14 +210,17 @@ resource "aws_codebuild_project" "register" {
       value = "0"
     }
 
-    # No registry backs these two yet, unlike the partition version. They are
-    # the numbers a model manifest is later checked against, so they start at 1
-    # and move when the class set or the training recipe does.
+    # The nine-class set in `conventions.CLASS_SETS`. Version 1 is the four
+    # COCO-native classes, on which a COCO-pretrained detector starts too
+    # strong for a cycle's labels to move the metric, so runs start on 2.
     environment_variable {
       name  = "CLASS_SET_VERSION"
-      value = "1"
+      value = "2"
     }
 
+    # No registry backs this one, unlike the partition version. It is the number
+    # a model manifest is later checked against, so it starts at 1 and moves when
+    # the training recipe does.
     environment_variable {
       name  = "RECIPE_VERSION"
       value = "1"

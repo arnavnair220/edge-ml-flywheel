@@ -114,7 +114,10 @@ The label parser selects boxes by structure — an object carrying `box2d` rathe
 | 1 | `car`, `person`, `truck`, `bus` |
 | 2 | version 1 plus `traffic sign`, `traffic light`, `bike`, `rider`, `motor` |
 
-Both are declared before either is needed, on `partition_version`'s rule: add a version, never edit
+Runs start on version 2. The four classes in version 1 are all COCO-native, so a COCO-pretrained
+detector starts strong on them and a cycle's labels have little to move; `traffic sign` and
+`traffic light` are where a pretrained model is weak. Version 1 stays declared as the narrow set a
+later run can compare against. Both follow `partition_version`'s rule: add a version, never edit
 one. Three properties:
 
 - **Category IDs are 1-based positions in the version's tuple, ordered by measured frequency.** The
@@ -125,9 +128,6 @@ one. Three properties:
   `bicycle`. A `det_20` spelling matches no ground truth, so that class scores 0.0 AP every cycle
   and nothing fails; the check makes it a construction-time error.
 - **`train` is in neither set**, at 151 boxes archive-wide.
-
-There is no version 0. The v0 skeleton predicts the tag columns above rather than boxes, so its runs
-declare `class_set_version=0`, which names no entry and resolves to an error.
 
 ### Verification
 
@@ -379,8 +379,11 @@ and this one mints a new `run_id` on every invocation, so a push to `main` would
 
 One cycle spends its budget in five steps:
 
-1. The champion scores every remaining pool image. This is inference over image features only; no
-   label is read, so the step sits entirely inside the label wall.
+1. The champion scores every remaining pool image as a batch transform job. This is inference over
+   image features only; no label is read, so the step sits entirely inside the label wall. The
+   fleet's own scores over the frames it replayed are reported beside this ranking, never used to
+   rank the purchase. Five devices see a fraction of the pool per cycle, and a ranking over that
+   subsample would weaken selectivity by the sampling rate.
 2. Each image gets a **mean per-object uncertainty** score. Per-object rather than per-image,
    because an image-level maximum is decided by its single worst box and ranks a frame with one
    ambiguous detection above a frame the model is uniformly unsure of.

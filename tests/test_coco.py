@@ -301,7 +301,7 @@ class TestClassSet:
         for version in (1, 2):
             assert "train" not in class_set(ClassSetVersion(version)).names
 
-    def test_the_v0_skeleton_version_names_no_class_set(self):
+    def test_an_undeclared_version_names_no_class_set(self):
         with pytest.raises(ValueError, match="is not defined"):
             class_set(ClassSetVersion(0))
 

@@ -639,9 +639,11 @@ class ClassSet:
 
 
 CLASS_SETS: Final[Mapping[ClassSetVersion, ClassSet]] = {
-    # The four classes v1 starts on and the nine it expands to (design section
-    # 3). Both declared now rather than the second added at week 6, since
-    # appending to version 1's tuple is the edit this table's rule forbids.
+    # Runs start on version 2 (design section 3): the four classes in version 1
+    # are all COCO-native, so a COCO-pretrained detector starts strong on them
+    # and a cycle's labels have little to move. Version 1 stays declared as the
+    # narrow set a later run can compare against, since appending to a tuple is
+    # the edit this table's rule forbids.
     ClassSetVersion(1): ClassSet(names=("car", "person", "truck", "bus")),
     ClassSetVersion(2): ClassSet(
         names=(
@@ -656,9 +658,6 @@ CLASS_SETS: Final[Mapping[ClassSetVersion, ClassSet]] = {
             "motor",
         )
     ),
-    # No version 0. The v0 skeleton is a three-head classifier over `weather`,
-    # `scene` and `timeofday` (design section 3) and predicts no boxes, so its
-    # runs declare `class_set_version=0`, which names no entry and raises here.
 }
 
 
@@ -1209,7 +1208,8 @@ def cohort_labels_key(partition_version: PartitionVersion, cohort: Cohort, part:
     One object per cohort rather than a packed set, which `File` input mode
     settles: the channel is copied to local disk once per job, so every epoch
     after it reads disk. Whether object count makes that copy slow enough to
-    revisit is measured on v0 rather than guessed (design section 11).
+    revisit is measured on the first training jobs rather than guessed (design
+    section 11).
     """
     name = _padded("part", part, PART_DIGITS)
     return f"{cohort_labels_prefix(partition_version, cohort)}part-{name}.parquet"
