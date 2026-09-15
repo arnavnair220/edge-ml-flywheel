@@ -35,8 +35,11 @@ phases:
       - curl -LsSf https://astral.sh/uv/0.11.25/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
       # The `ingest` group, which is where `pyarrow` lives. Both data jobs read
-      # and write parquet, so the group serves both.
-      - uv sync --frozen --group ingest
+      # and write parquet, so the group serves both. `run` is the AWS SDK, which
+      # this job needs because `stage-labels` makes its own S3 calls -- named
+      # rather than left to arrive transitively through the dev group's `moto`,
+      # which is a test dependency and no promise to a build.
+      - uv sync --frozen --group ingest --group run
       - uv run python -c "import sys; print(sys.version)"
 
   pre_build:
@@ -78,8 +81,9 @@ phases:
 
       # The labels `bootstrap` and `eval` own. Three steps rather than one because
       # which documents to fetch is a function of the draw that just happened: the
-      # package names them, the shell copies them, and the package reads back only
-      # what it named.
+      # package names them, fetches exactly what it named, and reads back only
+      # that. The copy is the package's here and the shell's everywhere else in
+      # this file, which `partition.fetch` is the argument for.
       #
       # `label-keys` reads the assignments off the staged tree, so the list is the
       # partition's own answer rather than a size arithmetic that could agree with
@@ -89,16 +93,19 @@ phases:
       - uv run python -m edge_ml_flywheel.partition label-keys --stage-dir "$WORK/stage" --partition-version "$PARTITION_VERSION" > "$WORK/label-keys.txt"
       - echo "staging $(wc -l < "$WORK/label-keys.txt") label documents of the 80,000 this role can read"
 
-      # One GET per document, which is what the archive's per-image JSON costs and
-      # the reason `build_timeout` is 30 minutes rather than 20. Parallel because
-      # this is request latency and not bytes -- 13,000 documents are a few
-      # megabytes in total. `--recursive` over the label prefix would be one
-      # command and would put all 80,000 on local disk, including the 62,000 the
-      # oracle exists to sell.
+      # One GET per document, which is what the archive's per-image JSON costs.
+      # In the package rather than in a shell loop here, because 13,000 objects of
+      # a few kilobytes are request latency and an `aws s3 cp` per object is a
+      # Python interpreter per object -- which on this container's two vCPUs is
+      # the whole cost and timed this build out at thirty minutes. `--recursive`
+      # over the label prefix would be one command and would put all 80,000 on
+      # local disk, including the 62,000 the oracle exists to sell.
       #
-      # xargs exits non-zero if any copy did, so a partial stage fails here rather
-      # than becoming a short label file below.
-      - xargs -P 32 -I {} aws s3 cp "s3://$DATA_BUCKET/{}" "$WORK/stage/{}" --only-show-errors < "$WORK/label-keys.txt"
+      # It derives the same list `label-keys` printed above rather than reading
+      # that file, so nothing in the build can hand the downloader a key the
+      # partition did not name. A document that fails to land fails the build,
+      # rather than becoming a short label file below.
+      - uv run python -m edge_ml_flywheel.partition stage-labels --stage-dir "$WORK/stage" --partition-version "$PARTITION_VERSION"
 
       # Asserts each cohort's file holds exactly that cohort's images before
       # writing it. Same ordering as the draw above: nothing is uploaded by a run
