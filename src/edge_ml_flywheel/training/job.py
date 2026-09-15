@@ -35,7 +35,6 @@ from typing import Any, Final
 
 from edge_ml_flywheel.conventions import (
     Buckets,
-    ClassSetVersion,
     Cohort,
     Cycle,
     ModelVersion,
@@ -179,12 +178,12 @@ class Target:
 
     The run and the cycle are not fields. They are inside `version`, and every
     key this module builds recovers them from it, for the reason `conventions`
-    keeps the version trio out of a model version in the first place.
+    keeps the versions out of a model version in the first place.
 
-    `partition_version` and `class_set_version` are here rather than defaulted,
-    because both are preconditions of the comparison the run is making (design
-    section 5): they come off the run registration, and a default would be a job
-    training under a configuration its run never declared.
+    `partition_version` is here rather than defaulted, because it is a
+    precondition of the comparison the run is making (design section 5): it comes
+    off the run registration, and a default would be a job training under a
+    configuration its run never declared.
     """
 
     buckets: Buckets
@@ -193,7 +192,6 @@ class Target:
     version: ModelVersion
     seed: Seed
     partition_version: PartitionVersion
-    class_set_version: ClassSetVersion
 
     # Cost attribution, and the only field here that decides nothing. Terraform's
     # `default_tags` covers what Terraform creates; a training job is created by
@@ -311,19 +309,19 @@ def hyperparameters(target: Target, recipe: Recipe) -> dict[str, str]:
     manifest and the device verify. Two forms with two readers, from one set of
     bytes hashed where they were produced.
 
-    `class_set_version` decides which of an image's boxes are trained on at all,
-    so it is an input to the job and not a label attached afterwards. The job
-    fails on a version `conventions.CLASS_SETS` does not define.
+    The class set is not passed. There is one, in `conventions.CLASS_SET`, and
+    the container imports it the way this module does -- a value with a single
+    possible answer travelling as a job parameter is a parameter that can be
+    wrong.
 
-    The run and the cycle are not passed. They are inside `version`, and the
-    container recovers them the way every key builder does -- three spellings of
-    two facts is how a job comes to write its artifacts under a cycle it did not
-    train.
+    The run and the cycle are not passed either. They are inside `version`, and
+    the container recovers them the way every key builder does -- three spellings
+    of two facts is how a job comes to write its artifacts under a cycle it did
+    not train.
     """
     return {
         "version": target.version,
         "seed": str(target.seed),
-        "class_set_version": str(target.class_set_version),
         "epochs": str(recipe.epochs),
         "image_size": str(recipe.image_size),
         "batch": str(recipe.batch),

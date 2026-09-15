@@ -13,15 +13,14 @@ from pathlib import Path
 import pytest
 
 from edge_ml_flywheel.conventions import (
+    CLASS_SET,
     NATIVE_IMAGE_SIZE,
-    ClassSetVersion,
     ImageId,
-    class_set,
 )
 from edge_ml_flywheel.ingest.labels import Box
 from edge_ml_flywheel.training import dataset, images
 
-NINE = class_set(ClassSetVersion(2))
+NINE = CLASS_SET
 WIDTH, HEIGHT = NATIVE_IMAGE_SIZE
 
 

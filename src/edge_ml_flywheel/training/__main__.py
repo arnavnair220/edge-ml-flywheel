@@ -6,7 +6,10 @@ Three commands in the order a cycle uses them:
     python -m edge_ml_flywheel.training prepare --run-id <id> --cycle 0 --max-images 300
     python -m edge_ml_flywheel.training launch --run-id <id> --cycle 0 --seed 1 --epochs 1 --wait
 
-`stage-base` is run once for the life of the project. `prepare` is run once per
+`stage-base` is not a step anyone has to run: `prepare` stages the base itself
+when the bucket has none, so a fresh account bootstraps on its first cycle. The
+command survives for the case that file has to come from somewhere other than
+its release URL, which is what `--weights` supplies. `prepare` is run once per
 cycle, because the manifest it writes is what all five seeds train on and is the
 record of what the challenger was trained on. `launch` is run once per seed.
 
@@ -37,7 +40,14 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     staged = sub.add_parser("stage-base", help="upload the COCO base weights, once")
-    staged.add_argument("--weights", type=Path, required=True, help="Local yolo11n.pt.")
+    # Optional, because `prepare` stages the base itself on the first cycle of a
+    # fresh account and this command is then only needed to supply the file from
+    # somewhere other than its release URL.
+    staged.add_argument(
+        "--weights",
+        type=Path,
+        help="Local yolo11n.pt. Omitted, the release copy is fetched if the bucket has none.",
+    )
 
     prepared = sub.add_parser(
         "prepare", help="write the image manifest and source archive for one cycle"
@@ -85,7 +95,7 @@ def main(argv: list[str] | None = None) -> None:
     aws = launch.session(args.profile)
 
     if args.command == "stage-base":
-        print(launch.stage_base(aws, args.weights))
+        print(launch.stage_base(aws, args.weights) if args.weights else launch.ensure_base(aws))
 
     elif args.command == "prepare":
         print(

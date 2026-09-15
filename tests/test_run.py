@@ -26,12 +26,10 @@ from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from edge_ml_flywheel.conventions import (
-    ClassSetVersion,
     PartitionVersion,
     RecipeVersion,
     RunId,
     RunRegistration,
-    Selector,
     Table,
     columns,
     new_run_id,
@@ -69,9 +67,7 @@ def a_registration(**overrides: Any) -> RunRegistration:
         "created_at": CREATED,
         "git_commit": COMMIT,
         "partition_version": PartitionVersion(0),
-        "class_set_version": ClassSetVersion(1),
         "recipe_version": RecipeVersion(1),
-        "selector": Selector.UNCERTAINTY,
         "label_budget_per_cycle": 1000,
         "note": "first skeleton run",
     }
@@ -156,7 +152,6 @@ class TestItemEncoding:
     def test_survives_the_decimals_dynamodb_returns(self) -> None:
         item = reg.to_item(a_registration()) | {
             "partition_version": Decimal(0),
-            "class_set_version": Decimal(1),
             "recipe_version": Decimal(1),
             "label_budget_per_cycle": Decimal(1000),
         }
@@ -174,12 +169,9 @@ class TestItemEncoding:
 
     def test_the_item_is_json_serializable(self) -> None:
         """`show` prints it, and a stray enum or datetime would fail there."""
-        assert json.loads(json.dumps(reg.to_item(a_registration())))["selector"] == "uncertainty"
-
-    def test_stores_the_selector_as_its_value(self) -> None:
-        item = reg.to_item(a_registration(selector=Selector.CERTAINTY))
-        assert item["selector"] == "certainty"
-        assert type(item["selector"]) is str
+        restored = json.loads(json.dumps(reg.to_item(a_registration())))
+        assert restored["note"] == "first skeleton run"
+        assert restored["created_at"] == "2026-08-12T14:33:55+00:00"
 
 
 class TestRegister:
@@ -203,11 +195,11 @@ class TestRegister:
         """A refusal is not a partial write. The first run's config survives it."""
         reg.register(table, a_registration())
         with pytest.raises(reg.RunAlreadyRegisteredError):
-            reg.register(table, a_registration(selector=Selector.RANDOM, note="clobber"))
+            reg.register(table, a_registration(label_budget_per_cycle=99, note="clobber"))
 
         stored = reg.read(table, RUN)
         assert stored is not None
-        assert stored.selector is Selector.UNCERTAINTY
+        assert stored.label_budget_per_cycle == 1000
         assert stored.note == "first skeleton run"
 
     def test_two_runs_in_the_same_second_differ_by_slug(self, table: Any) -> None:
@@ -221,11 +213,11 @@ class TestRegister:
         second = new_run_id(started, "v0-control")
 
         reg.register(table, a_registration(run_id=first))
-        reg.register(table, a_registration(run_id=second, selector=Selector.RANDOM))
+        reg.register(table, a_registration(run_id=second, note="the control"))
 
         stored = reg.read(table, second)
         assert stored is not None
-        assert stored.selector is Selector.RANDOM
+        assert stored.note == "the control"
 
     def test_a_client_error_that_is_not_a_collision_is_not_swallowed(self, table: Any) -> None:
         """Only the condition failure becomes `RunAlreadyRegisteredError`.
@@ -259,12 +251,8 @@ REGISTER_ARGS = [
     "register",
     "--slug",
     "v1-uncertainty",
-    "--selector",
-    "uncertainty",
     "--partition-version",
     "0",
-    "--class-set-version",
-    "1",
     "--recipe-version",
     "1",
     "--label-budget",
@@ -296,7 +284,6 @@ class TestCli:
         assert stored is not None
         assert stored.git_commit == COMMIT
         assert stored.label_budget_per_cycle == 1000
-        assert stored.selector is Selector.UNCERTAINTY
 
     def test_register_refuses_without_a_git_commit(
         self, table: Any, monkeypatch: pytest.MonkeyPatch
@@ -346,10 +333,11 @@ class TestCli:
         with pytest.raises(SystemExit, match="never registered"):
             cli.main(["show", "--run-id", OTHER])
 
-    def test_rejects_a_selector_outside_the_three(self, table: Any) -> None:
-        """Argparse `choices` off the enum, so a typo fails before the clock is read."""
+    def test_rejects_a_partition_version_nobody_declared(self, table: Any) -> None:
+        """Argparse `choices` off `PARTITIONS`, so a typo fails before the clock
+        is read and before anything is written."""
         args = [*REGISTER_ARGS]
-        args[args.index("--selector") + 1] = "confidence"
+        args[args.index("--partition-version") + 1] = "7"
         with pytest.raises(SystemExit):
             cli.main(args)
 

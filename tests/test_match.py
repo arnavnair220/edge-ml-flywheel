@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 from pycocotools.cocoeval import COCOeval
 
-from edge_ml_flywheel.conventions import ClassSetVersion, ImageId, class_set
+from edge_ml_flywheel.conventions import CLASS_SET, ImageId
 from edge_ml_flywheel.evaluation.coco import (
     Detection,
     ImageIndex,
@@ -41,8 +41,7 @@ IMAGE_A = ImageId("00000000-0000000a")
 IMAGE_B = ImageId("00000000-0000000b")
 IMAGE_C = ImageId("00000000-0000000c")
 
-CLASS_SET_VERSION = ClassSetVersion(1)
-CLASSES = class_set(CLASS_SET_VERSION)
+CLASSES = CLASS_SET
 
 CAR = CLASSES.category_id("car")
 PERSON = CLASSES.category_id("person")
@@ -88,7 +87,7 @@ PREDICTIONS = {
 def a_cache() -> MatchCache:
     truth = as_coco(ground_truth(LABELS, CLASSES, INDEX))
     results = as_coco_results(truth, detections(PREDICTIONS, CLASSES, INDEX))
-    return score(truth, results, CLASS_SET_VERSION, INDEX)
+    return score(truth, results, INDEX)
 
 
 def an_evaluator() -> COCOeval:
@@ -200,7 +199,7 @@ def test_max_dets_keeps_the_highest_scoring_detections():
 def test_a_model_that_detected_nothing_scores_rather_than_raising():
     """Design section 4.2 hard fails this, which needs a number to fail on."""
     truth = as_coco(ground_truth(LABELS, CLASSES, INDEX))
-    cache = score(truth, as_coco_results(truth, []), CLASS_SET_VERSION, INDEX)
+    cache = score(truth, as_coco_results(truth, []), INDEX)
 
     blocks = cache.blocks(CAR, AreaRange.ALL, np.arange(len(INDEX)))
     assert cache.detection_rows(blocks).size == 0
@@ -219,7 +218,6 @@ def test_a_loaded_cache_answers_identically(tmp_path: Path):
     original = cache.detection_rows(cache.blocks(CAR, AreaRange.ALL, rows))
     again = restored.detection_rows(restored.blocks(CAR, AreaRange.ALL, rows))
     assert restored.index == cache.index
-    assert restored.class_set_version == cache.class_set_version
     assert np.array_equal(restored.scores[again], cache.scores[original])
     assert np.array_equal(restored.matched[:, again], cache.matched[:, original])
     assert np.array_equal(restored.n_truth, cache.n_truth)
@@ -244,7 +242,6 @@ def test_refuses_arrays_that_disagree_on_the_detection_count():
     with pytest.raises(ValueError, match="scores is"):
         MatchCache(
             index=cache.index,
-            class_set_version=CLASS_SET_VERSION,
             matched=cache.matched,
             ignored=cache.ignored,
             scores=cache.scores[:-1],

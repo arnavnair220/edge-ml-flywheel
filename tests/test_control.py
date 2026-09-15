@@ -35,13 +35,17 @@ from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from edge_ml_flywheel.control import handler as ctrl
-from edge_ml_flywheel.conventions import Cycle, RunId, Table, table_name
+from edge_ml_flywheel.conventions import PROJECT, Cycle, RunId, Table, table_name
 from edge_ml_flywheel.run import control as ctl
 from edge_ml_flywheel.training import launch
 
 RUN = RunId("20260812t143355z-v0-skeleton")
 OTHER = RunId("20260812t143355z-v0-control")
 REGION = "us-east-1"
+
+# What moto's STS hands back, which is what `ctl.cycle_machine_arn` composes the
+# machine's ARN from.
+ACCOUNT = "123456789012"
 
 # The definition the Terraform reads. A relative path from this file rather than
 # a fixture, because a test that cannot find it should fail as a missing file and
@@ -147,6 +151,72 @@ class TestOpeningTheCounter:
         held = ctl.read(fleet, OTHER)
         assert held is not None
         assert held.cycle_cap == 1
+
+
+class TestStartingTheRun:
+    """One execution is the whole run, so this is the only call that starts one.
+
+    Run against `moto` rather than a fake client for `TestTheClaim`'s reason: the
+    refusal of a second start is Step Functions' own uniqueness rule on execution
+    names, and a fake written to raise proves only that it was written to raise.
+    """
+
+    @pytest.fixture
+    def machine(self, fleet: Any) -> Iterator[Any]:
+        """The cycle machine at the ARN `ctl.cycle_machine_arn` composes.
+
+        Built from the real definition, so a state the ASL renamed cannot leave
+        this test starting a machine that no longer matches it. `fleet` is taken
+        for its credentials and its region, not its table.
+        """
+        aws = boto3.Session(region_name=REGION)
+        aws.client("stepfunctions").create_state_machine(
+            name=f"{PROJECT}-cycle",
+            definition=ASL.read_text(encoding="utf-8"),
+            roleArn=f"arn:aws:iam::{ACCOUNT}:role/{PROJECT}-cycle",
+        )
+        yield aws
+
+    def started(self, aws: Any, arn: str) -> dict[str, Any]:
+        described = aws.client("stepfunctions").describe_execution(executionArn=arn)
+        return dict(json.loads(described["input"]))
+
+    def test_the_payload_names_the_run_the_epochs_and_the_seeds(self, machine: Any) -> None:
+        arn = ctl.start(machine, RUN, epochs=1, seeds=[1, 2, 3])
+
+        assert self.started(machine, arn) == {
+            "run_id": str(RUN),
+            "epochs": 1,
+            "seeds": [1, 2, 3],
+        }
+
+    def test_an_uncapped_run_carries_no_max_images(self, machine: Any) -> None:
+        """0 is the whole labeled set, which is the machine's own default. A cap
+        nobody chose has no business in the record of what was asked for."""
+        arn = ctl.start(machine, RUN, epochs=1, seeds=[1])
+
+        assert "max_images" not in self.started(machine, arn)
+
+    def test_a_skeleton_cap_is_carried(self, machine: Any) -> None:
+        arn = ctl.start(machine, RUN, epochs=1, seeds=[1], max_images=300)
+
+        assert self.started(machine, arn)["max_images"] == 300
+
+    def test_the_execution_is_named_for_the_run(self, machine: Any) -> None:
+        """The name is the whole mechanism refusing a second start of a run
+        already going, so it is asserted rather than the refusal itself: `moto`
+        does not enforce Step Functions' uniqueness rule on execution names, and
+        a test of a rule the engine under it does not have would pass by
+        agreeing with nothing.
+        """
+        arn = ctl.start(machine, RUN, epochs=1, seeds=[1])
+
+        assert arn.endswith(f":{RUN}")
+
+    def test_a_second_run_starts_alongside_the_first(self, machine: Any) -> None:
+        ctl.start(machine, RUN, epochs=1, seeds=[1])
+
+        assert ctl.start(machine, OTHER, epochs=1, seeds=[1]).endswith(f":{OTHER}")
 
 
 class TestTheClaim:

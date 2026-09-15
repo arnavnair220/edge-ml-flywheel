@@ -18,7 +18,7 @@ resampling having done anything.
 import numpy as np
 import pytest
 
-from edge_ml_flywheel.conventions import ClassSetVersion, ImageId, Seed, class_set
+from edge_ml_flywheel.conventions import CLASS_SET, ImageId, Seed
 from edge_ml_flywheel.evaluation.bootstrap import RESAMPLE_SEED, paired_delta, resamples
 from edge_ml_flywheel.evaluation.coco import (
     Detection,
@@ -32,8 +32,7 @@ from edge_ml_flywheel.evaluation.match import MatchCache, score
 from edge_ml_flywheel.evaluation.metrics import average_precision, image_rows
 from edge_ml_flywheel.ingest.labels import Box
 
-CLASS_SET_VERSION = ClassSetVersion(1)
-CLASSES = class_set(CLASS_SET_VERSION)
+CLASSES = CLASS_SET
 
 IMAGES = 12
 # Three, not five. The pairing is what is under test and it does not care how many
@@ -85,7 +84,7 @@ def a_cache(boxes_detected: int, image_ids: tuple[ImageId, ...] | None = None) -
     }
     truth = as_coco(ground_truth(labels, CLASSES, index))
     results = as_coco_results(truth, detections(predictions, CLASSES, index))
-    return score(truth, results, CLASS_SET_VERSION, index)
+    return score(truth, results, index)
 
 
 # Seed 3 is a slightly better run than the other two, so averaging over seeds is

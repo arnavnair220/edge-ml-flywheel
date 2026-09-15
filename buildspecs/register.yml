@@ -6,9 +6,6 @@
 #       name=RUN_SLUG,value=v1-uncertainty,type=PLAINTEXT \
 #       name=RUN_NOTE,value="first real loop",type=PLAINTEXT
 #
-# To register a control arm, override the selector too:
-#       name=SELECTOR,value=random,type=PLAINTEXT
-#
 # To register a run that exercises the loop once rather than running it:
 #       name=CYCLE_CAP,value=1,type=PLAINTEXT
 #
@@ -27,10 +24,8 @@ env:
   variables:
     # Overridden by the project's environment (see infra/register.tf) and
     # overridable again per build. Repeated here so the file runs on its own.
-    SELECTOR: "uncertainty"
     LABEL_BUDGET: "1000"
     PARTITION_VERSION: "0"
-    CLASS_SET_VERSION: "2"
     RECIPE_VERSION: "1"
     CYCLE_CAP: "8"
 
@@ -75,9 +70,7 @@ phases:
       - |
         RUN_ID=$(uv run python -m edge_ml_flywheel.run register \
           --slug "$RUN_SLUG" \
-          --selector "$SELECTOR" \
           --partition-version "$PARTITION_VERSION" \
-          --class-set-version "$CLASS_SET_VERSION" \
           --recipe-version "$RECIPE_VERSION" \
           --label-budget "$LABEL_BUDGET" \
           --cycle-cap "$CYCLE_CAP" \

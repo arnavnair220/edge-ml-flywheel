@@ -16,22 +16,19 @@ import json
 import pytest
 
 from edge_ml_flywheel.conventions import (
-    ClassSetVersion,
+    CLASS_SET,
     ImageId,
     ManifestRow,
     Scene,
-    Selector,
     Split,
     TimeOfDay,
     Weather,
-    class_set,
 )
 from edge_ml_flywheel.evaluation.coco import Detection
 from edge_ml_flywheel.selection import (
     BAND_HIGH,
     BLIND_SPOT,
     DECISIVE,
-    RULES,
     Mix,
     Predictions,
     image_score,
@@ -41,8 +38,7 @@ from edge_ml_flywheel.selection import (
     uncertainty,
 )
 
-CLASSES = class_set(ClassSetVersion(1))
-SEED = 7
+CLASSES = CLASS_SET
 
 
 def an_image(position: int) -> ImageId:
@@ -156,15 +152,10 @@ def test_a_detection_outside_the_class_set_is_refused() -> None:
 # --- Ranking and taking -------------------------------------------------------
 
 
-def test_uncertainty_takes_the_top_of_the_ranking() -> None:
+def test_the_top_of_the_ranking_is_what_is_bought() -> None:
     scores = {image_id: index / 10 for index, image_id in enumerate(POOL)}
-    batch = select(Selector.UNCERTAINTY, POOL, scores, 3, SEED)
+    batch = select(POOL, scores, 3)
     assert batch == (POOL[9], POOL[8], POOL[7])
-
-
-def test_certainty_is_the_same_ranking_inverted() -> None:
-    scores = {image_id: index / 10 for index, image_id in enumerate(POOL)}
-    assert select(Selector.CERTAINTY, POOL, scores, 3, SEED) == (POOL[0], POOL[1], POOL[2])
 
 
 def test_ties_break_on_image_id_so_a_retry_proposes_the_same_batch() -> None:
@@ -175,30 +166,19 @@ def test_ties_break_on_image_id_so_a_retry_proposes_the_same_batch() -> None:
     below would differ and the oracle would charge twice.
     """
     scores = dict.fromkeys(POOL, BLIND_SPOT)
-    first = select(Selector.UNCERTAINTY, POOL, scores, 4, SEED)
-    second = select(Selector.UNCERTAINTY, reversed(POOL), scores, 4, SEED)
+    first = select(POOL, scores, 4)
+    second = select(reversed(POOL), scores, 4)
     assert first == second == tuple(sorted(POOL)[:4])
 
 
-def test_random_ignores_scores_and_reproduces_from_its_seed() -> None:
-    """No inference at all, which is what makes it the smoke test."""
-    batch = select(Selector.RANDOM, POOL, {}, 4, SEED)
-    assert batch == select(Selector.RANDOM, reversed(POOL), {}, 4, SEED)
-    assert len(set(batch)) == 4
-    assert set(batch) <= set(POOL)
-
-
-def test_a_different_seed_draws_a_different_batch() -> None:
-    assert select(Selector.RANDOM, POOL, {}, 4, SEED) != select(Selector.RANDOM, POOL, {}, 4, 8)
-
-
-def test_every_selector_is_implemented() -> None:
-    assert set(RULES) == set(Selector)
+def test_the_batch_does_not_depend_on_the_pools_iteration_order() -> None:
+    scores = {image_id: index / 10 for index, image_id in enumerate(POOL)}
+    assert select(POOL, scores, 4) == select(reversed(POOL), scores, 4)
 
 
 def test_an_unscored_pool_image_is_refused_rather_than_ranked_last() -> None:
     with pytest.raises(ValueError, match="no score"):
-        select(Selector.UNCERTAINTY, POOL, {POOL[0]: 1.0}, 1, SEED)
+        select(POOL, {POOL[0]: 1.0}, 1)
 
 
 @pytest.mark.parametrize(
@@ -208,7 +188,7 @@ def test_an_unscored_pool_image_is_refused_rather_than_ranked_last() -> None:
 def test_an_impossible_budget_is_refused(budget: int, message: str) -> None:
     scores = dict.fromkeys(POOL, 0.5)
     with pytest.raises(ValueError, match=message):
-        select(Selector.UNCERTAINTY, POOL, scores, budget, SEED)
+        select(POOL, scores, budget)
 
 
 # --- The batch record ---------------------------------------------------------
@@ -239,7 +219,7 @@ def test_an_image_with_no_manifest_row_is_refused() -> None:
 
 def test_a_collapsed_batch_is_visible_against_the_remaining_pool() -> None:
     batch = POOL[:4]
-    report = selection_report(Selector.UNCERTAINTY, batch, POOL, MANIFEST, predicting())
+    report = selection_report(batch, POOL, MANIFEST, predicting())
     assert report.batch.weather["snowy"] == 4
     assert report.batch.weather["clear"] == 0
     assert report.remaining.weather["snowy"] == 0
@@ -249,7 +229,7 @@ def test_a_collapsed_batch_is_visible_against_the_remaining_pool() -> None:
 
 def test_predicted_classes_cover_the_class_set_so_a_zero_is_the_warning() -> None:
     predictions = predicting({POOL[0]: [a_detection(0.5, "car"), a_detection(0.9, "car")]})
-    report = selection_report(Selector.UNCERTAINTY, POOL[:2], POOL, MANIFEST, predictions)
+    report = selection_report(POOL[:2], POOL, MANIFEST, predictions)
     assert report.predicted_classes["car"] == 2
     assert report.predicted_classes["bus"] == 0
     assert set(report.predicted_classes) == set(CLASSES.names)
@@ -257,19 +237,18 @@ def test_predicted_classes_cover_the_class_set_so_a_zero_is_the_warning() -> Non
 
 def test_blind_spots_in_the_batch_are_counted() -> None:
     predictions = predicting({POOL[0]: [a_detection(0.5)]})
-    report = selection_report(Selector.UNCERTAINTY, POOL[:3], POOL, MANIFEST, predictions)
+    report = selection_report(POOL[:3], POOL, MANIFEST, predictions)
     assert report.blind_spots == 2
 
 
 def test_a_batch_from_outside_the_pool_is_refused() -> None:
     with pytest.raises(ValueError, match="not in the pool"):
-        selection_report(Selector.UNCERTAINTY, [an_image(99)], POOL, MANIFEST, predicting())
+        selection_report([an_image(99)], POOL, MANIFEST, predicting())
 
 
 def test_the_report_serializes_to_json() -> None:
-    report = selection_report(Selector.UNCERTAINTY, POOL[:2], POOL, MANIFEST, predicting())
+    report = selection_report(POOL[:2], POOL, MANIFEST, predicting())
     document = json.loads(report.as_json())
-    assert document["selector"] == Selector.UNCERTAINTY.value
     assert document["batch"]["images"] == 2
     assert document["remaining"]["images"] == 8
     assert document["blind_spots"] == 2

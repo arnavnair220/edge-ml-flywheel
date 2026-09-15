@@ -162,7 +162,6 @@ resource "aws_cloudwatch_log_group" "register" {
 #   aws codebuild start-build --project-name edge-ml-flywheel-register \
 #     --environment-variables-override \
 #       name=RUN_SLUG,value=v1-uncertainty,type=PLAINTEXT \
-#       name=SELECTOR,value=uncertainty,type=PLAINTEXT \
 #       name=RUN_NOTE,value="first real loop",type=PLAINTEXT
 #
 # No webhook, and this is the one project where that is not a preference. Ingest
@@ -210,10 +209,6 @@ resource "aws_codebuild_project" "register" {
     # have none on purpose -- the buildspec fails when either is empty, because
     # a default slug is how two runs come to be named the same thing and a
     # default note is how the field stops meaning anything.
-    environment_variable {
-      name  = "SELECTOR"
-      value = "uncertainty"
-    }
 
     # 1,000 labels a cycle against a 62,000-image pool: 1.6% of what was scored,
     # which is the selectivity a ranking needs to diverge from a random draw.
@@ -228,14 +223,6 @@ resource "aws_codebuild_project" "register" {
     environment_variable {
       name  = "PARTITION_VERSION"
       value = "0"
-    }
-
-    # The nine-class set in `conventions.CLASS_SETS`. Version 1 is the four
-    # COCO-native classes, on which a COCO-pretrained detector starts too
-    # strong for a cycle's labels to move the metric, so runs start on 2.
-    environment_variable {
-      name  = "CLASS_SET_VERSION"
-      value = "2"
     }
 
     # No registry backs this one, unlike the partition version. It is the number

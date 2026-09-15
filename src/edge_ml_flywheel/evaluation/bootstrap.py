@@ -202,5 +202,3 @@ def _check_comparable(
     first = caches[0]
     if any(cache.index != first.index for cache in caches):
         raise ValueError("the caches were not scored against the same eval cohort")
-    if any(cache.class_set_version != first.class_set_version for cache in caches):
-        raise ValueError("the caches were not scored under the same class set")

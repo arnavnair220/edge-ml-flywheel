@@ -44,6 +44,12 @@ locals {
     "${local.bucket_arns["data"]}/derived/partition_version=*/labels/cohort=bootstrap/*",
     "${local.bucket_arns["data"]}/derived/purchases/*",
   ]
+
+  # `base_weights_key()`. Written by `launch.ensure_base` on the first cycle of a
+  # fresh account and read by nothing here -- the training role is what reads it,
+  # as a channel. One object rather than the prefix, so this grant cannot become
+  # a way to put a second checkpoint beside the one the recipe names.
+  control_base_object = "${local.bucket_arns["artifacts"]}/base/yolo11n.pt"
 }
 
 # ---------------------------------------------------------------------------
@@ -164,6 +170,17 @@ data "aws_iam_policy_document" "control" {
     resources = [local.control_training_objects]
   }
 
+  # The COCO base, staged by `prepare` when the bucket has none so that a fresh
+  # account needs no setup command. `PutObject` and no delete, against a bucket
+  # that is write-once: the first cycle creates it and every later cycle finds it
+  # and makes no request at all.
+  statement {
+    sid       = "StageTheBaseWeightsOnce"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = [local.control_base_object]
+  }
+
   statement {
     sid       = "ListTheCyclePrefix"
     effect    = "Allow"
@@ -173,7 +190,14 @@ data "aws_iam_policy_document" "control" {
     condition {
       test     = "StringLike"
       variable = "s3:prefix"
-      values   = ["run_id=*/cycle=*/training/*"]
+
+      # `base/` alongside the cycle prefix, because `ensure_base` decides whether
+      # to fetch by listing and a denied listing reads as "not there yet" -- which
+      # would re-stage the base on every cycle.
+      values = [
+        "run_id=*/cycle=*/training/*",
+        "base/*",
+      ]
     }
   }
 

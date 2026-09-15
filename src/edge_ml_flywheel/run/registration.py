@@ -24,12 +24,10 @@ import boto3
 from botocore.exceptions import ClientError
 
 from edge_ml_flywheel.conventions import (
-    ClassSetVersion,
     PartitionVersion,
     RecipeVersion,
     RunId,
     RunRegistration,
-    Selector,
     Table,
     columns,
     parse_run_id,
@@ -73,9 +71,7 @@ def to_item(registration: RunRegistration) -> dict[str, Any]:
         "created_at": registration.created_at.astimezone(UTC).isoformat(),
         "git_commit": registration.git_commit,
         "partition_version": int(registration.partition_version),
-        "class_set_version": int(registration.class_set_version),
         "recipe_version": int(registration.recipe_version),
-        "selector": registration.selector.value,
         "label_budget_per_cycle": registration.label_budget_per_cycle,
         "note": registration.note,
     }
@@ -103,9 +99,7 @@ def from_item(item: dict[str, Any]) -> RunRegistration:
         created_at=datetime.fromisoformat(item["created_at"]),
         git_commit=item["git_commit"],
         partition_version=PartitionVersion(int(item["partition_version"])),
-        class_set_version=ClassSetVersion(int(item["class_set_version"])),
         recipe_version=RecipeVersion(int(item["recipe_version"])),
-        selector=Selector(item["selector"]),
         label_budget_per_cycle=int(item["label_budget_per_cycle"]),
         note=item["note"],
     )
