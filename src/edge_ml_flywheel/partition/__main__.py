@@ -5,6 +5,12 @@
 the data is goes through the package. No S3 key is spelled in the buildspec --
 `prefix` prints the ones the copies need, the way `ingest url` prints a URL.
 
+`stage-labels` is the one copy the package makes itself, for the reason
+`partition.fetch` gives: the label documents are 13,000 objects of a few
+kilobytes, and a shell loop spawning an AWS CLI per object is process startup
+rather than transfer. `label-keys` still prints that list, and is what the build
+log records as the audit of which 13,000 of the 80,000 labels the job read.
+
 `--partition-version` is required rather than defaulted, and the defined versions
 are the parser's choices, so an undefined one fails before anything is read.
 There is deliberately no `--seed`: the seed is a property of the version
@@ -20,6 +26,8 @@ import logging
 import sys
 from pathlib import Path
 
+import boto3
+
 from edge_ml_flywheel.conventions import (
     MANIFEST_PREFIX,
     PARTITIONS,
@@ -27,7 +35,7 @@ from edge_ml_flywheel.conventions import (
     partition_prefix,
     partition_spec,
 )
-from edge_ml_flywheel.partition import assign, cohort_labels
+from edge_ml_flywheel.partition import assign, cohort_labels, fetch
 
 log = logging.getLogger("edge_ml_flywheel.partition")
 
@@ -78,6 +86,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     listed.add_argument("--stage-dir", type=Path, required=True)
     _add_version(listed)
+
+    fetched = sub.add_parser(
+        "stage-labels", help="copy those label documents out of the bucket onto local disk"
+    )
+    fetched.add_argument("--stage-dir", type=Path, required=True)
+    _add_version(fetched)
 
     labelled = sub.add_parser(
         "labels", help="write the bootstrap and eval boxes from staged label documents"
@@ -145,6 +159,16 @@ def main(argv: list[str] | None = None) -> None:
         needed = cohort_labels.keys(rows)
         log.info("%d label documents to stage", len(needed))
         print("\n".join(needed))
+
+    elif args.command == "stage-labels":
+        # The same derivation `label-keys` prints, rather than the list it
+        # printed: a downloader that takes keys from its caller is a downloader
+        # someone can hand a `pool` label, and the refusal in
+        # `cohort_labels.label_key` only helps while the keys come from there.
+        rows = assign.read_assignments(args.stage_dir, PartitionVersion(args.partition_version))
+        needed = cohort_labels.keys(rows)
+        aws = boto3.Session()
+        fetch.stage(fetch.client(aws), fetch.data_bucket(aws), needed, args.stage_dir)
 
     elif args.command == "labels":
         rows = assign.read_assignments(args.stage_dir, PartitionVersion(args.partition_version))

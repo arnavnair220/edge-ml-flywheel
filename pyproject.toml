@@ -132,11 +132,15 @@ ingest = [
     "pillow>=11",
 ]
 
-# The AWS SDK, for the one module that makes an API call. A group rather than a
-# project dependency for `ingest`'s reason, and separate from it because the two
-# jobs share nothing: registration writes one DynamoDB item and reads no parquet.
+# The AWS SDK, for the modules that make an API call: the run registration, and
+# the partitioner staging the label documents it named. A group rather than a
+# project dependency for `ingest`'s reason, and separate from it because parquet
+# and the SDK are wanted independently -- registration writes one DynamoDB item
+# and reads no parquet. The partition job installs both.
+#
 # `moto` brings boto3 transitively, so the dev group already has it and the test
-# suite runs without this group installed.
+# suite runs without this group installed. A build is not a test, which is why
+# `buildspecs/partition.yml` names this group rather than relying on that.
 run = [
     "boto3>=1.35",
 ]
