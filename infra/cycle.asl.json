@@ -39,18 +39,12 @@
     },
 
     "Prepare": {
-      "Comment": "Writes the two objects a cycle hands its seeds: the image manifest naming the cumulative labeled set, and the source archive the container unpacks. Once per cycle rather than once per seed, because five seeds of a challenger must differ in the seed and in nothing else. The retries are runtime faults and not refusals -- ControlError is what the handler raises when the work itself is refused, and it is refused identically on a second attempt.",
+      "Comment": "Writes the two objects a cycle hands its seeds: the image manifest naming the cumulative labeled set, and the source archive the container unpacks. Once per cycle rather than once per seed, because five seeds of a challenger must differ in the seed and in nothing else. The retries are runtime faults and not refusals -- ControlError is what the handler raises when the work itself is refused, and it is refused identically on a second attempt. The payload is one JSONata object rather than a field per key, and that is what makes `max_images` and `replace` optional: a field whose expression resolves to nothing fails the state, while a key of an object constructor whose value resolves to nothing is simply absent -- so an execution that omits one gets the handler's default rather than States.QueryEvaluationError.",
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Arguments": {
         "FunctionName": "${control_function_arn}",
-        "Payload": {
-          "step": "prepare",
-          "run_id": "{% $states.context.Execution.Input.run_id %}",
-          "cycle": "{% $cycle %}",
-          "max_images": "{% $states.context.Execution.Input.max_images %}",
-          "replace": "{% $states.context.Execution.Input.replace %}"
-        }
+        "Payload": "{% {'step': 'prepare', 'run_id': $states.context.Execution.Input.run_id, 'cycle': $cycle, 'max_images': $states.context.Execution.Input.max_images, 'replace': $states.context.Execution.Input.replace} %}"
       },
       "Assign": {
         "images": "{% $states.result.Payload.images %}"
@@ -85,20 +79,12 @@
         "StartAt": "TrainingRequest",
         "States": {
           "TrainingRequest": {
-            "Comment": "The request is built by the same function the CLI calls, so this file is a second caller of one definition rather than a second definition of a training job written in a language with no tests.",
+            "Comment": "The request is built by the same function the CLI calls, so this file is a second caller of one definition rather than a second definition of a training job written in a language with no tests. One object for `Prepare`'s reason, and here it is what keeps the compute defaults in one place: `instance_type` and `use_spot` are `job.Compute`'s, which the CLI reaches without passing through this file at all, so a default restated here would be a second copy of the spot policy rather than the policy.",
             "Type": "Task",
             "Resource": "arn:aws:states:::lambda:invoke",
             "Arguments": {
               "FunctionName": "${control_function_arn}",
-              "Payload": {
-                "step": "train_request",
-                "run_id": "{% $states.context.Execution.Input.run_id %}",
-                "cycle": "{% $cycle %}",
-                "seed": "{% $states.input.seed %}",
-                "epochs": "{% $states.context.Execution.Input.epochs %}",
-                "instance_type": "{% $states.context.Execution.Input.instance_type %}",
-                "use_spot": "{% $states.context.Execution.Input.use_spot %}"
-              }
+              "Payload": "{% {'step': 'train_request', 'run_id': $states.context.Execution.Input.run_id, 'cycle': $cycle, 'seed': $states.input.seed, 'epochs': $states.context.Execution.Input.epochs, 'instance_type': $states.context.Execution.Input.instance_type, 'use_spot': $states.context.Execution.Input.use_spot} %}"
             },
             "Output": "{% $states.result.Payload %}",
             "Retry": [
