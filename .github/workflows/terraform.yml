@@ -1,15 +1,24 @@
 name: terraform
 
 # Plan on every pull request, apply only after a merge to main.
+# `src/**` and `container/**` are triggers because the control function's
+# deployment package is built from them by `archive_file`. Without them a change
+# to the package is a change the deployed Lambda never sees, and the failure is
+# silent: the stack is unchanged, the plan is empty, and a cycle goes on running
+# whatever was current the last time somebody touched `infra/`.
 on:
   pull_request:
     paths:
       - "infra/**"
+      - "src/**"
+      - "container/**"
       - ".github/workflows/terraform.yml"
   push:
     branches: [main]
     paths:
       - "infra/**"
+      - "src/**"
+      - "container/**"
       - ".github/workflows/terraform.yml"
 
 # id-token: write is what lets the job request an OIDC token from GitHub.

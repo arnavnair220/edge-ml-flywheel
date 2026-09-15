@@ -39,6 +39,7 @@ from edge_ml_flywheel.conventions import (
     table_name,
 )
 from edge_ml_flywheel.run import __main__ as cli
+from edge_ml_flywheel.run import control as ctl
 from edge_ml_flywheel.run import registration as reg
 
 RUN = RunId("20260812t143355z-v0-skeleton")
@@ -78,13 +79,19 @@ def a_registration(**overrides: Any) -> RunRegistration:
 
 
 @pytest.fixture
-def table(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
-    """A `runs` table with the key schema `infra/tables.tf` declares.
+def tables(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Any, Any]]:
+    """The `runs` and `fleet_config` tables, with the key schemas
+    `infra/tables.tf` declares.
+
+    Both, because `register` writes to both: the registration claims the name
+    and the control item opens the cycle counter, and a fixture with only the
+    first would make the CLI tests fail on a missing table rather than on
+    whatever they are about.
 
     Credentials are set to obvious fakes rather than left to the environment.
     Without them boto3 falls back to whatever the developer's machine has
     configured, and a test whose mock failed to engage would reach a real
-    account -- against a table whose whole purpose is refusing to be written
+    account -- against tables whose whole purpose is refusing to be written
     twice.
     """
     for name, value in (
@@ -103,7 +110,31 @@ def table(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
             AttributeDefinitions=[{"AttributeName": "run_id", "AttributeType": "S"}],
             BillingMode="PAY_PER_REQUEST",
         )
-        yield reg.runs_table(resource)
+        resource.create_table(
+            TableName=table_name(Table.FLEET_CONFIG),
+            KeySchema=[
+                {"AttributeName": "run_id", "KeyType": "HASH"},
+                {"AttributeName": "entity", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "run_id", "AttributeType": "S"},
+                {"AttributeName": "entity", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        yield reg.runs_table(resource), ctl.fleet_config_table(resource)
+
+
+@pytest.fixture
+def table(tables: tuple[Any, Any]) -> Any:
+    """The `runs` table alone, for the tests that are only about registration."""
+    return tables[0]
+
+
+@pytest.fixture
+def fleet(tables: tuple[Any, Any]) -> Any:
+    """The `fleet_config` table alone, for the tests about the cycle counter."""
+    return tables[1]
 
 
 class TestItemEncoding:
@@ -238,6 +269,8 @@ REGISTER_ARGS = [
     "1",
     "--label-budget",
     "1000",
+    "--cycle-cap",
+    "8",
     "--note",
     "first real loop",
 ]
@@ -300,8 +333,14 @@ class TestCli:
 
         cli.main(["show", "--run-id", run_id])
         shown = json.loads(capsys.readouterr().out)
-        assert shown["run_id"] == run_id
-        assert shown["note"] == "first real loop"
+        assert shown["registration"]["run_id"] == run_id
+        assert shown["registration"]["note"] == "first real loop"
+        assert shown["control"] == {
+            "run_id": run_id,
+            "entity": "run",
+            "next_cycle": 0,
+            "cycle_cap": 8,
+        }
 
     def test_show_refuses_a_run_that_was_never_minted(self, table: Any) -> None:
         with pytest.raises(SystemExit, match="never registered"):

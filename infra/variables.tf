@@ -59,6 +59,29 @@ variable "state_key" {
   default     = "core/terraform.tfstate"
 }
 
+# pyarrow for the control function, which reads the label parquet to recover the
+# image IDs a cycle's manifest names. It is a platform wheel, so it cannot come
+# out of `archive_file` over a source directory the way the pure-Python package
+# does, and building one would put a compile step in a stack that has none.
+#
+# AWS publishes it inside the SDK for pandas layer, which is versioned and whose
+# versions this account cannot list -- `lambda:ListLayerVersions` is not granted
+# on a layer owned by someone else. So it is pinned here and looked up by hand:
+#
+#   aws lambda get-layer-version --profile edgeml \
+#     --layer-name arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python312 \
+#     --version-number <n> --query Description
+#
+# A version that does not exist fails the apply with a not-found on this ARN,
+# which is a one-line fix rather than a silent breakage. Pinned rather than
+# floating for the container tag's reason: the layer is half of what the control
+# function is.
+variable "pyarrow_layer_arn" {
+  description = "Managed layer supplying pyarrow to the control function. Bump the trailing version if the apply cannot find it."
+  type        = string
+  default     = "arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python312:20"
+}
+
 # The UC Berkeley host serving both BDD100K archives. A variable rather than a
 # constant in the buildspec so that a move can be answered with a per-build
 # override instead of a commit: `dl.yf.io` resolves to this same address and

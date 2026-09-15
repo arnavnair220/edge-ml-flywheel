@@ -78,6 +78,26 @@ data "aws_iam_policy_document" "register" {
     resources = [aws_dynamodb_table.runs.arn]
   }
 
+  # The cycle counter, opened at zero by the same build. The same two actions
+  # for the same reason: this item is created once and advanced from then on by
+  # the state machine's conditional update, so a role that could `UpdateItem`
+  # here could reset a live run's counter and send a second execution over
+  # prefixes the first has already written.
+  #
+  # `GetItem` is the read-back, as above. The registration and the counter are
+  # both confirmed before the build reports a run.
+  statement {
+    sid    = "OpenTheCycleCounter"
+    effect = "Allow"
+
+    actions = [
+      "dynamodb:PutItem",
+      "dynamodb:GetItem",
+    ]
+
+    resources = [aws_dynamodb_table.fleet_config.arn]
+  }
+
   statement {
     sid    = "WriteOwnLogs"
     effect = "Allow"
@@ -224,6 +244,15 @@ resource "aws_codebuild_project" "register" {
     environment_variable {
       name  = "RECIPE_VERSION"
       value = "1"
+    }
+
+    # How many cycles the run may claim, written into its control item and
+    # enforced by the condition on every claim. Eight is the design's planned
+    # length; a skeleton run overrides it to 1, which is the difference between
+    # exercising the loop and running it.
+    environment_variable {
+      name  = "CYCLE_CAP"
+      value = "8"
     }
   }
 

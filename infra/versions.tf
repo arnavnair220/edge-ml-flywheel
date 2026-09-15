@@ -6,6 +6,15 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
+
+    # Zips the control function's deployment package and the layer beside it.
+    # The package is pure Python, so there is nothing to build and a directory
+    # is the whole input -- which is what keeps a Lambda in this stack from
+    # needing a build step CI has to keep in step with.
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.7"
+    }
   }
 
   # State lives in a bucket created by hand during bootstrap, because a bucket
