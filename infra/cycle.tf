@@ -243,14 +243,13 @@ resource "aws_lambda_function" "control" {
     aws_lambda_layer_version.entry_point.arn,
   ]
 
-  environment {
-    variables = {
-      # Read by `training.job.environment`'s callers and by boto3. Set
-      # explicitly rather than relied on, since the Lambda runtime's own region
-      # variable is not one this package names.
-      AWS_DEFAULT_REGION = var.aws_region
-    }
-  }
+  # No `environment` block, and the absence is the fix for a failed apply rather
+  # than an omission. The region is what this function would have needed one for
+  # -- `job.Target` carries it and boto3 resolves it -- and the Lambda runtime
+  # already exports `AWS_REGION` and `AWS_DEFAULT_REGION` itself. Both are
+  # reserved keys that `CreateFunction` refuses to have set, so passing the
+  # region explicitly is not belt and braces: it is the one way to make this
+  # function uncreatable.
 
   depends_on = [aws_cloudwatch_log_group.control]
 }
@@ -402,6 +401,15 @@ resource "aws_cloudwatch_log_group" "cycle" {
 # Standard rather than Express. An execution outlives a training job by design,
 # Express caps at five minutes, and the execution history is the record of what a
 # cycle did.
+#
+# `terraform validate` does not read the definition and `plan` does not either --
+# the JSONata, the `.sync` integration and the shape of every Retry are checked
+# by the Step Functions API when it creates the machine, which is to say at
+# apply, which is to say on main. Checking it earlier is one read-only call
+# against a rendered copy:
+#
+#   aws stepfunctions validate-state-machine-definition --profile edgeml \
+#     --type STANDARD --definition file://<the file with its two ${...} filled in>
 resource "aws_sfn_state_machine" "cycle" {
   name     = local.cycle_machine_name
   role_arn = aws_iam_role.cycle.arn

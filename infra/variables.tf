@@ -64,18 +64,20 @@ variable "state_key" {
 # out of `archive_file` over a source directory the way the pure-Python package
 # does, and building one would put a compile step in a stack that has none.
 #
-# AWS publishes it inside the SDK for pandas layer, which is versioned and whose
-# versions this account cannot list -- `lambda:ListLayerVersions` is not granted
-# on a layer owned by someone else. So it is pinned here and looked up by hand:
+# AWS publishes it inside the SDK for pandas layer, and version 20 is release
+# 3.14.0 on Python 3.12 -- the same interpreter `pyproject.toml` pins.
+#
+# The version is pinned rather than floating for the container tag's reason: the
+# layer is half of what the control function is. It is also the half this account
+# cannot enumerate, since `lambda:ListLayerVersions` is not granted on a layer
+# owned by someone else, so a newer one is found by asking for it:
 #
 #   aws lambda get-layer-version --profile edgeml \
 #     --layer-name arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python312 \
 #     --version-number <n> --query Description
 #
 # A version that does not exist fails the apply with a not-found on this ARN,
-# which is a one-line fix rather than a silent breakage. Pinned rather than
-# floating for the container tag's reason: the layer is half of what the control
-# function is.
+# which is a one-line fix rather than a silent breakage.
 variable "pyarrow_layer_arn" {
   description = "Managed layer supplying pyarrow to the control function. Bump the trailing version if the apply cannot find it."
   type        = string
