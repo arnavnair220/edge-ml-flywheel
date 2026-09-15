@@ -299,3 +299,23 @@ class TestWrite:
     def test_the_assignments_round_trip(self, tmp_path: Path) -> None:
         stage = a_staged_partition(tmp_path)
         assert assign.read_assignments(stage, V0) == assignments()
+
+    def test_both_outputs_are_compressed_with_a_codec_every_pyarrow_has(
+        self, tmp_path: Path
+    ) -> None:
+        """The partition's files are read in a Lambda, and a Lambda's pyarrow is
+        the managed AWSSDKPandas layer -- trimmed to fit the size limit, and built
+        without zstd. Written here rather than asserted on the constants, because
+        the constant is not what a reader of the file has to cope with, and a
+        codec reaching the bucket that the control plane cannot decompress is a
+        cycle that fails at its first step after a partition job has already run.
+        """
+        stage = a_staged_partition(tmp_path)
+        cohort_labels.write(stage, V0, assign.read_assignments(stage, V0))
+
+        written = [stage / assignments_key(V0)] + [
+            stage / cohort_labels_key(V0, cohort) for cohort in LABELED_COHORTS
+        ]
+        for path in written:
+            column = pq.ParquetFile(path).metadata.row_group(0).column(0)
+            assert column.compression == "SNAPPY", f"{path.name} is {column.compression}"

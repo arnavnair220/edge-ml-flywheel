@@ -68,8 +68,10 @@ SCHEMA: Final = pa.schema(
     ]
 )
 
-# zstd for `assign.SCHEMA`'s reason: written once, read whole.
-_COMPRESSION: Final = "zstd"
+# snappy for `assign.write_parquet`'s reason, and this is the file that found it:
+# `prepare` reads the bootstrap labels in a Lambda, where pyarrow comes from the
+# managed AWSSDKPandas layer with zstd trimmed out of the build.
+_COMPRESSION: Final = "snappy"
 
 # How many offending IDs a refusal lists before summarizing, for
 # `oracle.cohorts._REPORTED`'s reason.
