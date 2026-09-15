@@ -27,6 +27,7 @@ import logging
 import tarfile
 import tempfile
 import time
+import urllib.request
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,6 +37,7 @@ from typing import Any, Final
 import boto3
 
 from edge_ml_flywheel.conventions import (
+    BASE_WEIGHTS_URL,
     PROJECT,
     Buckets,
     Cohort,
@@ -293,6 +295,12 @@ def prepare(
             f"trained on. Pass --replace only if no seed has run against it."
         )
 
+    # Before the manifest rather than after, because a cycle whose base is
+    # missing is a cycle every one of its seeds fails on several minutes in, as a
+    # channel download error naming a key. The same argument `request` makes for
+    # checking this cycle's two inputs itself.
+    ensure_base(aws)
+
     # The labels are downloaded to read the image IDs out of them and are wanted
     # nowhere else, so the scratch directory belongs to this function rather than
     # to its caller: nothing outside it can hold a path to a copy of the labeled
@@ -315,6 +323,32 @@ def stage_base(aws: boto3.Session, weights: Path) -> str:
     key = base_weights_key(weights.name)
     artifacts = buckets(aws).artifacts
     aws.client("s3").upload_file(str(weights), artifacts, key)
+    log.info("staged %s", uri(artifacts, key))
+    return key
+
+
+def ensure_base(aws: boto3.Session) -> str:
+    """Stage the COCO base if the bucket does not already hold it.
+
+    Called by `prepare`, so a fresh account bootstraps itself on its first cycle
+    rather than through a setup command someone cloning the repo has to know to
+    run. The fetch happens once for the life of the project: every later cycle
+    finds the object and returns without a request leaving the account.
+
+    The download is here rather than in the training job for the reason
+    `conventions.BASE_WEIGHTS_URL` gives -- one fetch into the bucket is a stored
+    file every later job reads, and forty jobs fetching for themselves is forty
+    chances to start from something else.
+    """
+    key = base_weights_key()
+    artifacts = buckets(aws).artifacts
+    if _exists(aws, artifacts, key):
+        return key
+
+    log.info("no base weights in %s, fetching %s", artifacts, BASE_WEIGHTS_URL)
+    with urllib.request.urlopen(BASE_WEIGHTS_URL) as response:
+        aws.client("s3").put_object(Bucket=artifacts, Key=key, Body=response.read())
+
     log.info("staged %s", uri(artifacts, key))
     return key
 
@@ -365,7 +399,6 @@ def request(
         version=version,
         seed=seed,
         partition_version=run.partition_version,
-        class_set_version=run.class_set_version,
         tags={"project": PROJECT, "recipe_version": str(run.recipe_version)},
     )
 

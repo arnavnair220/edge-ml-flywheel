@@ -37,7 +37,6 @@ from typing import Any
 from edge_ml_flywheel.conventions import (
     ImageId,
     ManifestRow,
-    Selector,
     TimeOfDay,
     Weather,
 )
@@ -104,7 +103,6 @@ class SelectionReport:
     tells them apart before a training run does.
     """
 
-    selector: Selector
     batch: Mix
     remaining: Mix
     predicted_classes: Mapping[str, int]
@@ -112,7 +110,6 @@ class SelectionReport:
 
     def document(self) -> dict[str, Any]:
         return {
-            "selector": self.selector.value,
             "batch": self.batch.document(),
             "remaining": self.remaining.document(),
             "predicted_classes": dict(self.predicted_classes),
@@ -124,7 +121,6 @@ class SelectionReport:
 
 
 def selection_report(
-    selector: Selector,
     batch: Sequence[ImageId],
     pool: Sequence[ImageId],
     manifest: Mapping[ImageId, ManifestRow],
@@ -150,7 +146,6 @@ def selection_report(
         detection.category for image_id in batch for detection in predictions.for_image(image_id)
     ]
     return SelectionReport(
-        selector=selector,
         batch=Mix.of(list(batch), manifest),
         remaining=Mix.of(remaining, manifest),
         predicted_classes=_counts(detections, predictions.classes.names),

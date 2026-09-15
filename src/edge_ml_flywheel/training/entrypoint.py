@@ -37,10 +37,9 @@ import torch
 from ultralytics import YOLO
 
 from edge_ml_flywheel.conventions import (
-    ClassSetVersion,
+    CLASS_SET,
     ModelArtifact,
     Seed,
-    class_set,
     model_artifact_key,
     parse_model_version,
     uri,
@@ -85,7 +84,6 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="train.py")
     parser.add_argument("--version", required=True, help="The model version this job produces.")
     parser.add_argument("--seed", type=int, required=True)
-    parser.add_argument("--class_set_version", type=int, required=True)
     parser.add_argument("--epochs", type=int, required=True)
     parser.add_argument("--image_size", type=int, required=True)
     parser.add_argument("--batch", type=int, required=True)
@@ -150,7 +148,7 @@ def digest(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def build_dataset(class_set_version: ClassSetVersion) -> Path:
+def build_dataset() -> Path:
     """Channels in, a YOLO dataset directory out."""
     started = time.monotonic()
     labeled = labels.collect([channel(BOOTSTRAP_CHANNEL), channel(PURCHASES_CHANNEL)])
@@ -161,7 +159,7 @@ def build_dataset(class_set_version: ClassSetVersion) -> Path:
     )
 
     root = WORK / "dataset"
-    dataset.write(root, channel(IMAGES_CHANNEL), labeled, class_set(class_set_version))
+    dataset.write(root, channel(IMAGES_CHANNEL), labeled, CLASS_SET)
     log.info("dataset built in %.1fs", time.monotonic() - started)
     return root
 
@@ -256,7 +254,7 @@ def main(argv: list[str] | None = None) -> None:
     seed_everything(Seed(args.seed))
     inventory([IMAGES_CHANNEL, BOOTSTRAP_CHANNEL, PURCHASES_CHANNEL, BASE_CHANNEL])
 
-    root = build_dataset(ClassSetVersion(args.class_set_version))
+    root = build_dataset()
 
     base = next(iter(sorted(channel(BASE_CHANNEL).glob("*.pt"))), None)
     if base is None:

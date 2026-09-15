@@ -18,10 +18,9 @@ unlabelable -- are left in place, because correcting either means picking a
 threshold no cycle has reported a value for (design section 2). `mix` is what
 turns the first occurrence into a number instead of a guess.
 
-**All three rules exist before any of them is needed.** `uncertainty` is what the
-loop runs by; `certainty` is the control that says whether the ranking is doing
-the work; `random` is both the other control and, because it needs no inference,
-the smoke test for this whole path before a champion exists to score with.
+**One rule.** The pool is ranked by mean per-object uncertainty and the top of
+that ranking is bought. There is nothing to select between and no rule to pass,
+so `select` takes a pool, its scores and a budget and nothing else.
 """
 
 from edge_ml_flywheel.selection.mix import Mix, SelectionReport, selection_report
@@ -35,17 +34,17 @@ from edge_ml_flywheel.selection.score import (
     score_pool,
     uncertainty,
 )
-from edge_ml_flywheel.selection.select import RULES, select
+from edge_ml_flywheel.selection.select import by_uncertainty, select
 
 __all__ = [
     "BAND_HIGH",
     "BAND_LOW",
     "BLIND_SPOT",
     "DECISIVE",
-    "RULES",
     "Mix",
     "Predictions",
     "SelectionReport",
+    "by_uncertainty",
     "image_score",
     "score_pool",
     "select",

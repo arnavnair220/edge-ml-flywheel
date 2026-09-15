@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 from pycocotools.cocoeval import COCOeval
 
-from edge_ml_flywheel.conventions import ClassSetVersion, ImageId, class_set
+from edge_ml_flywheel.conventions import CLASS_SET, ImageId
 from edge_ml_flywheel.evaluation.coco import (
     Detection,
     ImageIndex,
@@ -36,8 +36,7 @@ from edge_ml_flywheel.evaluation.match import (
 from edge_ml_flywheel.evaluation.metrics import Scope, average_precision, image_rows
 from edge_ml_flywheel.ingest.labels import Box
 
-CLASS_SET_VERSION = ClassSetVersion(1)
-CLASSES = class_set(CLASS_SET_VERSION)
+CLASSES = CLASS_SET
 
 IMAGES = 40
 # Three images get exactly the detections their boxes deserve, so a resample over
@@ -137,7 +136,7 @@ def a_fixture(seed: int = 20260907) -> Fixture:
         labels=labels,
         predictions=predictions,
         index=index,
-        cache=score(truth, results, CLASS_SET_VERSION, index),
+        cache=score(truth, results, index),
     )
 
 

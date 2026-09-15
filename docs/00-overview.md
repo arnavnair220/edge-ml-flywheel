@@ -37,8 +37,9 @@ recorded in its registration. The training set is the cumulative union of everyt
 date, so a cycle that fails to promote still keeps its labels and the next challenger simply has
 more to learn from.
 
-**Selector** — the rule a run ranks the pool by, fixed for the whole run and recorded in its
-registration. `uncertainty` is the rule the loop runs by; `random` and `certainty` are controls.
+**Selector** — the rule the pool is ranked by: mean per-object uncertainty from the champion's
+scoring pass. Fixed for the project rather than configured per run, so it is neither a field on a
+registration nor an argument anyone passes.
 
 ### Models
 
@@ -163,7 +164,7 @@ Listed in the order a cycle passes through them.
 | 6 | **Registry and promotion** | Advances a version through an explicit state machine and records every rejection with its reason | No manifest, no promotion; all five champion seed artifacts are retained, not just the deployed one |
 | 7 | **Edge and fleet** | Publishes the promoted artifact as a Greengrass component, and the service deploys it: verify digest, one device, then two, then the fleet, rolling back on a failed health check | Deployment is a pointer flip, never a container rebuild; rollback is a single command |
 | 8 | **Telemetry and reporting** | Captures what the fleet saw and feeds the charts. The fleet's own ranking is a realism check, not a selector | Every promotion and rejection is charted with its evidence, so the loop's behaviour is read off the record rather than described |
-| 9 | **Experiment and validation** | Runs cycles *as experiments* rather than running inside one: the A/A control and the confidence-ordered control | The gate's false-positive rate is measured, not assumed |
+| 9 | **Experiment and validation** | Runs cycles *as experiments* rather than running inside one: the A/A control | The gate's false-positive rate is measured, not assumed |
 
 ---
 
@@ -174,12 +175,10 @@ Planes 1-8 turn the loop. Plane 9 establishes that the loop's measurements can b
 - **The A/A test** trains a challenger on a bootstrap resample of the champion's own labels, same
   five seeds. Zero new information, so a healthy quality gate must refuse to promote. If it ever
   promotes, the evaluation machinery itself has a false positive.
-- **The confidence-ordered control** inverts the selector for one cycle, buying the images the
-  champion is *most* certain about. Those frames carry the least new information, so the gain should
-  be close to nothing. A control cycle that gains about as much as a real one indicates the
-  uncertainty ranking is not the source of the improvement.
 
-The label-efficiency A/B is deferred. See [planned additions](#planned-additions).
+The A/A test needs no second selection rule — it changes what the challenger trains on, not how the
+batch was chosen — which is why it is the control this project runs. The two controls that *would*
+need a second rule are deferred. See [planned additions](#planned-additions).
 
 ---
 
@@ -194,18 +193,27 @@ Until it is measured, the supported claim is a closed loop that meters label spe
 fixed thresholds, and promotes or rolls back — not that uncertainty selection is the cheaper way to
 buy labels.
 
-Three properties keep it available at the cost of the training compute alone:
+**The confidence-ordered control.** One cycle buying the images the champion is *most* certain
+about. Those frames carry the least new information, so the gain should be close to nothing; a
+control cycle that gains about as much as a real one indicates the uncertainty ranking is not the
+source of the improvement.
 
-- **The selector is a config value, not a code path.** `uncertainty`, `random` and `certainty` are
-  named from the start and recorded per run, so a second arm changes one field in a registration.
+Both need a second selection rule, and there is deliberately only one: `selection.select` ranks by
+uncertainty and takes no rule argument. Adding an arm therefore means adding a rule and a way to
+choose between them, not changing a configuration value. That is the cost of a project with one
+selector, accepted because this is a working flywheel rather than an experiment about selection.
+
+Two properties keep the rest of the work small:
+
 - **An arm is a run.** `run_id` already partitions every table and every purchase prefix, so two
   arms cannot read each other's ledgers without any further key design.
 - **The partition and `eval` are frozen and reproducible under `partition_version`.** A later arm is
   comparable only if it trains from the same 8,000-image bootstrap and scores against the same
   5,000-image eval, which is a property of the partition rather than of when the arm is run.
 
-The selector is deliberately not part of the version trio that forces a fresh champion baseline. A
-change of rule must not re-baseline, or the two arms would differ by a selector *and* a champion.
+Whatever chooses between two rules must stay out of the versions that force a fresh champion
+baseline. A change of rule must not re-baseline, or the two arms would differ by a selector *and* a
+champion.
 
 ---
 
@@ -223,9 +231,10 @@ Properties every plane honors, rather than components living anywhere:
   what the matched-seed comparison shares between champion and challenger. An interrupted job is
   discarded and restarted rather than resumed, which bounds model size, input resolution and
   dataset size.
-- **`class_set_version`, `recipe_version`, `partition_version`.** A change to any one means the
-  paired comparison is no longer the same test on the same data universe, and forces a fresh
-  champion baseline instead of a promotion decision.
+- **`recipe_version` and `partition_version`.** A change to either means the paired comparison is no
+  longer the same test on the same data universe, and forces a fresh champion baseline instead of a
+  promotion decision. The class set is not among them because there is only one: it cannot differ
+  between two models being compared.
 - **The IAM boundary that makes the budget real.** The training role has no read access to the
   withheld labels.
 - **Cost discipline.** No NAT gateway; VPC endpoints instead. A budget alarm exists before any

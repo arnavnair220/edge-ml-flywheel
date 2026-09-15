@@ -1,9 +1,16 @@
 """The run steps, one subcommand each.
 
-`buildspecs/register.yml` calls these. Two subcommands rather than one because
-the read-back is worth being able to do on its own: `show` is how anyone asks
-what a `run_id` in a bucket listing was configured as, and it is also the
-post-build check that the registration landed.
+**`start` is the whole of starting a run.** It registers the run and starts one
+execution, and that execution is the run rather than one cycle: the state machine
+loops from `MoreCycles` back to `ClaimCycle` and leaves through `Done` when the
+cycle cap or the pool is spent. There is nothing to tick and nothing to call
+again.
+
+`register` survives beside it for the case that ordering has to be broken -- a
+run registered before the machine it will be started on exists, which is what
+`buildspecs/register.yml` does. `show` is how anyone asks what a `run_id` in a
+bucket listing was configured as, and it is also the post-build check that the
+registration landed.
 
 **`register` writes two items, not one.** The registration in `runs` is what the
 run is; the control item in `fleet_config` is the cycle counter the state
@@ -34,14 +41,15 @@ import os
 import sys
 from datetime import UTC, datetime
 
+import boto3
+
 from edge_ml_flywheel.conventions import (
     PARTITIONS,
-    ClassSetVersion,
     Cycle,
     PartitionVersion,
     RecipeVersion,
+    RunId,
     RunRegistration,
-    Selector,
     new_run_id,
     parse_run_id,
 )
@@ -51,24 +59,19 @@ from edge_ml_flywheel.run import registration as reg
 log = logging.getLogger("edge_ml_flywheel.run")
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m edge_ml_flywheel.run")
-    sub = parser.add_subparsers(dest="command", required=True)
+def _definition() -> argparse.ArgumentParser:
+    """What a run *is*, shared by `register` and `start`.
 
-    minted = sub.add_parser("register", help="mint a run ID and claim it in the runs table")
+    A parent parser rather than two copies, because these nine fields are the
+    definition of a run and `start` is `register` plus an execution. Two lists
+    would be two places a new field has to be added, and the one that gets
+    forgotten is the one that silently defaults.
+    """
+    minted = argparse.ArgumentParser(add_help=False)
     minted.add_argument(
         "--slug",
         required=True,
         help="Readable half of the run ID. Lowercase words joined by hyphens.",
-    )
-    # Required rather than defaulted to `uncertainty`. A control arm differs from
-    # the real loop in this one field, and a default is how an arm gets run as
-    # the thing it was meant to be the control for.
-    minted.add_argument(
-        "--selector",
-        required=True,
-        choices=[member.value for member in Selector],
-        help="The rule this run ranks the pool by, fixed for its whole length.",
     )
     minted.add_argument(
         "--partition-version",
@@ -77,10 +80,9 @@ def _parser() -> argparse.ArgumentParser:
         choices=sorted(PARTITIONS),
         help="A version defined in conventions.PARTITIONS, which fixes its seed and sizes.",
     )
-    # No registry to validate these against yet -- unlike the partition, neither
-    # is a draw this repo can reproduce, so both are integers the caller states
-    # and the model manifest is later checked against.
-    minted.add_argument("--class-set-version", type=int, required=True)
+    # No registry to validate this against yet -- unlike the partition, it is not
+    # a draw this repo can reproduce, so it is an integer the caller states and
+    # the model manifest is later checked against.
     minted.add_argument("--recipe-version", type=int, required=True)
     minted.add_argument(
         "--label-budget",
@@ -110,6 +112,48 @@ def _parser() -> argparse.ArgumentParser:
         help="40-character SHA of the commit being run. Defaults to CodeBuild's.",
     )
 
+    return minted
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="python -m edge_ml_flywheel.run")
+    sub = parser.add_subparsers(dest="command", required=True)
+    definition = _definition()
+
+    # `start` first, because it is the one anyone runs. `register` stays its own
+    # command for the case where a run has to exist before it is started.
+    started = sub.add_parser(
+        "start",
+        parents=[definition],
+        help="register a run and start it. One execution is the whole run.",
+    )
+    started.add_argument(
+        "--epochs",
+        type=int,
+        required=True,
+        help="Epochs per training job. Required for `control.handler`'s reason: it is the recipe.",
+    )
+    # A list rather than a count, so an account whose spot quota is lower runs
+    # three of the five the design names without editing the state machine, and
+    # so the seeds a run trained are recorded in its execution input.
+    started.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=[1],
+        help="The seeds each cycle trains, one job per seed. Seed 1 is what ships.",
+    )
+    started.add_argument(
+        "--max-images",
+        type=int,
+        default=0,
+        help="Cap each cycle's training set, for a short skeleton run. 0 is the whole set.",
+    )
+
+    sub.add_parser(
+        "register", parents=[definition], help="mint a run ID and claim it, without starting it"
+    )
+
     shown = sub.add_parser("show", help="print a run's registration")
     shown.add_argument("--run-id", required=True)
 
@@ -125,7 +169,7 @@ def _require_commit(git_commit: str) -> str:
     return git_commit
 
 
-def _register(args: argparse.Namespace, started_at: datetime) -> None:
+def _register(args: argparse.Namespace, started_at: datetime) -> RunId:
     """Mint, claim, open the cycle counter, and read both back.
 
     The read-back is not ceremony. `register` is the one write in the project
@@ -146,9 +190,7 @@ def _register(args: argparse.Namespace, started_at: datetime) -> None:
         created_at=started_at,
         git_commit=_require_commit(args.git_commit),
         partition_version=PartitionVersion(args.partition_version),
-        class_set_version=ClassSetVersion(args.class_set_version),
         recipe_version=RecipeVersion(args.recipe_version),
-        selector=Selector(args.selector),
         label_budget_per_cycle=args.label_budget,
         note=args.note,
     )
@@ -180,15 +222,14 @@ def _register(args: argparse.Namespace, started_at: datetime) -> None:
             f"cannot be started until that item is what it should be."
         )
 
-    log.info("selector %s, budget %d labels a cycle", entry.selector.value, args.label_budget)
+    log.info("budget %d labels a cycle", args.label_budget)
     log.info(
-        "partition v%d, class set v%d, recipe v%d",
+        "partition v%d, recipe v%d",
         entry.partition_version,
-        entry.class_set_version,
         entry.recipe_version,
     )
     log.info("cycles 0 to %d", counter.cycle_cap - 1)
-    print(run_id)
+    return run_id
 
 
 def _show(run_id: str) -> None:
@@ -217,8 +258,25 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
     args = _parser().parse_args(argv)
 
-    if args.command == "register":
-        _register(args, datetime.now(UTC))
+    if args.command == "start":
+        run_id = _register(args, datetime.now(UTC))
+        # The run ID first and on its own line, so that a failure to start still
+        # leaves the operator holding the name of the run that now exists. It is
+        # registered either way, and a run nobody can name is a run nobody can
+        # start on a second attempt.
+        print(run_id)
+        print(
+            ctl.start(
+                boto3.Session(),
+                run_id,
+                epochs=args.epochs,
+                seeds=args.seeds,
+                max_images=args.max_images,
+            )
+        )
+
+    elif args.command == "register":
+        print(_register(args, datetime.now(UTC)))
 
     elif args.command == "show":
         _show(args.run_id)

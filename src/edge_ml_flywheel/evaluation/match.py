@@ -43,7 +43,7 @@ from numpy.typing import NDArray
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
-from edge_ml_flywheel.conventions import ClassSet, ClassSetVersion, ImageId, class_set
+from edge_ml_flywheel.conventions import CLASS_SET, ClassSet, ImageId
 from edge_ml_flywheel.evaluation.coco import ImageIndex
 
 # COCO's ten thresholds, 0.50 to 0.95 in steps of 0.05, spelled the way
@@ -104,10 +104,9 @@ class MatchCache:
     not a question anything asks; equality of the AP read off them is, and that is
     a float.
 
-    `class_set_version` rather than a `ClassSet`, because a category ID in
-    `matched` is a position in that version's tuple and the version is the fact
-    that makes it readable. Passing the set itself would let a caller score under
-    one set and record another.
+    A category ID in `matched` is a position in `conventions.CLASS_SET`'s tuple.
+    The set is not carried on the cache because there is one and it is fixed for
+    the project: a cache cannot have been built under a different one.
 
     The arrays:
 
@@ -122,7 +121,6 @@ class MatchCache:
     """
 
     index: ImageIndex
-    class_set_version: ClassSetVersion
     matched: NDArray[np.bool_]
     ignored: NDArray[np.bool_]
     scores: NDArray[np.float64]
@@ -130,7 +128,7 @@ class MatchCache:
     n_truth: NDArray[np.int64]
 
     def __post_init__(self) -> None:
-        classes = self.classes  # raises on a version nobody wrote down
+        classes = self.classes
         expected_blocks = len(classes.names) * len(AreaRange) * len(self.index)
         if self.n_truth.shape != (expected_blocks,):
             raise ValueError(
@@ -164,7 +162,7 @@ class MatchCache:
 
     @property
     def classes(self) -> ClassSet:
-        return class_set(self.class_set_version)
+        return CLASS_SET
 
     def blocks(
         self, category_id: int, area: AreaRange, image_rows: NDArray[np.int64]
@@ -226,20 +224,19 @@ class MatchCache:
 def score(
     truth: COCO,
     results: COCO,
-    class_set_version: ClassSetVersion,
     index: ImageIndex,
 ) -> MatchCache:
     """Run the per-image assignment once and keep the arrays.
 
     `truth` and `results` come from `coco.as_coco` and `coco.as_coco_results`, so
-    both are already restricted to `index`'s images and this version's categories.
+    both are already restricted to `index`'s images and the project's categories.
 
     Every IoU threshold and every area range in one pass, because `evaluate()`
     computes the IoU matrix per image and category once and reuses it across
     thresholds; scoring per slice instead would recompute that matrix four times
     for answers that are already in hand.
     """
-    classes = class_set(class_set_version)
+    classes = CLASS_SET
     category_ids = [classes.category_id(name) for name in classes.names]
 
     evaluator = COCOeval(truth, results, iouType="bbox")
@@ -290,7 +287,6 @@ def score(
 
     return MatchCache(
         index=index,
-        class_set_version=class_set_version,
         # `hstack` on an empty list raises, and a model that detected nothing is a
         # gate failure to report rather than an exception (`coco.as_coco_results`
         # makes the same allowance).
@@ -314,7 +310,6 @@ def score(
 # field would otherwise be a `KeyError` on a file written weeks earlier by a
 # version of this module that agreed with itself.
 _IMAGE_IDS: Final = "image_ids"
-_CLASS_SET_VERSION: Final = "class_set_version"
 _IOU_THRESHOLDS: Final = "iou_thresholds"
 _MATCHED: Final = "matched"
 _IGNORED: Final = "ignored"
@@ -329,15 +324,14 @@ def save(cache: MatchCache, path: Path) -> None:
     Compressed, because `matched` and `ignored` are one byte per boolean in memory
     and mostly zero at the high IoU thresholds.
 
-    The image IDs and `class_set_version` travel with the arrays, so a reader
-    needs the file and nothing else: an index rebuilt from a cohort query six
-    weeks later would be a second derivation of the mapping the integers were
-    written under. `IOU_THRESHOLDS` travels for a different reason -- it is a
-    constant, so it is checked on load rather than used.
+    The image IDs travel with the arrays, so a reader needs the file and nothing
+    else: an index rebuilt from a cohort query six weeks later would be a second
+    derivation of the mapping the integers were written under. `IOU_THRESHOLDS`
+    travels for a different reason -- it is a constant, so it is checked on load
+    rather than used.
     """
     members: dict[str, NDArray[Any]] = {
         _IMAGE_IDS: np.array(cache.index.image_ids),
-        _CLASS_SET_VERSION: np.array(cache.class_set_version),
         _IOU_THRESHOLDS: np.array(IOU_THRESHOLDS),
         _MATCHED: cache.matched,
         _IGNORED: cache.ignored,
@@ -371,7 +365,6 @@ def load(path: Path) -> MatchCache:
             )
         return MatchCache(
             index=ImageIndex.of(ImageId(str(image)) for image in archive[_IMAGE_IDS]),
-            class_set_version=ClassSetVersion(int(archive[_CLASS_SET_VERSION])),
             matched=archive[_MATCHED],
             ignored=archive[_IGNORED],
             scores=archive[_SCORES],

@@ -94,14 +94,17 @@ The label parser selects boxes by structure — an object carrying `box2d` rathe
 `lane/*` polygon — so the boxed vocabulary is measured at ingest and recorded in
 `_provenance/integrity.json`. Ten categories carry boxes, from `car` at 816,423 to `train` at 151.
 
-`class_set_version` names which of them a model predicts, and so which the metric covers:
+`conventions.CLASS_SET` names which of them a model predicts, and so which the metric covers:
+`car`, `traffic sign`, `traffic light`, `person`, `truck`, `bus`, `bike`, `rider`, `motor`.
 
-| `class_set_version` | Classes |
-|---|---|
-| 1 | `car`, `person`, `truck`, `bus` |
-| 2 | version 1 plus `traffic sign`, `traffic light`, `bike`, `rider`, `motor` |
+Nine rather than the four COCO-native ones, because a COCO-pretrained detector starts strong on
+`car`, `person`, `truck` and `bus` and a cycle's labels have little left to move. One set rather than
+a versioned table: the project trains one kind of model, so there is nothing to select between and no
+version to carry. Declaration order is permanent — a category ID is a position in that tuple and is
+stored in every cached match array — so a class is appended, never inserted or reordered.
 
-Runs start on version 2. Version 1 stays declared as the narrow set a later run can compare against.
+`train` is the tenth boxed category and is deliberately outside the set: at 151 boxes archive-wide it
+is too rare to learn or to score.
 Both follow `partition_version`'s rule: add a version, never edit one.
 
 - Category IDs are 1-based positions in the version's tuple, ordered by measured frequency, and are
@@ -273,8 +276,8 @@ build; a value outside `conventions.PARTITIONS` is refused before the manifest i
 
 ## Run registration
 
-A run opens before any cycle turns. Registration mints a `run_id`, claims it, and records the
-selector, the three version stamps and the label budget. Nothing downstream can write until it
+A run opens before any cycle turns. Registration mints a `run_id`, claims it, and records the two
+version stamps and the label budget. Nothing downstream can write until it
 exists, since `run_id` is the partition key of every stateful table and the top prefix of every
 artifact.
 
@@ -350,11 +353,12 @@ same keys.
 
 ### The selector
 
-Steps 2 and 3 are one swappable function, set per run at registration. Three rules are defined:
-`uncertainty`, `random` and `certainty`. A selector change does not force a fresh champion baseline.
+Steps 2 and 3 are one rule: rank the remaining pool by mean per-object uncertainty and take the top
+of it. `selection.select` takes a pool, its scores and a budget, and nothing that names a rule —
+there is no selector field on a run and no argument to pass, because every run ranks the same way.
 
-`random` needs only the remaining pool and a seed, with no inference, so it is the smoke test for the
-ranking-to-purchase path before a champion exists to score with.
+The controls that would buy by a different rule are deferred, and adding one means adding a rule
+rather than setting a value. See the planned additions in `00-overview.md`.
 
 ### The label wall
 

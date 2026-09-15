@@ -24,7 +24,6 @@ from edge_ml_flywheel.conventions import (
     RAW_PROVENANCE_PREFIX,
     AssignmentRow,
     Buckets,
-    ClassSetVersion,
     Cohort,
     Cycle,
     GateResult,
@@ -39,7 +38,6 @@ from edge_ml_flywheel.conventions import (
     RunRegistration,
     Scene,
     Seed,
-    Selector,
     Split,
     Table,
     TimeOfDay,
@@ -109,9 +107,7 @@ def a_registration(**overrides: Any) -> RunRegistration:
         "created_at": CREATED,
         "git_commit": COMMIT,
         "partition_version": PartitionVersion(1),
-        "class_set_version": ClassSetVersion(1),
         "recipe_version": RecipeVersion(1),
-        "selector": Selector.UNCERTAINTY,
         "label_budget_per_cycle": 1000,
         "note": "first skeleton run",
     }
@@ -125,7 +121,6 @@ def a_manifest(**overrides: Any) -> ModelManifest:
         "created_at": CREATED,
         "git_commit": COMMIT,
         "partition_version": PartitionVersion(1),
-        "class_set_version": ClassSetVersion(1),
         "recipe_version": RecipeVersion(1),
         "cohorts_trained_on": frozenset({Cohort.BOOTSTRAP, Cohort.POOL}),
         "labels_spent": 2000,
@@ -504,14 +499,14 @@ class TestRunRegistration:
     def test_the_label_budget_does_not_supersede(self) -> None:
         """A budget change is a new run, but not a re-baseline of the champion.
 
-        Same reasoning as `selector`: the trio fixes the data universe and the
-        metric, and neither of those moves when a run buys 2,000 labels a cycle
-        instead of 1,000. Adding this to `supersedes` would discard the shared
-        baseline that makes two runs comparable.
+        The versions fix the data universe and the metric, and neither of those
+        moves when a run buys 2,000 labels a cycle instead of 1,000. Adding this
+        to `supersedes` would discard the shared baseline that makes two runs
+        comparable.
         """
         assert a_registration(label_budget_per_cycle=2000).supersedes(a_registration()) is False
 
-    def test_an_identical_trio_does_not_supersede(self) -> None:
+    def test_identical_versions_do_not_supersede(self) -> None:
         assert a_registration().supersedes(a_registration()) is False
 
     def test_a_registration_does_not_supersede_itself(self) -> None:
@@ -520,9 +515,9 @@ class TestRunRegistration:
 
     @pytest.mark.parametrize(
         "field",
-        ["partition_version", "class_set_version", "recipe_version"],
+        ["partition_version", "recipe_version"],
     )
-    def test_a_trio_field_differing_alone_supersedes(self, field: str) -> None:
+    def test_a_version_differing_alone_supersedes(self, field: str) -> None:
         assert a_registration(**{field: 2}).supersedes(a_registration()) is True
 
     @pytest.mark.parametrize(
@@ -532,22 +527,11 @@ class TestRunRegistration:
             ("git_commit", "c" * 40),
             ("created_at", datetime(2026, 9, 1, tzinfo=UTC)),
             ("note", "a different reason"),
-            ("selector", Selector.RANDOM),
         ],
-        ids=["run_id", "git_commit", "created_at", "note", "selector"],
+        ids=["run_id", "git_commit", "created_at", "note"],
     )
-    def test_anything_outside_the_trio_does_not_supersede(self, field: str, value: Any) -> None:
+    def test_anything_outside_the_versions_does_not_supersede(self, field: str, value: Any) -> None:
         assert a_registration(**{field: value}).supersedes(a_registration()) is False
-
-    @pytest.mark.parametrize("selector", [Selector.RANDOM, Selector.CERTAINTY])
-    def test_a_different_selector_never_supersedes(self, selector: Selector) -> None:
-        # Pinned separately from the case above, because this is the one field
-        # whose inclusion would resemble a correction. A control arm is paired
-        # against the same bootstrap champion and the same eval as the
-        # uncertainty arm; superseding on the selector would re-baseline that
-        # champion and leave the arms differing in two respects instead of one.
-        assert a_registration(selector=selector).supersedes(a_registration()) is False
-        assert a_registration().supersedes(a_registration(selector=selector)) is False
 
 
 # --- Model versions ---
@@ -662,13 +646,6 @@ class TestSplit:
         # The archive ships withheld ground truth for the 20,000 test images, so
         # re-adding this member should be a conscious act, not an autocomplete.
         assert not hasattr(Split, "TEST")
-
-
-class TestSelector:
-    def test_the_controls_are_named_before_they_are_implemented(self) -> None:
-        # Both controls exist from the start so that adding one is a config value
-        # rather than a second code path alongside the first.
-        assert {s.value for s in Selector} == {"uncertainty", "random", "certainty"}
 
 
 # --- Buckets and tables ---
@@ -810,27 +787,24 @@ class TestModelManifest:
         [
             ("run_id", RunId("20260812t143355z-v1"), "run_id"),
             ("partition_version", PartitionVersion(2), "partition_version"),
-            ("class_set_version", ClassSetVersion(2), "class_set_version"),
             ("recipe_version", RecipeVersion(2), "recipe_version"),
         ],
-        ids=["run_id", "partition_version", "class_set_version", "recipe_version"],
+        ids=["run_id", "partition_version", "recipe_version"],
     )
     def test_one_field_differing_names_exactly_that_field(
         self, field: str, value: Any, expected: str
     ) -> None:
         assert a_manifest().disagreements(a_registration(**{field: value})) == (expected,)
 
-    def test_all_four_differing_are_reported_in_declared_order(self) -> None:
+    def test_all_three_differing_are_reported_in_declared_order(self) -> None:
         run = a_registration(
             run_id=RunId("20260812t143355z-v1"),
             partition_version=PartitionVersion(2),
-            class_set_version=ClassSetVersion(2),
             recipe_version=RecipeVersion(2),
         )
         assert a_manifest().disagreements(run) == (
             "run_id",
             "partition_version",
-            "class_set_version",
             "recipe_version",
         )
 

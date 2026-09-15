@@ -17,7 +17,6 @@ import pytest
 
 from edge_ml_flywheel.conventions import (
     Buckets,
-    ClassSetVersion,
     Cycle,
     ModelVersion,
     PartitionVersion,
@@ -35,7 +34,6 @@ RUN = RunId("20260812t143355z-v1-uncertainty")
 ATTEMPT = datetime(2026, 9, 9, 14, 33, 55, tzinfo=UTC)
 
 V0 = PartitionVersion(0)
-NINE_CLASSES = ClassSetVersion(2)
 
 
 def a_target(cycle: int = 1, seed: int = 1) -> job.Target:
@@ -46,7 +44,6 @@ def a_target(cycle: int = 1, seed: int = 1) -> job.Target:
         version=new_model_version(RUN, Cycle(cycle)),
         seed=Seed(seed),
         partition_version=V0,
-        class_set_version=NINE_CLASSES,
     )
 
 

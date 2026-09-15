@@ -21,7 +21,9 @@ stored anywhere else would be a cap some second call has to fetch and pass in,
 which is a cap two executions can disagree about.
 """
 
+import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,6 +31,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from edge_ml_flywheel.conventions import (
+    PROJECT,
     RUN_ENTITY,
     Cycle,
     RunId,
@@ -163,6 +166,53 @@ def register(table: Any, control: RunControl) -> None:
         ) from None
 
     log.info("cycle counter open at %d, capped at %d", control.next_cycle, control.cycle_cap)
+
+
+def cycle_machine_arn(aws: boto3.Session) -> str:
+    """The cycle state machine, composed from the account and the name Terraform
+    gives it -- the same arrangement `training.launch.role_arn` uses, and for the
+    same reason: a `terraform output` would be the same string behind a second
+    tool that has to be run in the right directory."""
+    account = aws.client("sts").get_caller_identity()["Account"]
+    return f"arn:aws:states:{aws.region_name}:{account}:stateMachine:{PROJECT}-cycle"
+
+
+def start(
+    aws: boto3.Session,
+    run_id: RunId,
+    epochs: int,
+    seeds: Sequence[int],
+    max_images: int = 0,
+) -> str:
+    """Start the run and return its execution ARN.
+
+    One execution is the whole run, not one cycle. The machine loops from
+    `MoreCycles` back to `ClaimCycle` and leaves through `Done` when the cap or
+    the pool is spent, so there is nothing to tick and nothing to call again --
+    which is also why a schedule firing once per cycle was never built.
+
+    The execution takes the run ID as its name. Executions are unique by name, so
+    a second start against a run already going is refused by Step Functions
+    rather than by a check here that has to remember to run -- the same argument
+    `register` makes for the conditional write above.
+
+    `max_images` is omitted from the payload when it is 0 rather than passed as a
+    zero, because the state machine's default *is* the whole labeled set and a
+    cap nobody chose should not appear in the record of what an execution was
+    asked for.
+    """
+    payload: dict[str, Any] = {"run_id": str(run_id), "epochs": epochs, "seeds": list(seeds)}
+    if max_images:
+        payload["max_images"] = max_images
+
+    response = aws.client("stepfunctions").start_execution(
+        stateMachineArn=cycle_machine_arn(aws),
+        name=str(run_id),
+        input=json.dumps(payload),
+    )
+
+    log.info("started %s over seeds %s at %d epochs", run_id, list(seeds), epochs)
+    return str(response["executionArn"])
 
 
 def read(table: Any, run_id: RunId) -> RunControl | None:

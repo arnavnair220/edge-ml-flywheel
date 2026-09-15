@@ -12,11 +12,10 @@ actual claim, that `pycocotools` accepts these shapes.
 import pytest
 
 from edge_ml_flywheel.conventions import (
+    CLASS_SET,
     NATIVE_IMAGE_SIZE,
     ClassSet,
-    ClassSetVersion,
     ImageId,
-    class_set,
 )
 from edge_ml_flywheel.evaluation.coco import (
     Detection,
@@ -33,7 +32,7 @@ from edge_ml_flywheel.ingest.labels import Box
 IMAGE_B = ImageId("ffffffff-00000002")
 IMAGE_A = ImageId("00000000-00000001")
 
-CLASSES = class_set(ClassSetVersion(1))
+CLASSES = CLASS_SET
 
 
 def a_box(
@@ -113,10 +112,7 @@ class TestGroundTruth:
             CLASSES.category_id(name) for name in CLASSES.names
         ]
         assert document["categories"] == [
-            {"id": 1, "name": "car"},
-            {"id": 2, "name": "person"},
-            {"id": 3, "name": "truck"},
-            {"id": 4, "name": "bus"},
+            {"id": position, "name": name} for position, name in enumerate(CLASSES.names, start=1)
         ]
 
     def test_annotation_ids_are_unique(self):
@@ -224,7 +220,7 @@ class TestRoundTrip:
         coco = as_coco(ground_truth(labels, CLASSES, index))
 
         assert sorted(coco.getImgIds()) == [0, 1]
-        assert sorted(coco.getCatIds()) == [1, 2, 3, 4]
+        assert sorted(coco.getCatIds()) == list(range(1, len(CLASSES.names) + 1))
 
         for image_id, boxes in labels.items():
             loaded = coco.loadAnns(coco.getAnnIds(imgIds=[index.numeric(image_id)]))
@@ -273,7 +269,7 @@ class TestRoundTrip:
 
         assert results.getAnnIds() == []
         assert results.getImgIds() == [0]
-        assert sorted(results.getCatIds()) == [1, 2, 3, 4]
+        assert sorted(results.getCatIds()) == list(range(1, len(CLASSES.names) + 1))
 
 
 # --- The class set the IDs come from ------------------------------------------
@@ -281,29 +277,28 @@ class TestRoundTrip:
 
 class TestClassSet:
     def test_ids_are_one_based_positions(self):
-        classes = class_set(ClassSetVersion(1))
+        assert CLASS_SET.category_ids["car"] == 1
+        assert CLASS_SET.category_name(1) == "car"
+        assert CLASS_SET.category_id("person") == 4
 
-        assert classes.category_ids == {"car": 1, "person": 2, "truck": 3, "bus": 4}
-        assert classes.category_name(1) == "car"
-        assert classes.category_id("bus") == 4
+    def test_the_project_set_is_the_nine_the_design_names(self):
+        """The order is `_provenance/integrity.json`'s, not a preference. A
+        category ID is a position in this tuple and is stored in every cached
+        match array, so reordering it silently renames every class."""
+        assert CLASS_SET.names == (
+            "car",
+            "traffic sign",
+            "traffic light",
+            "person",
+            "truck",
+            "bus",
+            "bike",
+            "rider",
+            "motor",
+        )
 
-    def test_both_declared_versions_are_ordered_by_measured_frequency(self):
-        """The order is `_provenance/integrity.json`'s, not a preference."""
-        assert class_set(ClassSetVersion(1)).names == ("car", "person", "truck", "bus")
-        assert class_set(ClassSetVersion(2)).names[:3] == ("car", "traffic sign", "traffic light")
-
-    def test_ids_are_reassigned_between_versions(self):
-        """A version change re-baselines the champion, so IDs need not be stable."""
-        assert class_set(ClassSetVersion(1)).category_id("person") == 2
-        assert class_set(ClassSetVersion(2)).category_id("person") == 4
-
-    def test_train_is_in_the_archive_and_in_no_class_set(self):
-        for version in (1, 2):
-            assert "train" not in class_set(ClassSetVersion(version)).names
-
-    def test_an_undeclared_version_names_no_class_set(self):
-        with pytest.raises(ValueError, match="is not defined"):
-            class_set(ClassSetVersion(0))
+    def test_train_is_in_the_archive_and_not_in_the_class_set(self):
+        assert "train" not in CLASS_SET.names
 
     def test_refuses_a_det_20_spelling_the_archive_has_no_boxes_for(self):
         """Uncaught, this scores 0.0 AP every cycle and raises nothing."""

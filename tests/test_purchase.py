@@ -26,7 +26,6 @@ from moto import mock_aws
 
 from edge_ml_flywheel.conventions import (
     AssignmentRow,
-    ClassSetVersion,
     Cohort,
     Cycle,
     ImageId,
@@ -34,7 +33,6 @@ from edge_ml_flywheel.conventions import (
     RecipeVersion,
     RunId,
     RunRegistration,
-    Selector,
     Split,
     Table,
     assignments_key,
@@ -79,9 +77,7 @@ def a_registration(**overrides: Any) -> RunRegistration:
         "created_at": CREATED,
         "git_commit": COMMIT,
         "partition_version": VERSION,
-        "class_set_version": ClassSetVersion(1),
         "recipe_version": RecipeVersion(1),
-        "selector": Selector.UNCERTAINTY,
         "label_budget_per_cycle": BUDGET,
         "note": "purchase tests",
     }

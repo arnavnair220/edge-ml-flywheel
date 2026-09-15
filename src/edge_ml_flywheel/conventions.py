@@ -61,10 +61,11 @@ RunId = NewType("RunId", str)
 # defined under "Model versions" below rather than here.
 ModelVersion = NewType("ModelVersion", str)
 
-# The three version stamps a paired comparison assumes are held constant
-# (design section 5). They are integers rather than free-form strings because
-# the only operation ever performed on them is equality against the champion's.
-ClassSetVersion = NewType("ClassSetVersion", int)
+# A version stamp a paired comparison assumes is held constant (design section
+# 5), alongside `PartitionVersion` below. An integer rather than a free-form
+# string because the only operation ever performed on it is equality against the
+# champion's. The class set is not among these: there is one, so it cannot
+# differ between two models being compared.
 RecipeVersion = NewType("RecipeVersion", int)
 
 # Widths are properties of the key format, not of any one caller, so they live
@@ -131,38 +132,10 @@ def parse_image_id(value: str) -> ImageId:
 
 # --- Selection ----------------------------------------------------------------
 #
-# Defined ahead of runs because a run carries one: the rule it buys labels by is
-# part of what the run *is*, not a per-cycle choice.
-
-
-class Selector(StrEnum):
-    """Which rule a run ranks the pool by, recorded on the run registration.
-
-    All three members exist before any of them is needed. "Uncertain frames
-    teach the most" is the hypothesis the project sets out to test rather than
-    a premise it may assume, and what tests it is a run buying by a different
-    rule over the same bootstrap and the same eval. Naming the alternatives
-    here keeps selection a swappable function rather than one rule with a
-    second added alongside it later, which is the arrangement under which two
-    runs come to differ in more than the selector.
-
-    `UNCERTAINTY` is the rule the loop runs by, and the only one a cycle uses
-    by default.
-
-    `RANDOM` needs the remaining pool and a seed and no inference at all, which
-    makes it both the smoke test for the ranking-to-purchase path before a
-    champion exists to score with, and the control arm of the deferred
-    label-efficiency comparison (design section 8).
-
-    `CERTAINTY` inverts the ranking, buying what the champion is most sure of.
-    Those frames carry the least new information, so a cycle run this way
-    should gain close to nothing; one that gains as much as a real cycle says
-    the ranking is not what is doing the work.
-    """
-
-    UNCERTAINTY = "uncertainty"
-    RANDOM = "random"
-    CERTAINTY = "certainty"
+# There is one selection rule: mean per-object uncertainty, in
+# `selection.select.by_uncertainty`. It is not a field on a run and not a value
+# anyone passes, because there is nothing to choose between -- every run ranks
+# the pool the same way, and a run that did not would not be this project.
 
 
 # --- Runs ---------------------------------------------------------------------
@@ -193,11 +166,11 @@ class Selector(StrEnum):
 # compared byte for byte, so `Run` and `run` are two different runs everywhere
 # except in a human's reading of them.
 #
-# **Deliberately not encoded: the version trio.** A change to `class_set_version`,
-# `recipe_version` or `partition_version` forces a new run (design section 5),
-# but the id only has to be *new*, not to describe the change. The trio lives in
-# the run registration and in every model manifest; putting it in the id too
-# would give two sources of truth that drift.
+# **Deliberately not encoded: the versions.** A change to `recipe_version` or
+# `partition_version` forces a new run (design section 5), but the id only has to
+# be *new*, not to describe the change. Both live in the run registration and in
+# every model manifest; putting them in the id too would give two sources of
+# truth that drift.
 
 RUN_SLUG_MAX_LEN: Final = 32
 
@@ -308,15 +281,10 @@ class RunRegistration:
     This is what lets `run_id` stay opaque. The id says *which* run and *when*;
     this says what it was configured as and why it exists, so a bucket listing
     six weeks later resolves to something without reverse-engineering it from
-    artifacts. The version trio is recorded at the run level, not only per
-    model, because it is the *precondition* of the run's whole comparison --
+    artifacts. The versions are recorded at the run level, not only per
+    model, because they are the *precondition* of the run's whole comparison --
     a model manifest disagreeing with its run's registration is a bug worth
     detecting rather than a fact worth storing twice.
-
-    `selector` is here for the trio's reason and not with the trio: it is a
-    precondition of what the run's numbers mean, so a bucket listing has to be
-    able to say which rule bought the labels -- but it is deliberately outside
-    `supersedes`, for the reason that method gives.
 
     `label_budget_per_cycle` is the *rule*, and `Table.LABEL_BUDGET` holds what
     is left of it. Those are different facts and only one of them is durable: a
@@ -342,9 +310,7 @@ class RunRegistration:
     created_at: datetime
     git_commit: str
     partition_version: PartitionVersion
-    class_set_version: ClassSetVersion
     recipe_version: RecipeVersion
-    selector: Selector
     label_budget_per_cycle: int
     note: str
 
@@ -367,25 +333,16 @@ class RunRegistration:
 
         The design's re-baseline rule (section 5) stated once, here, rather than
         as an `if` in the promotion path that someone later extends by one field
-        and forgets in the other two places.
+        and forgets in the other place.
 
-        `selector` is not one of these fields, and the omission is load-bearing.
-        The trio fixes the data universe and the metric; the selector changes
-        only which images inside that universe get bought. A label-efficiency
-        comparison is *paired* -- both arms start from the same bootstrap
-        champion and score against the same frozen eval -- so a selector change
-        forcing a re-baseline would discard the shared baseline that makes the
-        arms comparable at all, leaving them different in two respects instead
-        of one. Adding it here resembles tightening the rule and instead voids
-        the comparison.
+        The class set is not one of these, because there is only one: it cannot
+        differ between two runs, so it cannot be what forces a re-baseline.
         """
         return (
             self.partition_version,
-            self.class_set_version,
             self.recipe_version,
         ) != (
             other.partition_version,
-            other.class_set_version,
             other.recipe_version,
         )
 
@@ -394,14 +351,14 @@ class RunRegistration:
 #
 # `<run_id>-c<cycle>`, as in `20260812t143355z-v0-skeleton-c003`.
 #
-# **The name is an address; the manifest is the facts.** The version trio, the
-# git commit, the artifact digests, the gate results -- every one of them is read
-# by opening `ModelManifest`, and none of them is needed to find it. So none of
-# them appear here. Encoding one would create a second place for the same fact to
-# be stated, and this is the copy that cannot be corrected: the version is a path
+# **The name is an address; the manifest is the facts.** The versions, the git
+# commit, the artifact digests, the gate results -- every one of them is read by
+# opening `ModelManifest`, and none of them is needed to find it. So none of them
+# appear here. Encoding one would create a second place for the same fact to be
+# stated, and this is the copy that cannot be corrected: the version is a path
 # component and the artifacts bucket is write-once, so a name that disagrees with
-# its manifest disagrees permanently. Same rule that keeps the trio out of
-# `run_id`, applied to the same kind of field.
+# its manifest disagrees permanently. Same rule that keeps them out of `run_id`,
+# applied to the same kind of field.
 #
 # **What the name must carry is a locator.** A device asks `fleet_config` for
 # `desired_version` and gets back one string (design section 6). It does not know
@@ -552,9 +509,9 @@ NATIVE_IMAGE_SIZE: Final = (1280, 720)
 # --- Object classes -----------------------------------------------------------
 #
 # Which object categories a model predicts, and so which ones the metric covers.
-# Versioned for `PARTITIONS`' reason: a change to `class_set_version` redefines
-# what the headline number means and forces a fresh champion baseline (design
-# section 5).
+# One set, fixed for the project: changing it would redefine what the headline
+# number means and void every comparison already made, which is a new project
+# rather than a new run.
 #
 # The names are the archive's, measured at ingest and recorded in
 # `raw/_provenance/integrity.json`. A class set is checked against them because
@@ -590,11 +547,11 @@ BOX_CATEGORIES: Final[frozenset[str]] = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class ClassSet:
-    """What one `class_set_version` means. Add a version, never edit one.
+    """The categories a model predicts. There is one, `CLASS_SET`.
 
-    Editing an entry redefines a class set that models have already been trained
-    and scored against; every cached match array keyed by that version then
-    names a different class rather than failing to load.
+    A type rather than a bare tuple because the ID arithmetic and the archive
+    check below are what a class set *is*, and both are easy to get subtly wrong
+    at a call site.
 
     IDs are 1-based, as COCO's own categories are.
     """
@@ -638,40 +595,29 @@ class ClassSet:
         return self.names[category_id - 1]
 
 
-CLASS_SETS: Final[Mapping[ClassSetVersion, ClassSet]] = {
-    # Runs start on version 2 (design section 3): the four classes in version 1
-    # are all COCO-native, so a COCO-pretrained detector starts strong on them
-    # and a cycle's labels have little to move. Version 1 stays declared as the
-    # narrow set a later run can compare against, since appending to a tuple is
-    # the edit this table's rule forbids.
-    ClassSetVersion(1): ClassSet(names=("car", "person", "truck", "bus")),
-    ClassSetVersion(2): ClassSet(
-        names=(
-            "car",
-            "traffic sign",
-            "traffic light",
-            "person",
-            "truck",
-            "bus",
-            "bike",
-            "rider",
-            "motor",
-        )
-    ),
-}
-
-
-def class_set(version: ClassSetVersion) -> ClassSet:
-    """The classes a version predicts, or a refusal.
-
-    `partition_spec`'s rule on the other half of the version trio: a class set
-    nobody wrote down is a metric nobody can reproduce.
-    """
-    classes = CLASS_SETS.get(version)
-    if classes is None:
-        listed = ", ".join(str(known) for known in sorted(CLASS_SETS))
-        raise ValueError(f"class set version {version} is not defined. Defined: {listed}")
-    return classes
+# The nine categories every model in this project predicts (design section 3).
+# The four COCO-native classes alone are a set a COCO-pretrained detector already
+# starts strong on, which leaves a cycle's labels little to move; these nine are
+# what the loop is measured over.
+#
+# One set rather than a table of versions, because the project trains one kind of
+# model: there is nothing to select between, so there is no version to carry and
+# no lookup that can fail. The declaration order is still permanent -- a category
+# ID is a position in this tuple and is what every cached match array stores --
+# so a class is appended, never inserted or reordered.
+CLASS_SET: Final = ClassSet(
+    names=(
+        "car",
+        "traffic sign",
+        "traffic light",
+        "person",
+        "truck",
+        "bus",
+        "bike",
+        "rider",
+        "motor",
+    )
+)
 
 
 # --- Cohorts and splits ------------------------------------------------------
@@ -1293,6 +1239,16 @@ def purchase_labels_key(run_id: RunId, cycle: Cycle, part: int = 0) -> str:
 BASE_WEIGHTS_PREFIX: Final = "base/"
 BASE_WEIGHTS_FILE: Final = "yolo11n.pt"
 
+# Where the object comes from the one time it is absent. `launch.ensure_base`
+# fetches it on the first cycle of a fresh account and every later cycle finds it
+# already in the bucket, so the claim above holds from the second job onward
+# without a setup command anyone has to know to run. Pinned to a release tag
+# rather than `latest`, since the tag is the only part of this URL that says
+# which checkpoint the recipe means.
+BASE_WEIGHTS_URL: Final = (
+    "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt"
+)
+
 
 def base_weights_key(file: str = BASE_WEIGHTS_FILE) -> str:
     return f"{BASE_WEIGHTS_PREFIX}{_token('base weights', file)}"
@@ -1339,12 +1295,12 @@ class ModelManifest:
     afterwards, which is why "no manifest, no promotion" is a precondition rather
     than paperwork.
 
-    The version trio is repeated from the run registration on purpose. It is not
+    The versions are repeated from the run registration on purpose. They are not
     a second source of truth -- `RunRegistration` remains authoritative -- but a
     manifest that disagrees with its run is a bug the registration step can only
     detect if the manifest states its own view.
 
-    Run and cycle are *not* repeated, and the difference is the point: the trio
+    Run and cycle are *not* repeated, and the difference is the point: a version
     is a fact this model claims about itself and can be wrong about, while the
     run and cycle are already inside `version` and could only ever be restated.
     They are properties here rather than fields, so the serialized document has
@@ -1371,7 +1327,6 @@ class ModelManifest:
     created_at: datetime
     git_commit: str
     partition_version: PartitionVersion
-    class_set_version: ClassSetVersion
     recipe_version: RecipeVersion
     cohorts_trained_on: frozenset[Cohort]
     labels_spent: int
@@ -1421,9 +1376,9 @@ class ModelManifest:
 
         Two distinct failures fall out together. `run_id` disagreeing means the
         model belongs to another run entirely -- checkable at all only because
-        the version encodes its run. A trio field disagreeing means the training
-        job ran a configuration the run never declared, which is exactly what
-        this class restates the trio to expose. Copying the registration's values
+        the version encodes its run. A version disagreeing means the training job
+        ran a configuration the run never declared, which is exactly what this
+        class restates the versions to expose. Copying the registration's values
         in at construction would make a disagreement unrepresentable, and would
         do it by recording the run's intent in place of the job's behaviour --
         silencing the witness rather than believing it.
@@ -1433,7 +1388,6 @@ class ModelManifest:
             for name, claimed, declared in (
                 ("run_id", self.run_id, run.run_id),
                 ("partition_version", self.partition_version, run.partition_version),
-                ("class_set_version", self.class_set_version, run.class_set_version),
                 ("recipe_version", self.recipe_version, run.recipe_version),
             )
             if claimed != declared

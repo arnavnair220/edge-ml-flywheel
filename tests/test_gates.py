@@ -18,11 +18,10 @@ contain -- are reported as the different bugs they are.
 import pytest
 
 from edge_ml_flywheel.conventions import (
-    ClassSetVersion,
+    CLASS_SET,
     Cohort,
     ImageId,
     PartitionVersion,
-    class_set,
 )
 from edge_ml_flywheel.evaluation.bootstrap import CONFIDENCE, RESAMPLES, PairedDelta
 from edge_ml_flywheel.gates import DEFAULT, Gate, Thresholds, data_gate, quality_gate
@@ -31,7 +30,7 @@ from edge_ml_flywheel.oracle.cohorts import Cohorts
 from edge_ml_flywheel.oracle.labels import SoldLabel
 
 VERSION = PartitionVersion(0)
-CLASSES = class_set(ClassSetVersion(1))
+CLASSES = CLASS_SET
 
 # Small enough that a passing batch is four images. `min_mean_delta` keeps the
 # design's value, because unlike the other two it is not a fixture-size knob --
