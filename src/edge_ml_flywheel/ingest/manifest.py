@@ -67,6 +67,11 @@ SCHEMA: Final = pa.schema(
 # zstd over parquet's snappy default. The file is read whole by every query and
 # written once, so decompression speed is not the constraint and the smaller
 # object is a smaller download every time a cohort or slice is sized.
+#
+# It keeps zstd where the partition's two outputs could not: this file is read by
+# the partition job and by nothing else, and that job runs in CodeBuild on the
+# pyarrow the lockfile resolved. The files a Lambda reads are snappy, because the
+# managed layer's pyarrow is built without zstd -- see `assign._COMPRESSION`.
 _COMPRESSION: Final = "zstd"
 
 INTEGRITY_KEY: Final = f"{RAW_PROVENANCE_PREFIX}integrity.json"

@@ -57,8 +57,13 @@ SCHEMA: Final = pa.schema(
     ]
 )
 
-# zstd for `manifest.SCHEMA`'s reason: written once, read whole.
-_COMPRESSION: Final = "zstd"
+# snappy rather than `manifest.SCHEMA`'s zstd, because the partition's outputs are
+# read by the control plane and the manifest is not. A Lambda's pyarrow is the
+# managed AWSSDKPandas layer, which is trimmed to fit the size limit and is built
+# without zstd, so a file it cannot decompress is a cycle that cannot start. The
+# assignments are the oracle's cohort check, the labels are what `prepare` builds
+# its manifest from, and both of those run there.
+_COMPRESSION: Final = "snappy"
 
 # The three tag columns, read for the composition log and for nothing else. No
 # partition decision is a predicate over them.
