@@ -9,6 +9,9 @@
 # To register a control arm, override the selector too:
 #       name=SELECTOR,value=random,type=PLAINTEXT
 #
+# To register a run that exercises the loop once rather than running it:
+#       name=CYCLE_CAP,value=1,type=PLAINTEXT
+#
 # Unlike the two data jobs, this one is not idempotent and is not meant to be:
 # every build mints a fresh `run_id` from the current second and claims it. Two
 # builds are two runs.
@@ -29,6 +32,7 @@ env:
     PARTITION_VERSION: "0"
     CLASS_SET_VERSION: "2"
     RECIPE_VERSION: "1"
+    CYCLE_CAP: "8"
 
     # Deliberately empty. A default slug is how two runs come to be named the
     # same thing, and a default note is how the field stops meaning anything.
@@ -63,9 +67,10 @@ phases:
 
   build:
     commands:
-      # Mints the id, writes it under `attribute_not_exists(run_id)`, and reads
-      # it back. A collision exits non-zero here and nothing downstream is
-      # started. `--git-commit` is not passed: it defaults to
+      # Mints the id, writes it under `attribute_not_exists(run_id)`, opens the
+      # cycle counter beside it under the same condition, and reads both back. A
+      # collision exits non-zero here and nothing downstream is started.
+      # `--git-commit` is not passed: it defaults to
       # CODEBUILD_RESOLVED_SOURCE_VERSION, which this environment sets.
       - |
         RUN_ID=$(uv run python -m edge_ml_flywheel.run register \
@@ -75,6 +80,7 @@ phases:
           --class-set-version "$CLASS_SET_VERSION" \
           --recipe-version "$RECIPE_VERSION" \
           --label-budget "$LABEL_BUDGET" \
+          --cycle-cap "$CYCLE_CAP" \
           --note "$RUN_NOTE")
       - echo "$RUN_ID" > /tmp/run_id
 

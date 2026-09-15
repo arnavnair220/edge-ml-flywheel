@@ -93,8 +93,13 @@ def main(argv: list[str] | None = None) -> None:
                 aws,
                 parse_run_id(args.run_id),
                 Cycle(args.cycle),
-                max_images=args.max_images,
-                replace=args.replace,
+                launch.Preparation(
+                    # The checkout this command was run from. The control Lambda
+                    # passes its deployed tree instead -- see `launch.archive`.
+                    code=launch.checkout_archive(),
+                    max_images=args.max_images,
+                    replace=args.replace,
+                ),
             )
         )
 

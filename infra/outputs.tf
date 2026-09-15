@@ -68,6 +68,18 @@ output "training_role_arn" {
   value       = aws_iam_role.training.arn
 }
 
+# An ARN rather than a name, unlike the buckets and tables: the one consumer is
+# `aws stepfunctions start-execution --state-machine-arn`, which takes an ARN.
+output "cycle_state_machine_arn" {
+  description = "Run a cycle with: aws stepfunctions start-execution --state-machine-arn <this> --input '{\"run_id\":\"...\",\"epochs\":1,\"seeds\":[1],\"max_images\":300}'."
+  value       = aws_sfn_state_machine.cycle.arn
+}
+
+output "control_function_name" {
+  description = "The control plane's Lambda. Writes a cycle's training inputs and builds one seed's training request."
+  value       = aws_lambda_function.control.function_name
+}
+
 # PENDING until the GitHub App authorization is completed by hand in the
 # console. An output rather than a note in a doc, because it is the one piece of
 # this stack that applying cannot finish, and a build against a pending

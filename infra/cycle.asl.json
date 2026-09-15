@@ -1,0 +1,216 @@
+{
+  "Comment": "One cycle of the flywheel, and the loop back to the next. Six of the eleven steps are Pass stubs today, each carrying the comment that names the task replacing it. Start it with {\"run_id\": <id>, \"epochs\": <n>, \"seeds\": [1]}, and optionally max_images, replace, instance_type and use_spot.",
+  "QueryLanguage": "JSONata",
+  "StartAt": "ClaimCycle",
+  "States": {
+    "ClaimCycle": {
+      "Comment": "The single-flight lock, and the only place a cycle number comes from. One conditional update adds one to next_cycle and returns the item as it was, so the number handed back is the cycle this execution now owns and no other execution can own. The condition carries the cap too, which is why a run that has spent its cycles is refused here rather than by a check upstream that has to remember to run. ALL_OLD rather than UPDATED_OLD because the cap is read off the same call. The retries below are throttles and transient faults only: a failed condition means the cap is spent or another execution holds this run, and both are the same answer on a second attempt.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Arguments": {
+        "TableName": "${fleet_config_table}",
+        "Key": {
+          "run_id": { "S": "{% $states.context.Execution.Input.run_id %}" },
+          "entity": { "S": "run" }
+        },
+        "UpdateExpression": "SET next_cycle = next_cycle + :one",
+        "ConditionExpression": "attribute_exists(next_cycle) AND next_cycle < cycle_cap",
+        "ExpressionAttributeValues": { ":one": { "N": "1" } },
+        "ReturnValues": "ALL_OLD"
+      },
+      "Assign": {
+        "cycle": "{% $number($states.result.Attributes.next_cycle.N) %}",
+        "cycle_cap": "{% $number($states.result.Attributes.cycle_cap.N) %}"
+      },
+      "Output": {},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "DynamoDB.ThrottlingException",
+            "DynamoDB.ProvisionedThroughputExceededException",
+            "DynamoDB.InternalServerErrorException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 4,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Prepare"
+    },
+
+    "Prepare": {
+      "Comment": "Writes the two objects a cycle hands its seeds: the image manifest naming the cumulative labeled set, and the source archive the container unpacks. Once per cycle rather than once per seed, because five seeds of a challenger must differ in the seed and in nothing else. The retries are runtime faults and not refusals -- ControlError is what the handler raises when the work itself is refused, and it is refused identically on a second attempt.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${control_function_arn}",
+        "Payload": {
+          "step": "prepare",
+          "run_id": "{% $states.context.Execution.Input.run_id %}",
+          "cycle": "{% $cycle %}",
+          "max_images": "{% $states.context.Execution.Input.max_images %}",
+          "replace": "{% $states.context.Execution.Input.replace %}"
+        }
+      },
+      "Assign": {
+        "images": "{% $states.result.Payload.images %}"
+      },
+      "Output": {},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Train"
+    },
+
+    "Train": {
+      "Comment": "One training job per seed, in parallel, over the cycle prepared above. The seed list is an execution input rather than a constant: the design trains five, and an account whose spot quota for the instance type is lower runs fewer without editing the state machine.",
+      "Type": "Map",
+      "Items": "{% $states.context.Execution.Input.seeds %}",
+      "MaxConcurrency": 5,
+      "ItemSelector": {
+        "seed": "{% $states.context.Map.Item.Value %}"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "TrainingRequest",
+        "States": {
+          "TrainingRequest": {
+            "Comment": "The request is built by the same function the CLI calls, so this file is a second caller of one definition rather than a second definition of a training job written in a language with no tests.",
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Arguments": {
+              "FunctionName": "${control_function_arn}",
+              "Payload": {
+                "step": "train_request",
+                "run_id": "{% $states.context.Execution.Input.run_id %}",
+                "cycle": "{% $cycle %}",
+                "seed": "{% $states.input.seed %}",
+                "epochs": "{% $states.context.Execution.Input.epochs %}",
+                "instance_type": "{% $states.context.Execution.Input.instance_type %}",
+                "use_spot": "{% $states.context.Execution.Input.use_spot %}"
+              }
+            },
+            "Output": "{% $states.result.Payload %}",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+              }
+            ],
+            "Next": "TrainSeed"
+          },
+
+          "TrainSeed": {
+            "Comment": "`.sync` owns the wait, so nothing in this project polls a training job or stays alive beside one, and an aborted execution stops the job rather than leaving a GPU running. A spot interrupt arrives here as States.TaskFailed, and the interrupt policy is discard and restart -- there is no CheckpointConfig to resume from, which is what keeps `seed k fixes the run` true. Two attempts rather than many: a job that cannot find capacity twice is a capacity problem and not a flake.",
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sagemaker:createTrainingJob.sync",
+            "Arguments": "{% $states.input.request %}",
+            "Output": {
+              "seed": "{% $states.input.seed %}",
+              "version": "{% $states.input.version %}",
+              "job": "{% $states.result.TrainingJobName %}"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": ["States.TaskFailed"],
+                "IntervalSeconds": 60,
+                "MaxAttempts": 2,
+                "BackoffRate": 2
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "Assign": {
+        "seeds_trained": "{% $states.result %}"
+      },
+      "Output": {},
+      "Next": "Score"
+    },
+
+    "Score": {
+      "Comment": "STUB. Replaced by a Batch Transform over the eval cohort and the remaining pool, caching per-image match arrays so that every later question -- paired deltas, confidence bands, per-slice metrics -- is answered from the cache rather than by scoring again.",
+      "Type": "Pass",
+      "Next": "Evaluate"
+    },
+
+    "Evaluate": {
+      "Comment": "STUB. Replaced by a Processing job running the four gates over the cached matches and writing the per-slice regression report under the cycle prefix.",
+      "Type": "Pass",
+      "Next": "Register"
+    },
+
+    "Register": {
+      "Comment": "STUB. Replaced by the Model Registry step that writes the manifest, checks it against the run registration, and records the verdict with its reason. It assigns `passed` because the branch below is real today and needs something to branch on; the real step assigns the gates' actual verdict.",
+      "Type": "Pass",
+      "Assign": { "passed": true },
+      "Next": "Passed"
+    },
+
+    "Passed": {
+      "Comment": "The short-circuit. A failed gate leaves the champion in place and the labels stay bought, so a rejected cycle carries on to selection rather than ending -- there is no state in which a rejection costs the run its purchase.",
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $passed %}",
+          "Next": "Promote"
+        }
+      ],
+      "Default": "Select"
+    },
+
+    "Promote": {
+      "Comment": "STUB. Replaced by the champion pointer flip: the registry advances the version and the fleet_config device items take the new desired_version.",
+      "Type": "Pass",
+      "Next": "Select"
+    },
+
+    "Select": {
+      "Comment": "STUB. Replaced by the ranking of the remaining pool by mean per-object uncertainty from the scoring pass above, and the batch that ranking picks.",
+      "Type": "Pass",
+      "Next": "Purchase"
+    },
+
+    "Purchase": {
+      "Comment": "STUB. Replaced by the oracle: charge the ledger under an idempotency key, write the labels under this run and cycle, and record the charge in the audit log. It assigns pool_remaining as 0, which stops the loop after one cycle -- a stubbed purchase buys nothing, so a loop that carried on would retrain an identical challenger on identical data until the cap ran out. The real step assigns what the oracle left in the pool.",
+      "Type": "Pass",
+      "Assign": { "pool_remaining": 0 },
+      "Next": "MoreCycles"
+    },
+
+    "MoreCycles": {
+      "Comment": "Both halves of the diagram's condition. The cap is checked again in ClaimCycle, and deliberately: this decides whether to go round, that decides whether going round is permitted, and only one of them is a lock.",
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $cycle + 1 < $cycle_cap and $pool_remaining > 0 %}",
+          "Next": "ClaimCycle"
+        }
+      ],
+      "Default": "Done"
+    },
+
+    "Done": {
+      "Comment": "The run has spent its cycles or its pool. Not a failure: a run that finishes its cap is a run that finished.",
+      "Type": "Succeed"
+    }
+  }
+}

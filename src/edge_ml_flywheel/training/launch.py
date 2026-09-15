@@ -1,10 +1,17 @@
 """The operator's side of a training job: prepare, package, start, report.
 
-Four steps that Step Functions will own one at a time, written here first
-because the walking skeleton has to run before the state machine that sequences
-it exists. What survives that transition is `job.training_job`, which is the
-definition; this module is the caller, and the ASL becomes a second caller of the
-same function rather than a second definition.
+Four steps that Step Functions owns one at a time, written here first because
+the walking skeleton had to run before the state machine that sequences it
+existed. What survived that transition is `job.training_job`, which is the
+definition; this module is the caller, and `control.handler` became a second
+caller of the same functions rather than a second definition of the same job.
+
+**The source tree is an argument, not something this module finds.** `archive`
+takes the two directories it packs rather than a repository root, because there
+are two callers with two layouts: an operator runs from a checkout, and the
+control Lambda runs from what Terraform deployed, which is the package in
+`/var/task` and the two script-mode root files in a layer. A module that located
+its own tree would work for exactly one of them.
 
 **Nothing here decides anything about a run.** The partition and class set come
 from the run registration, not from flags: they are preconditions of the whole
@@ -21,6 +28,7 @@ import tarfile
 import tempfile
 import time
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -120,48 +128,71 @@ def repo_root() -> Path:
     return root
 
 
-def _members(root: Path) -> Iterator[tuple[Path, str]]:
-    """Every file in the archive, as (source, name inside the archive), sorted."""
-    package = root / "src" / _CODE_ROOT
+def _members(package: Path, entry: Path) -> Iterator[tuple[Path, str]]:
+    """Every file in the archive, as (source, name inside the archive), sorted.
+
+    Two directories rather than one root. `package` is the `edge_ml_flywheel`
+    directory itself and `entry` is wherever `train.py` and `requirements.txt`
+    are, which script mode requires at the root of the archive. In a checkout
+    those are `src/edge_ml_flywheel` and `container/`; in the control Lambda they
+    are the deployed package and the layer that carries the same two files.
+    """
     for path in sorted(package.rglob("*")):
         if path.is_file() and not any(marker in str(path) for marker in _EXCLUDED):
             yield path, f"{_CODE_ROOT}/{path.relative_to(package).as_posix()}"
 
-    container = root / _CONTAINER_DIR
     for name in (job.ENTRY_POINT, _REQUIREMENTS):
-        yield container / name, name
+        yield entry / name, name
 
 
-def archive(root: Path) -> bytes:
+def archive(package: Path, entry: Path) -> bytes:
     """The source archive, byte-identical for a given tree.
 
     The gzip layer is opened explicitly rather than through `w:gz`, because a
     gzip header carries its own timestamp: left to the default, two archives of
-    one commit differ in eight bytes and the digest stops meaning anything.
+    one commit differ in eight bytes and the digest stops meaning anything. The
+    tar headers are flattened for the same reason, which is also what makes the
+    archive a function of the files rather than of which of the two callers
+    built it.
     """
     buffer = io.BytesIO()
     with (
         gzip.GzipFile(fileobj=buffer, mode="wb", compresslevel=9, mtime=_EPOCH) as compressed,
         tarfile.open(fileobj=compressed, mode="w") as tar,
     ):
-        for source, name in _members(root):
+        for source, name in _members(package, entry):
             info = tar.gettarinfo(str(source), arcname=name)
             info.mtime = _EPOCH
             info.uid = info.gid = 0
             info.uname = info.gname = ""
+            # Fixed rather than inherited, because the two trees arrive by
+            # different routes -- a git checkout and an unzipped Lambda package
+            # -- and a mode that differs between them is a digest that differs
+            # for a tree that does not.
+            info.mode = 0o644
             with source.open("rb") as handle:
                 tar.addfile(info, handle)
     return buffer.getvalue()
 
 
-def package(aws: boto3.Session, run_id: RunId, cycle: Cycle) -> str:
-    """Upload the tree this cycle's five seeds run, and return its key."""
+def checkout_archive() -> bytes:
+    """The archive as built from the repository this module was imported from.
+
+    The operator's half of `archive`'s two callers, kept here rather than in the
+    CLI so that `repo_root` has exactly one consumer and the checkout layout is
+    stated once.
+    """
+    root = repo_root()
+    return archive(root / "src" / _CODE_ROOT, root / _CONTAINER_DIR)
+
+
+def stage_code(aws: boto3.Session, run_id: RunId, cycle: Cycle, code: bytes) -> str:
+    """Upload the tree this cycle's seeds run, and return its key."""
     key = training_code_key(run_id, cycle)
     artifacts = buckets(aws).artifacts
-    payload = archive(repo_root())
 
-    aws.client("s3").put_object(Bucket=artifacts, Key=key, Body=payload)
-    log.info("packaged %d KB of source to %s", len(payload) // 1024, uri(artifacts, key))
+    aws.client("s3").put_object(Bucket=artifacts, Key=key, Body=code)
+    log.info("packaged %d KB of source to %s", len(code) // 1024, uri(artifacts, key))
     return key
 
 
@@ -206,12 +237,43 @@ def labeled_set(aws: boto3.Session, run: RunRegistration, work: Path) -> Sequenc
     return sorted(labels.collect([bootstrap, purchases]))
 
 
+@dataclass(frozen=True, slots=True)
+class Preparation:
+    """What a cycle is prepared *from*, as against which cycle is prepared.
+
+    The same split `job` makes between `Target`, `Recipe` and `Compute`: the run
+    and the cycle are the address, and these three are the material. They also
+    change on different clocks -- an address changes every cycle, and these
+    change when the caller does.
+
+    `code` is the source archive, and it is a field rather than something
+    `prepare` builds because there are two callers with two trees. An operator
+    runs from a checkout; the control Lambda runs from what Terraform deployed.
+    A module that found its own tree would work for exactly one of them, so the
+    archive's provenance is a decision at the call site -- `checkout_archive`
+    says a working tree, `control.handler.deployed_archive` says what was
+    deployed.
+
+    `max_images` is 0 for the whole labeled set, and it is a parameter of the
+    cycle rather than of the job for the reason `job` gives: a short skeleton run
+    is a short manifest, so the record still says exactly what was trained on.
+
+    `replace` is the one field that permits rather than supplies. The manifest is
+    the record of what the challenger trained on, so overwriting it after a seed
+    has run leaves the record describing a set no model was trained on -- this is
+    for iterating on the skeleton, where the cycle is being re-run on purpose.
+    """
+
+    code: bytes
+    max_images: int = 0
+    replace: bool = False
+
+
 def prepare(
     aws: boto3.Session,
     run_id: RunId,
     cycle: Cycle,
-    max_images: int = 0,
-    replace: bool = False,
+    preparation: Preparation,
 ) -> int:
     """Write this cycle's two inputs -- the image manifest and the source archive
     -- and return how many images the manifest names.
@@ -220,17 +282,12 @@ def prepare(
     seeds of a challenger have to differ in the seed and in nothing else. A
     package step on each launch would let seed 4 run a tree seed 1 never saw,
     which is not a comparison between five seeds of one model.
-
-    Refuses to overwrite what is already there, because the manifest is the
-    record of what the challenger trained on: replacing it after a seed has run
-    leaves the record describing a set no model was trained on. `replace` is for
-    iterating on the skeleton, where the cycle is being re-run on purpose.
     """
     run = registration(aws, run_id)
     artifacts = buckets(aws).artifacts
     key = training_manifest_key(run_id, cycle)
 
-    if not replace and _exists(aws, artifacts, key):
+    if not preparation.replace and _exists(aws, artifacts, key):
         raise SystemExit(
             f"{uri(artifacts, key)} already exists, and it is the record of what this cycle "
             f"trained on. Pass --replace only if no seed has run against it."
@@ -242,14 +299,14 @@ def prepare(
     # set after this returns.
     with tempfile.TemporaryDirectory() as scratch:
         work = Path(scratch)
-        image_ids = images.capped(labeled_set(aws, run, work), max_images)
+        image_ids = images.capped(labeled_set(aws, run, work), preparation.max_images)
         local = work / "images.manifest"
         named = images.write(local, buckets(aws).data, image_ids)
 
         aws.client("s3").upload_file(str(local), artifacts, key)
         log.info("wrote %s", uri(artifacts, key))
 
-    package(aws, run_id, cycle)
+    stage_code(aws, run_id, cycle, preparation.code)
     return named
 
 
@@ -268,14 +325,20 @@ def _exists(aws: boto3.Session, bucket: str, key: str) -> bool:
     return any(entry["Key"] == key for entry in response.get("Contents", ()))
 
 
-def start(
+def request(
     aws: boto3.Session,
     version: ModelVersion,
     seed: Seed,
     recipe: job.Recipe,
     compute: job.Compute,
-) -> str:
-    """Create one seed's training job and return its name.
+) -> dict[str, Any]:
+    """One seed's `CreateTrainingJob` request, resolved against the account.
+
+    Separate from `start` because the two callers want different halves. A CLI
+    wants the job created; the state machine wants the request handed back so
+    that `sagemaker:createTrainingJob.sync` makes the call and owns the wait,
+    which is what puts the retry policy and the interrupt handling in the ASL
+    rather than in a Lambda that has to stay alive for ninety minutes.
 
     Takes the model version rather than a run and a cycle, for the reason every
     key builder in `conventions` does: they are inside it, and passing all three
@@ -306,16 +369,27 @@ def start(
         tags={"project": PROJECT, "recipe_version": str(run.recipe_version)},
     )
 
-    request = job.training_job(
+    return job.training_job(
         target=target,
         recipe=recipe,
         compute=compute,
         attempt=datetime.now(UTC),
     )
 
-    aws.client("sagemaker").create_training_job(**request)
-    log.info("started %s on %s", request["TrainingJobName"], compute.instance_type)
-    return str(request["TrainingJobName"])
+
+def start(
+    aws: boto3.Session,
+    version: ModelVersion,
+    seed: Seed,
+    recipe: job.Recipe,
+    compute: job.Compute,
+) -> str:
+    """Create one seed's training job and return its name."""
+    created = request(aws, version, seed, recipe, compute)
+
+    aws.client("sagemaker").create_training_job(**created)
+    log.info("started %s on %s", created["TrainingJobName"], compute.instance_type)
+    return str(created["TrainingJobName"])
 
 
 def wait(aws: boto3.Session, name: str) -> str:

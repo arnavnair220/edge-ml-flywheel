@@ -892,6 +892,24 @@ def table_name(table: Table) -> str:
     return f"{PROJECT}-{table.value}"
 
 
+# --- fleet_config entities ----------------------------------------------------
+#
+# `Table.FLEET_CONFIG` sorts on `entity`, and two shapes of item share the
+# partition: the run's own control item, and one per device carrying that
+# device's `desired_version`. The run's is `run`; the devices' are `device#<n>`
+# and are deliberately unspelled until the fleet plane writes one, because a
+# constant nothing uses is a format nothing checks.
+#
+# The run item is where the cycle counter lives, which makes this string
+# load-bearing beyond addressing. Advancing the counter is a conditional update
+# against exactly this item, and that update is the single-flight lock (design
+# section 5): it is the one place two overlapping cycles become representable,
+# so it is the one place they can be refused. Two spellings of the entity would
+# be two locks, which is no lock.
+
+RUN_ENTITY: Final = "run"
+
+
 # --- Audit log sort keys ------------------------------------------------------
 #
 # `Table.AUDIT_LOG` sorts on a composed `event` string rather than a timestamp,

@@ -11,4 +11,6 @@ is no local artifact that could stand in for it. The dependency is confined to
 still testable without credentials.
 
 - `registration` -- the item encoding, and the conditional put that claims a run
+- `control` -- the cycle counter the state machine claims a cycle from, opened
+  by the same command that claims the name
 """
