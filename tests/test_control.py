@@ -19,9 +19,15 @@ exist -- which AWS rejects at deploy time and which a test can reject in a
 second. The stub inventory is asserted too, so that a `Pass` state quietly
 becoming permanent is a test that has to be edited rather than a thing nobody
 notices.
+
+The other failure is the one deploy time does *not* catch, because the definition
+is valid and the expression is well formed: a field reading an execution input
+the execution left out. That is a failed run rather than a failed apply, and it
+is what the payload shape and the test over it are for.
 """
 
 import json
+import re
 import tarfile
 from collections.abc import Iterator
 from decimal import Decimal
@@ -55,6 +61,15 @@ ASL = Path(__file__).resolve().parents[1] / "infra" / "cycle.asl.json"
 # The six steps the diagram draws as stubs. Named here so that implementing one
 # and leaving it a `Pass` is a failing test.
 STUBS = frozenset({"Score", "Evaluate", "Register", "Promote", "Select", "Purchase"})
+
+# The execution inputs an execution may leave out, and the handler defaults. They
+# are listed here rather than derived because the point of the test below is that
+# leaving one out is allowed, and a list derived from the ASL would agree with the
+# ASL by construction.
+OPTIONAL_INPUTS = frozenset({"max_images", "replace", "instance_type", "use_spot"})
+
+# The step name inside a payload expression, which is where it now lives.
+STEP_IN_PAYLOAD = re.compile(r"'step':\s*'(\w+)'")
 
 
 @pytest.fixture
@@ -300,12 +315,17 @@ class TestTheHandler:
 
     def test_the_step_names_are_the_ones_the_asl_passes(self) -> None:
         """The two files are an interface, and this is the half that can drift
-        without either one failing to parse."""
+        without either one failing to parse.
+
+        Read out of the payload expression rather than off a key, because the
+        payload is one JSONata object and not a field per key -- which is what
+        `TestTheDefinition` checks and why.
+        """
         definition = json.loads(ASL.read_text(encoding="utf-8"))
         passed = {
-            payload["step"]
+            match.group(1)
             for payload in _payloads(definition["States"])
-            if isinstance(payload.get("step"), str)
+            if (match := STEP_IN_PAYLOAD.search(payload))
         }
         assert passed == set(ctrl.STEPS)
 
@@ -418,6 +438,27 @@ class TestTheDefinition:
         seed = definition["States"]["Train"]["ItemProcessor"]["States"]["TrainSeed"]
         assert seed["Resource"].endswith("sagemaker:createTrainingJob.sync")
 
+    def test_an_optional_input_is_only_read_where_absence_is_allowed(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """The bug that stopped the first execution ever started, at `Prepare`.
+
+        A field whose JSONata resolves to nothing is `States.QueryEvaluationError`
+        and the end of the run -- Step Functions has no setting that makes it an
+        omission. Inside an object constructor the same value simply drops its
+        key, so the handler's `.get(name, default)` is what decides, and the
+        defaults stay in the one place the CLI reads them from too.
+        """
+        for expression in _expressions(definition):
+            for field in OPTIONAL_INPUTS:
+                if f"Execution.Input.{field}" not in expression:
+                    continue
+                assert expression.startswith("{% {"), (
+                    f"{field} is read outside an object constructor, so an execution that "
+                    f"leaves it out fails here instead of taking the handler's default: "
+                    f"{expression}"
+                )
+
     def test_the_claim_is_conditional_on_the_cap(self, definition: dict[str, Any]) -> None:
         """The single-flight lock. Without the condition this is a counter two
         executions can read the same value from."""
@@ -453,13 +494,34 @@ def _targets(state: dict[str, Any]) -> list[str]:
     return targets
 
 
-def _payloads(states: dict[str, Any]) -> Iterator[dict[str, Any]]:
-    """Every Lambda payload in the definition, at any depth."""
+def _payloads(states: dict[str, Any]) -> Iterator[str]:
+    """Every Lambda payload in the definition, at any depth.
+
+    A string rather than a dict, because each one is a single JSONata object
+    constructor -- which is what makes a key optional; see `_expressions`.
+    """
     for scope in _scopes(states):
         for state in scope.values():
             arguments = state.get("Arguments")
-            if isinstance(arguments, dict) and isinstance(arguments.get("Payload"), dict):
+            if isinstance(arguments, dict) and isinstance(arguments.get("Payload"), str):
                 yield arguments["Payload"]
+
+
+def _expressions(node: Any) -> Iterator[str]:
+    """Every JSONata expression in the definition, at any depth.
+
+    A walk of the parsed JSON rather than a scan of the text, so what is yielded
+    is one field's expression and the test below can ask where it sits.
+    """
+    if isinstance(node, str):
+        if node.startswith("{%"):
+            yield node
+    elif isinstance(node, dict):
+        for value in node.values():
+            yield from _expressions(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _expressions(value)
 
 
 def _tar_names(payload: bytes) -> set[str]:
