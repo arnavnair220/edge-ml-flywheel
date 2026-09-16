@@ -32,3 +32,16 @@ pyarrow>=18
 # give up the one property the shared archive exists for, that all three jobs
 # run the same tree under one `git_commit`.
 pycocotools==2.0.11
+
+# The export half of the training job: `onnx` to read the graph back and name
+# the detection head, `onnxruntime` for the static quantization pass over it.
+# Pinned for the reason everything above is -- the quantizer's defaults are part
+# of what `recipe_version` names, and an artifact whose precision changes with a
+# floating dependency is not comparable to the one before it.
+#
+# Installed rather than relied on: Ultralytics fetches its export extras at run
+# time, and a training job in a subnet with no NAT gateway cannot fetch
+# anything. A missing export package has to fail at pip time, not after a GPU
+# hour of training.
+onnx==1.22.0
+onnxruntime==1.30.0

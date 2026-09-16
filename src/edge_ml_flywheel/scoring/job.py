@@ -41,6 +41,7 @@ from edge_ml_flywheel.conventions import (
     Cycle,
     ModelArtifact,
     ModelVersion,
+    Precision,
     RunId,
     Seed,
     detections_prefix,
@@ -117,6 +118,31 @@ def container_entrypoint(entry_point: str = ENTRY_POINT) -> list[str]:
     return ["bash", "-c", script, entry_point]
 
 
+def artifact_for(precision: Precision) -> ModelArtifact:
+    """The file one pass scores with.
+
+    The fp32 pass loads the checkpoint; the int8 pass loads the quantized graph
+    that ships, so what the edge gate measures is the artifact the device runs
+    rather than a second conversion of it.
+    """
+    return ModelArtifact.ONNX if precision is Precision.INT8 else ModelArtifact.TORCH
+
+
+def cohorts_for(precision: Precision) -> frozenset[Cohort]:
+    """Which cohorts one pass covers.
+
+    The int8 pass takes `eval` alone. The pool is scored to be ranked, and the
+    ranking is the selector's -- built from the model the cycle trained, not from
+    a quantized copy of it. Scoring 62,000 frames a second time would spend an
+    hour producing boxes nothing reads.
+
+    A function rather than only a property on `Target`, because the container
+    reads it too: a job that scored a cohort it was given no output channel for
+    would do the work and then drop it.
+    """
+    return frozenset({Cohort.EVAL}) if precision is Precision.INT8 else SCORED_COHORTS
+
+
 @dataclass(frozen=True, slots=True)
 class Target:
     """Which model is being scored, and the account it is scored in.
@@ -166,11 +192,19 @@ class Scoring:
     it. The match cache is built at that cap and cannot be asked for more later,
     so a job emitting more rows would write boxes no metric can ever read, and a
     job emitting fewer would silently cap the cache below its own limit.
+
+    `precision` is which build of the model the pass runs. `FP32` is the
+    checkpoint and the pass every cycle makes; `INT8` is the quantized graph that
+    ships, run over `eval` alone so the edge gate can say what quantization cost.
+    It belongs here rather than on `Target` because it is a property of the run
+    and not of the model -- one trained model has both builds -- and it is what
+    decides the file loaded, the cohorts covered and the prefix written.
     """
 
     image_size: int = training.IMAGE_SIZE
     confidence_floor: float = 0.001
     max_detections: int = MAX_DETS
+    precision: Precision = Precision.FP32
 
     def __post_init__(self) -> None:
         if not 0.0 < self.confidence_floor < 1.0:
@@ -205,6 +239,23 @@ class Compute:
     instance_type: str = "ml.g4dn.xlarge"
     volume_size_gb: int = 30
     max_runtime_seconds: int = 3 * 60 * 60
+
+    @classmethod
+    def for_precision(cls, precision: Precision) -> "Compute":
+        """What each pass runs on.
+
+        The int8 pass is CPU, and not as a saving: int8 is a CPU format. ONNX
+        Runtime's CUDA provider has no kernel for most of what `quantize_static`
+        emits and falls back to float, which would measure the accuracy of a
+        model the device will never run. `ml.m5.xlarge` is the instance the
+        evaluation job already uses.
+
+        It also covers 5,000 images rather than 67,000, so the volume and the
+        ceiling come down with it.
+        """
+        if precision is not Precision.INT8:
+            return cls()
+        return cls(instance_type="ml.m5.xlarge", volume_size_gb=10, max_runtime_seconds=60 * 60)
 
 
 def _manifest_input(target: Target, cohort: Cohort) -> dict[str, Any]:
@@ -249,7 +300,7 @@ def _object_input(name: str, s3_uri: str) -> dict[str, Any]:
     }
 
 
-def inputs(target: Target) -> list[dict[str, Any]]:
+def inputs(target: Target, scoring: Scoring) -> list[dict[str, Any]]:
     """The channels a scoring job reads: its code, its model, and two cohorts.
 
     Cohorts in a fixed order, from `SCORED_COHORTS` sorted, so two calls produce
@@ -265,15 +316,17 @@ def inputs(target: Target) -> list[dict[str, Any]]:
             MODEL_CHANNEL,
             uri(
                 buckets.artifacts,
-                model_artifact_key(target.version, target.seed, ModelArtifact.TORCH),
+                model_artifact_key(target.version, target.seed, artifact_for(scoring.precision)),
             ),
         ),
     ]
-    channels.extend(_manifest_input(target, cohort) for cohort in sorted(SCORED_COHORTS))
+    channels.extend(
+        _manifest_input(target, cohort) for cohort in sorted(cohorts_for(scoring.precision))
+    )
     return channels
 
 
-def outputs(target: Target) -> list[dict[str, Any]]:
+def outputs(target: Target, scoring: Scoring) -> list[dict[str, Any]]:
     """One output channel per cohort, uploaded when the job finishes.
 
     `EndOfJob` rather than `Continuous`: a partially uploaded detections file is
@@ -286,13 +339,13 @@ def outputs(target: Target) -> list[dict[str, Any]]:
             "S3Output": {
                 "S3Uri": uri(
                     target.buckets.artifacts,
-                    detections_prefix(target.version, target.seed, cohort),
+                    detections_prefix(target.version, target.seed, cohort, scoring.precision),
                 ),
                 "LocalPath": f"{OUTPUT_ROOT}/{cohort.value}",
                 "S3UploadMode": "EndOfJob",
             },
         }
-        for cohort in sorted(SCORED_COHORTS)
+        for cohort in sorted(cohorts_for(scoring.precision))
     ]
 
 
@@ -314,6 +367,8 @@ def arguments(target: Target, scoring: Scoring) -> list[str]:
         target.version,
         "--seed",
         str(target.seed),
+        "--precision",
+        scoring.precision.value,
         "--image_size",
         str(scoring.image_size),
         "--confidence_floor",
@@ -353,8 +408,8 @@ def processing_job(
             "ContainerEntrypoint": container_entrypoint(),
             "ContainerArguments": arguments(target, scoring),
         },
-        "ProcessingInputs": inputs(target),
-        "ProcessingOutputConfig": {"Outputs": outputs(target)},
+        "ProcessingInputs": inputs(target, scoring),
+        "ProcessingOutputConfig": {"Outputs": outputs(target, scoring)},
         "ProcessingResources": {
             "ClusterConfig": {
                 "InstanceCount": 1,

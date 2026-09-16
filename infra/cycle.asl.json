@@ -225,6 +225,48 @@
         "seeds_scored": "{% $states.result %}"
       },
       "Output": {},
+      "Next": "ScoreQuantizedRequest"
+    },
+
+    "ScoreQuantizedRequest": {
+      "Comment": "`ScoringRequest` again, for the artifact that actually ships. One job and not a Map: exactly one seed is deployed, so exactly one model is quantized and there is one thing for the edge gate to be about. The seed is the lowest one `Score` produced, matching `evaluation.entrypoint.deployed_seed`. `instance_type` is deliberately not passed -- int8 is a CPU format, and the input an execution may set is the GPU type training and scoring share, so honouring it here would put the quantized graph on a runtime that falls back to float and measure a model the device will never run.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${control_function_arn}",
+        "Payload": "{% {'step': 'score_request', 'version': $seeds_scored[0].version, 'seed': $min($seeds_scored.seed), 'precision': 'int8'} %}"
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "ScoreQuantized"
+    },
+
+    "ScoreQuantized": {
+      "Comment": "The second pass over `eval`, with the int8 graph the fleet would run. Its detections land beside the fp32 ones under `precision=int8/` rather than over them, and `Evaluate` reads both to say what quantization cost. Measured here rather than on a device because neither of the edge gate's thresholds needs one, and because this is where a failure is still cheap: a quantization loss found in the cloud is a training-side change, and the same loss found after a rollout is a rollout. `.sync` owns the wait for `ScoreSeed`'s reasons, and a restart is safe for the same one.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sagemaker:createProcessingJob.sync",
+      "Arguments": "{% $states.input.request %}",
+      "Output": {},
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 60,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
       "Next": "EvaluateRequest"
     },
 

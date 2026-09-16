@@ -11,12 +11,17 @@ the download measurement design section 11 asks every job to record. The dataset
 is built and asserted before the model is loaded, so a mismatch between the
 manifest and the labels costs seconds of GPU rather than an epoch of it.
 
-**What this job writes, and why it writes it twice.** SageMaker collects
-`/opt/ml/model` into a `model.tar.gz`, which is the form the batch transform job
-and the model registry consume. The device and the model manifest want the loose
-file and its digest at the keys `conventions.model_artifact_key` names. Same
-bytes, hashed once, where they were produced -- a digest computed anywhere else
-is a digest of a copy.
+**What this job writes.** SageMaker collects `/opt/ml/model` into a
+`model.tar.gz`, which is the form the scoring job and the model registry consume.
+The device and the model manifest want the loose files and their digests at the
+keys `conventions.model_artifact_key` names. Same bytes, hashed once, where they
+were produced -- a digest computed anywhere else is a digest of a copy.
+
+Two of those files are models. `model.pt` is the checkpoint, and `model.onnx` is
+the int8 graph an ARM CPU can run, which is what the fleet loads and what the
+manifest's digest names. `export` produces the second from the first, in this
+job rather than a later one, so the artifact that ships and the weights it came
+from are never separated by a step that could fail between them.
 """
 
 import argparse
@@ -42,9 +47,10 @@ from edge_ml_flywheel.conventions import (
     Seed,
     model_artifact_key,
     parse_model_version,
+    sha256sums_document,
     uri,
 )
-from edge_ml_flywheel.training import dataset, labels
+from edge_ml_flywheel.training import dataset, export, labels
 from edge_ml_flywheel.training.job import (
     BASE_CHANNEL,
     BOOTSTRAP_CHANNEL,
@@ -203,13 +209,24 @@ def train(root: Path, base: Path, args: argparse.Namespace) -> Path:
     return checkpoint
 
 
-def publish(checkpoint: Path, args: argparse.Namespace) -> None:
-    """Put the model where both of its readers look, and prove what landed.
+def publish(checkpoint: Path, root: Path, args: argparse.Namespace) -> None:
+    """Put the model where all of its readers look, and prove what landed.
+
+    Two artifacts, not one. `model.pt` is what the scoring job loads and what
+    SageMaker collects into `model.tar.gz` for the registry; `model.onnx` is the
+    int8 graph the fleet runs, and the digest the manifest carries. Both are
+    hashed here, where the bytes were produced -- a digest taken anywhere else is
+    a digest of a copy.
+
+    Every seed exports, not only the one that ships. The alternative makes
+    `artifact_sha256` mean the ONNX digest for seed 1 and the checkpoint digest
+    for every other seed, which is a field with two meanings and a branch in this
+    function to produce them.
 
     The read-back is the partitioner's and the registration's arrangement: the
     job does not report success on the strength of a `put_object` that returned.
     A truncated upload is exactly the failure the device's digest check is meant
-    to catch at the far end, and catching it here costs one GET.
+    to catch at the far end, and catching it here costs one GET per artifact.
     """
     version = parse_model_version(args.version)
     seed = Seed(args.seed)
@@ -217,32 +234,41 @@ def publish(checkpoint: Path, args: argparse.Namespace) -> None:
 
     model_dir = Path(MODEL_DIR)
     model_dir.mkdir(parents=True, exist_ok=True)
-    local_model = model_dir / ModelArtifact.TORCH.value
-    shutil.copy2(checkpoint, local_model)
 
-    sha256 = digest(local_model)
-    # `sha256sum -c` format, so the device verifies with the tool it already has.
+    local = {ModelArtifact.TORCH: model_dir / ModelArtifact.TORCH.value}
+    shutil.copy2(checkpoint, local[ModelArtifact.TORCH])
+    local[ModelArtifact.ONNX] = export.deployable(
+        checkpoint,
+        export.calibration_frames(root / dataset.IMAGES_DIR, seed),
+        model_dir / ModelArtifact.ONNX.value,
+        args.image_size,
+        WORK,
+    )
+
+    digests = {artifact: digest(path) for artifact, path in local.items()}
+
+    # One file listing both artifacts rather than one file each: that is what the
+    # `sha256sum -c` format is for, and `registry.launch` reads the line it wants
+    # by name.
     local_sha = model_dir / ModelArtifact.SHA256.value
-    local_sha.write_text(f"{sha256}  {ModelArtifact.TORCH.value}\n", encoding="utf-8")
+    local_sha.write_text(sha256sums_document(digests), encoding="utf-8")
 
     client = boto3.client("s3")
-    for artifact, path in ((ModelArtifact.TORCH, local_model), (ModelArtifact.SHA256, local_sha)):
+    for artifact, path in (*local.items(), (ModelArtifact.SHA256, local_sha)):
         key = model_artifact_key(version, seed, artifact)
         client.upload_file(str(path), bucket, key)
         log.info("wrote %s", uri(bucket, key))
 
-    landed = WORK / "readback.pt"
-    torch_key = model_artifact_key(version, seed, ModelArtifact.TORCH)
-    client.download_file(bucket, torch_key, str(landed))
-
-    if digest(landed) != sha256:
-        raise SystemExit(
-            f"the model read back from S3 does not match what was uploaded: {sha256} written, "
-            f"{digest(landed)} read"
-        )
-    landed.unlink()
-
-    log.info("model %s seed %d, sha256 %s", version, seed, sha256)
+    for artifact, sha256 in digests.items():
+        landed = WORK / f"readback-{artifact.value}"
+        client.download_file(bucket, model_artifact_key(version, seed, artifact), str(landed))
+        if digest(landed) != sha256:
+            raise SystemExit(
+                f"{artifact.value} read back from S3 does not match what was uploaded: "
+                f"{sha256} written, {digest(landed)} read"
+            )
+        landed.unlink()
+        log.info("model %s seed %d, %s sha256 %s", version, seed, artifact.value, sha256)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -260,7 +286,7 @@ def main(argv: list[str] | None = None) -> None:
     if base is None:
         raise SystemExit(f"the {BASE_CHANNEL} channel carries no checkpoint to fine-tune from")
 
-    publish(train(root, base, args), args)
+    publish(train(root, base, args), root, args)
 
 
 if __name__ == "__main__":

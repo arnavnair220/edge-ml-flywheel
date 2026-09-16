@@ -54,6 +54,7 @@ from edge_ml_flywheel.evaluation.job import (
     CHAMPION_CHANNEL,
     EVAL_OUTPUT,
     GATES_OUTPUT,
+    INT8_CHANNEL,
     LABELS_CHANNEL,
     MANIFEST_CHANNEL,
     detections_channel,
@@ -67,7 +68,7 @@ from edge_ml_flywheel.evaluation.metrics import (
     image_rows,
     per_class_average_precision,
 )
-from edge_ml_flywheel.gates import DEFAULT, quality_gate
+from edge_ml_flywheel.gates import DEFAULT, edge_gate, quality_gate
 from edge_ml_flywheel.ingest.labels import Box
 from edge_ml_flywheel.scoring import detections as detection_rows
 from edge_ml_flywheel.scoring.job import INPUT_ROOT, OUTPUT_ROOT
@@ -97,6 +98,15 @@ def _parser() -> argparse.ArgumentParser:
         "--champion",
         default=None,
         help="The model to compare against. Absent on a run's first cycle.",
+    )
+    parser.add_argument(
+        "--artifact_bytes",
+        type=int,
+        default=None,
+        help=(
+            "Size of the deployed seed's int8 artifact. Given, the edge gate runs over it and "
+            "the int8 detections channel; absent, the cycle reports no edge verdict."
+        ),
     )
     return parser
 
@@ -163,25 +173,36 @@ def eval_boxes(index: ImageIndex) -> dict[ImageId, tuple[Box, ...]]:
     return {image_id: found[image_id] for image_id in index.image_ids}
 
 
-def seed_cache(truth: COCO, index: ImageIndex, seed: Seed) -> MatchCache:
-    """One seed's scoring pass, matched and kept in the form a resample reads."""
-    root = channel(detections_channel(seed))
+def pass_cache(root: Path, truth: COCO, index: ImageIndex, described: str) -> MatchCache:
+    """One scoring pass, matched and kept in the form a resample reads.
+
+    Taken as a channel root rather than as a seed, because a cycle has two kinds
+    of pass over the same cohort: one per seed at fp32, and one at int8 for the
+    seed that ships. Both are matched against the same ground truth by the same
+    greedy assignment, which is what makes the difference between their scores
+    quantization rather than method.
+    """
     rows = detection_rows.collect(root)
     if not rows:
-        log.warning("seed %d detected nothing at all over %d images", seed, len(index))
+        log.warning("%s detected nothing at all over %d images", described, len(index))
 
     predictions = detection_rows.group(rows)
     results = coco.as_coco_results(truth, coco.detections(predictions, CLASS_SET, index))
     cache = score(truth, results, index)
 
     log.info(
-        "seed %d: %d detections over %d images, cached as %d blocks",
-        seed,
+        "%s: %d detections over %d images, cached as %d blocks",
+        described,
         len(rows),
         len(index),
         cache.n_truth.size,
     )
     return cache
+
+
+def seed_cache(truth: COCO, index: ImageIndex, seed: Seed) -> MatchCache:
+    """One seed's fp32 pass, which is what every reported metric is computed from."""
+    return pass_cache(channel(detections_channel(seed)), truth, index, f"seed {seed}")
 
 
 def champion_caches(
@@ -358,16 +379,35 @@ def main(argv: list[str] | None = None) -> None:
     # Recomputed off the cache rather than read back out of the document above,
     # so the gate reads floats rather than whatever survived a JSON round trip.
     shipped = deployed_seed(seeds)
-    per_class = per_class_average_precision(caches[shipped], all_rows(index), OVERALL)
-    verdict = quality_gate(delta, per_class, CLASS_SET)
-    log.info(
-        "%s gate: %s -- %s",
-        verdict.gate,
-        "pass" if verdict.passed else "FAIL",
-        verdict.reason,
-    )
+    rows = all_rows(index)
+    per_class = per_class_average_precision(caches[shipped], rows, OVERALL)
+    verdicts = [quality_gate(delta, per_class, CLASS_SET)]
 
-    report = report_document(version, champion, seeds, [verdict], delta)
+    # The edge gate, over the artifact that would actually ship. Run in the same
+    # job as the quality gate rather than after it: both verdicts belong to one
+    # report, and a cycle that gated them in two jobs would have two reports to
+    # merge for the sake of skipping a CPU pass on a rejected challenger.
+    if args.artifact_bytes is not None:
+        quantized = pass_cache(channel(INT8_CHANNEL), truth, index, "int8")
+        verdicts.append(
+            edge_gate(
+                fp32_map=average_precision(caches[shipped], rows, OVERALL),
+                int8_map=average_precision(quantized, rows, OVERALL),
+                artifact_bytes=args.artifact_bytes,
+            )
+        )
+    else:
+        log.info("no int8 artifact was measured, so this cycle reports no edge verdict")
+
+    for verdict in verdicts:
+        log.info(
+            "%s gate: %s -- %s",
+            verdict.gate,
+            "pass" if verdict.passed else "FAIL",
+            verdict.reason,
+        )
+
+    report = report_document(version, champion, seeds, verdicts, delta)
     _write_json(report, Path(OUTPUT_ROOT) / GATES_OUTPUT / names["report"])
 
 

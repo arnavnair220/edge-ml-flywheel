@@ -811,11 +811,71 @@ def partition_spec(partition_version: PartitionVersion) -> PartitionSpec:
 
 
 class ModelArtifact(StrEnum):
-    """Filenames under a seed's model prefix."""
+    """Filenames under a seed's model prefix.
+
+    `TORCH` is the checkpoint the scoring job loads. `ONNX` is the int8 graph the
+    fleet runs and the file the manifest's digest names. `SHA256` lists the
+    digests of the other two in the format `sha256sums` reads.
+    """
 
     ONNX = "model.onnx"
     TORCH = "model.pt"
     SHA256 = "model.sha256"
+
+
+# A `sha256sum -c` line is the digest and the filename, and nothing else. A
+# third field is a file this package did not write, not a line to read past.
+_SHA256SUM_FIELDS: Final = 2
+
+
+def sha256sums_document(digests: Mapping[ModelArtifact, str]) -> str:
+    """The `ModelArtifact.SHA256` file, as the training job writes it.
+
+    `sha256sum -c` format -- `<digest>  <filename>`, two spaces, one line per
+    artifact -- so the device verifies its download with the tool it already has
+    rather than with a parser this project ships to it.
+
+    Written here rather than in the job so that the writer and `sha256sums`
+    below cannot disagree about the format. They are the two halves of one file,
+    separated by an S3 object and several hours.
+    """
+    return "".join(
+        f"{digests[artifact]}  {artifact.value}\n" for artifact in sorted(digests, key=str)
+    )
+
+
+def sha256sums(document: str) -> dict[ModelArtifact, str]:
+    """The digests a `ModelArtifact.SHA256` file lists, keyed by artifact.
+
+    Strict about both halves of every line, because this is the last place a
+    malformed digest can be caught with the bytes still nearby: the next reader
+    is a device refusing to load a model, hours later and out of reach. A line
+    naming a file the enum does not know is refused rather than skipped -- an
+    artifact this package cannot name is one nothing here can deploy.
+    """
+    digests: dict[ModelArtifact, str] = {}
+    for number, line in enumerate(document.splitlines(), start=1):
+        if not line.strip():
+            continue
+        fields = line.split()
+        if len(fields) != _SHA256SUM_FIELDS:
+            raise ValueError(f"line {number} is not `<digest>  <filename>`: {line!r}")
+        digest, filename = fields
+        if not _SHA256.match(digest):
+            raise ValueError(f"line {number} is not a lowercase hex sha256: {digest!r}")
+        try:
+            artifact = ModelArtifact(filename)
+        except ValueError:
+            listed = ", ".join(sorted(str(item) for item in ModelArtifact))
+            raise ValueError(
+                f"line {number} names {filename!r}, which is not a model artifact. Named: {listed}"
+            ) from None
+        if artifact in digests:
+            raise ValueError(
+                f"line {number} repeats {filename}, with no way to tell which line is the file"
+            )
+        digests[artifact] = digest
+    return digests
 
 
 # --- Buckets -----------------------------------------------------------------
@@ -1361,12 +1421,14 @@ class ModelManifest:
     design section 7 depends on each one existing and being identifiable at the
     cycle it was trained in. The device agent verifies the digest before loading
     (design section 6), so a truncated download becomes a rejection instead of a
-    model that silently returns nonsense. Which file that is follows the export:
-    `ModelArtifact.TORCH` today, taken where the bytes were produced and
-    published beside them as `ModelArtifact.SHA256`, and `ModelArtifact.ONNX`
-    once the int8 export lands. The field names a digest rather than a file for
-    exactly that reason -- what the device verifies changes, that it verifies
-    does not.
+    model that silently returns nonsense.
+
+    The file it names is `ModelArtifact.ONNX`, the int8 graph, because that is
+    what the device loads and a digest of anything else verifies nothing it
+    does. Every seed exports one, so the field means the same thing for the seed
+    that ships and for the seeds retained beside it. The digest is taken where
+    the bytes were produced and published beside them as `ModelArtifact.SHA256`,
+    which `sha256sums` reads the line out of.
 
     `registry.manifest` serializes this, and the registration step writes it
     before it reads it back.
@@ -1596,14 +1658,42 @@ def scoring_manifest_key(run_id: RunId, cycle: Cycle, cohort: Cohort) -> str:
     return f"{cycle_prefix(run_id, cycle)}scoring/images-{_scored(cohort).value}.manifest"
 
 
-def detections_prefix(version: ModelVersion, seed: Seed, cohort: Cohort) -> str:
+class Precision(StrEnum):
+    """Which build of a model produced a set of detections.
+
+    `FP32` is the checkpoint, which is what the paired comparison, the selector
+    and every reported metric are computed from. `INT8` is the quantized ONNX
+    graph the fleet runs, scored once per cycle over `eval` alone so the edge
+    gate can say what quantization cost.
+
+    A dimension of the detections key rather than a flag on a file, because the
+    two are produced by separate jobs and read by separate consumers, and a
+    quantized box sitting in the prefix the selector reads would rank the pool by
+    the wrong model's uncertainty.
+    """
+
+    FP32 = "fp32"
+    INT8 = "int8"
+
+
+def detections_prefix(
+    version: ModelVersion,
+    seed: Seed,
+    cohort: Cohort,
+    precision: Precision = Precision.FP32,
+) -> str:
     """Where one model-seed's boxes for one cohort land.
 
     Keyed by version and seed because detections are a function of the model, and
     by cohort because the two are written by separate output channels of one job
     and read by separate consumers -- which is the `key=value/` rule's "something
     prunes on it", here a job's upload and a reader's prefix rather than a query
-    engine.
+    engine. By precision for the same reason: the int8 pass is a second job over
+    the same cohort, and the two sets of boxes answer different questions.
+
+    `FP32` is the default because it is the pass every cycle runs and the one
+    every existing reader wants. The segment is written for both, so neither is
+    the unmarked case a reader has to know about.
 
     Under the cycle that produced the model, not the cycle being decided, for
     `eval_prefix`'s reason: a champion is re-compared every cycle without being
@@ -1613,11 +1703,17 @@ def detections_prefix(version: ModelVersion, seed: Seed, cohort: Cohort) -> str:
     padded = _padded("seed", seed, SEED_DIGITS)
     return (
         f"{cycle_prefix(*_locate(version))}detections/version={version}/"
-        f"seed={padded}/cohort={_scored(cohort).value}/"
+        f"seed={padded}/cohort={_scored(cohort).value}/precision={precision.value}/"
     )
 
 
-def detections_key(version: ModelVersion, seed: Seed, cohort: Cohort, part: int = 0) -> str:
+def detections_key(
+    version: ModelVersion,
+    seed: Seed,
+    cohort: Cohort,
+    part: int = 0,
+    precision: Precision = Precision.FP32,
+) -> str:
     """One cohort's detections in one parquet.
 
     Parquet rather than the `.npz` the match cache uses, because these have two
@@ -1627,7 +1723,7 @@ def detections_key(version: ModelVersion, seed: Seed, cohort: Cohort, part: int 
     reader and are indexed rather than filtered, which is why they stay numpy.
     """
     name = _padded("part", part, PART_DIGITS)
-    return f"{detections_prefix(version, seed, cohort)}part-{name}.parquet"
+    return f"{detections_prefix(version, seed, cohort, precision)}part-{name}.parquet"
 
 
 def gate_report_prefix(run_id: RunId, cycle: Cycle) -> str:

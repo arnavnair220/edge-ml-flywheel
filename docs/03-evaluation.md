@@ -62,8 +62,25 @@ The quality gate passes when the mean paired delta is at least +0.005 and the lo
 band over 1,000 resamples clears zero. A class scoring zero AP is a hard failure.
 
 A run's first cycle has no champion, so the delta is absent and the verdict is the collapse check
-alone. `edge` and `canary` are unimplemented and absent from the report rather than recorded as
-passing.
+alone.
+
+The edge gate passes when the int8 artifact is at most 25 MB and retains at least 95% of the fp32
+model's mAP. Both are properties of a file and a number, so the gate is complete without a device;
+p95 latency and cold start are reported off the fleet rather than gated (design §4.3).
+
+The 95% allowance is deliberately looser than design §4.3's 2%. A broken export is a 30% loss or a
+model that detects nothing, and a threshold tight enough to reject a working artifact would stop
+the loop over a number the fleet would never notice. What quantization actually cost is in the
+verdict's reason either way.
+
+Its input is a second pass over `eval` with the quantized graph, run by the scoring job under
+`precision=int8`. That pass is the scoring role's because it loads a model, and this job's role
+holds no model grant at all — so the artifact's size arrives as an argument rather than being read
+off the object here.
+
+A cycle whose training job predates the export has no int8 artifact, and reports no edge verdict
+rather than half of one. `canary` is unimplemented and absent from the report rather than recorded
+as passing.
 
 ---
 

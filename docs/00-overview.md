@@ -5,7 +5,7 @@ budget on the top of that ranking, retrains, proves itself against fixed gates, 
 fleet one device at a time — or rolls back. Each turn is measured in *model improvement per label
 spent*.
 
-The system is decomposed into **nine planes**. Seven sit inside the loop; two wrap it.
+The system is decomposed into **eight planes**. Seven sit inside the loop; one wraps it.
 
 ---
 
@@ -165,27 +165,19 @@ Listed in the order a cycle passes through them.
 | 6 | **Registry and promotion** | Advances a version through an explicit state machine and records every rejection with its reason | No manifest, no promotion; every champion seed artifact is retained, not just the deployed one |
 | 7 | **Edge and fleet** | Publishes the promoted artifact as a Greengrass component, and the service deploys it: verify digest, one device, then two, then the fleet, rolling back on a failed health check | Deployment is a pointer flip, never a container rebuild; rollback is a single command |
 | 8 | **Telemetry and reporting** | Captures what the fleet saw and feeds the charts. The fleet's own ranking is a realism check, not a selector | Every promotion and rejection is charted with its evidence, so the loop's behaviour is read off the record rather than described |
-| 9 | **Experiment and validation** | Runs cycles *as experiments* rather than running inside one: the A/A control | The gate's false-positive rate is measured, not assumed |
-
----
-
-## Plane 9 in more detail
-
-Planes 1-8 turn the loop. Plane 9 establishes that the loop's measurements can be trusted.
-
-- **The A/A test** trains a challenger on a bootstrap resample of the champion's own labels, same
-  seed. Zero new information, so a healthy quality gate must refuse to promote. If it ever promotes,
-  the evaluation machinery itself has a false positive.
-
-The A/A test needs no second selection rule — it changes what the challenger trains on, not how the
-batch was chosen — which is why it is the control this project runs. The two controls that *would*
-need a second rule are deferred. See [planned additions](#planned-additions).
 
 ---
 
 ## Planned additions
 
 Work the design accommodates but does not build.
+
+**The A/A test.** A challenger trained on a bootstrap resample of the champion's own labels at the
+same seed. Zero new information, so a healthy quality gate must refuse to promote, and a promotion
+would mean the evaluation machinery itself has a false positive. Nothing else measures that rate,
+so the supported claim is a gate that rejected honestly on live data rather than a gate whose
+false-positive rate is known. It needs no second selection rule — it changes what the challenger
+trains on, not how the batch was chosen — which makes it the cheapest of the three to add.
 
 **The label-efficiency A/B.** A second run of the same length buying at random instead of by
 uncertainty, orchestration and fleet stripped out, both arms paired on the same seed and the same
@@ -199,8 +191,8 @@ about. Those frames carry the least new information, so the gain should be close
 control cycle that gains about as much as a real one indicates the uncertainty ranking is not the
 source of the improvement.
 
-Both need a second selection rule, and there is deliberately only one: `selection.select` ranks by
-uncertainty and takes no rule argument. Adding an arm therefore means adding a rule and a way to
+Those two need a second selection rule, and there is deliberately only one: `selection.select` ranks
+by uncertainty and takes no rule argument. Adding an arm therefore means adding a rule and a way to
 choose between them, not changing a configuration value. That is the cost of a project with one
 selector, accepted because this is a working flywheel rather than an experiment about selection.
 

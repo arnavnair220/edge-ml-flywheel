@@ -65,6 +65,7 @@ import boto3
 
 from edge_ml_flywheel.conventions import (
     Cycle,
+    Precision,
     Seed,
     new_model_version,
     parse_model_version,
@@ -218,20 +219,38 @@ def score_request(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any
     and the run and cycle are inside its version. Passing all three is how a job
     comes to score a model under a cycle it was not trained in.
 
-    Every field of `Scoring` is a default here. They are the scoring half of the
-    recipe -- resolution, confidence floor, detection cap -- and each is pinned to
-    a value another component depends on, so an execution input for any of them
-    would be a way to score two cycles of one run differently.
+    Every field of `Scoring` but one is a default here. They are the scoring half
+    of the recipe -- resolution, confidence floor, detection cap -- and each is
+    pinned to a value another component depends on, so an execution input for any
+    of them would be a way to score two cycles of one run differently.
+
+    `precision` is the exception, and it is not a recipe value: it names which
+    build of the model this pass runs, and a cycle makes two passes. It comes
+    from the state machine rather than the execution input for that reason -- the
+    two calls are two states, not a setting someone chooses per run.
+
+    The int8 pass takes its compute from `Compute.for_precision` and ignores the
+    execution's `instance_type`, which is the GPU type training and scoring
+    share. int8 is a CPU format, so honouring that input would put the quantized
+    graph on hardware whose runtime falls back to float and measure a model the
+    device will never run.
     """
     version = parse_model_version(str(event["version"]))
     seed = Seed(int(event["seed"]))
+    precision = Precision(str(event.get("precision", Precision.FP32.value)))
 
-    compute = scoring_job.Compute(
-        instance_type=str(event.get("instance_type", scoring_job.Compute().instance_type)),
+    compute = (
+        scoring_job.Compute.for_precision(precision)
+        if precision is Precision.INT8
+        else scoring_job.Compute(
+            instance_type=str(event.get("instance_type", scoring_job.Compute().instance_type)),
+        )
     )
 
-    built = scoring_launch.request(aws, version, seed, scoring_job.Scoring(), compute)
-    log.info("built the scoring request for %s seed %d", version, seed)
+    built = scoring_launch.request(
+        aws, version, seed, scoring_job.Scoring(precision=precision), compute
+    )
+    log.info("built the %s scoring request for %s seed %d", precision.value, version, seed)
     return {"version": version, "seed": seed, "request": built}
 
 

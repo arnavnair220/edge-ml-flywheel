@@ -33,11 +33,8 @@ denominated in labels, so the pipeline reports accuracy gained per label spent a
 - No new data is collected or annotated. BDD100K ships its own ground truth, and the pipeline is
   denied read access to it, so a frame can only be labeled by buying it from the oracle against a
   metered budget.
-- Selection is validated by controls inside the run: an A/A test and a confidence-ordered cycle. The
-  label-efficiency comparison against a random-sampling arm is deferred; see
-  [planned additions](docs/00-overview.md#planned-additions).
 
 ## Documentation
 
 Start with the [architecture overview](docs/00-overview.md) — definitions, the loop diagram, and
-the nine planes the system is built from. Each plane has its own document under [docs/](docs/).
+the eight planes the system is built from. Each plane has its own document under [docs/](docs/).

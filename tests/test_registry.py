@@ -47,6 +47,7 @@ from edge_ml_flywheel.conventions import (
     model_package_group,
     model_seed_prefix,
     new_model_version,
+    sha256sums_document,
     table_name,
 )
 from edge_ml_flywheel.registry import launch, package
@@ -63,6 +64,11 @@ VERSION = new_model_version(RUN, 3)
 COMMIT = "0" * 40
 DIGEST = "a" * 64
 OTHER_DIGEST = "b" * 64
+
+# The checkpoint's digest, deliberately not `DIGEST`. Both artifacts are listed
+# in one `model.sha256`, and a fixture where they matched would pass whichever
+# line the registration happened to read -- which is the thing being checked.
+TORCH_DIGEST = "c" * 64
 
 PASSED = GateResult(gate="quality", passed=True, reason="mean paired delta +0.0120")
 FAILED = GateResult(gate="quality", passed=False, reason="the band does not clear zero")
@@ -331,7 +337,9 @@ def cycle_output(
         client.put_object(
             Bucket=artifacts,
             Key=model_artifact_key(VERSION, seed, ModelArtifact.SHA256),
-            Body=f"{DIGEST}  {ModelArtifact.TORCH.value}\n".encode(),
+            Body=sha256sums_document(
+                {ModelArtifact.ONNX: DIGEST, ModelArtifact.TORCH: TORCH_DIGEST}
+            ).encode(),
         )
         if tarball:
             client.put_object(

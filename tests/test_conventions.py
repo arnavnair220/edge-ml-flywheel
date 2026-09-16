@@ -72,6 +72,8 @@ from edge_ml_flywheel.conventions import (
     run_prefix,
     run_slug,
     run_started_at,
+    sha256sums,
+    sha256sums_document,
     table_name,
     telemetry_prefix,
     training_manifest_key,
@@ -740,6 +742,61 @@ class TestDerivedKeys:
 
 
 # --- Artifacts bucket ---
+
+
+class TestSha256Sums:
+    """The `model.sha256` file, which the training job writes and both the
+    registration and the device read. The format is `sha256sum -c`'s, so the
+    device verifies its download with the tool it already has."""
+
+    def test_round_trips(self) -> None:
+        digests = {ModelArtifact.ONNX: "a" * 64, ModelArtifact.TORCH: "b" * 64}
+
+        assert sha256sums(sha256sums_document(digests)) == digests
+
+    def test_is_the_format_sha256sum_reads(self) -> None:
+        """Two spaces between the digest and the filename, one line per artifact,
+        and a trailing newline. Written as a literal rather than re-derived: this
+        is a golden string for a tool outside the project."""
+        document = sha256sums_document({ModelArtifact.ONNX: "a" * 64})
+
+        assert document == f"{'a' * 64}  model.onnx\n"
+
+    def test_orders_by_filename(self) -> None:
+        """So two jobs that published the same artifacts publish the same bytes."""
+        digests = {ModelArtifact.TORCH: "b" * 64, ModelArtifact.ONNX: "a" * 64}
+
+        assert sha256sums_document(digests).splitlines()[0].endswith("model.onnx")
+
+    def test_reads_a_file_written_by_sha256sum(self) -> None:
+        """The other direction of the same claim: a file this project did not
+        write, in the format the tool emits, is a file it can read."""
+        assert sha256sums(f"{'a' * 64}  model.onnx\n{'b' * 64}  model.pt\n") == {
+            ModelArtifact.ONNX: "a" * 64,
+            ModelArtifact.TORCH: "b" * 64,
+        }
+
+    def test_ignores_blank_lines(self) -> None:
+        assert sha256sums(f"\n{'a' * 64}  model.onnx\n\n") == {ModelArtifact.ONNX: "a" * 64}
+
+    @pytest.mark.parametrize(
+        ("document", "expected"),
+        [
+            (f"{'a' * 64}\n", "not `<digest>  <filename>`"),
+            (f"{'a' * 64}  model.onnx extra\n", "not `<digest>  <filename>`"),
+            (f"{'A' * 64}  model.onnx\n", "not a lowercase hex sha256"),
+            (f"{'a' * 63}  model.onnx\n", "not a lowercase hex sha256"),
+            (f"{'a' * 64}  model.engine\n", "not a model artifact"),
+            (f"{'a' * 64}  model.onnx\n{'b' * 64}  model.onnx\n", "repeats model.onnx"),
+        ],
+        ids=["one field", "three fields", "uppercase", "short", "unknown file", "repeated"],
+    )
+    def test_refuses_a_malformed_line(self, document: str, expected: str) -> None:
+        """Strictly, because this is the last place a bad digest is near the
+        bytes. The next reader is a device refusing to load a model, hours later
+        and out of reach."""
+        with pytest.raises(ValueError, match=re.escape(expected)):
+            sha256sums(document)
 
 
 class TestModelManifest:

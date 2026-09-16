@@ -31,17 +31,16 @@ from typing import Final
 class Gate(StrEnum):
     """The four checks a cycle runs, in order.
 
-    All four named though only two are implemented, for the reason `Selector`
+    All four named though only three are implemented, for the reason `Selector`
     names its three: a name reserved in advance is one the report format and the
     state machine can be written against before the thing behind it exists.
 
-    `EDGE` and `CANARY` have no predicate here, and the omission is deliberate
-    rather than pending. Their inputs are p95 latency on a Graviton device and
-    two replay hours of device telemetry, and nothing in the project produces
-    either yet. A predicate written now would be a pure function over a
-    measurement shape invented to suit it, tested against that same invention,
-    and rewritten when the devices report what they can actually measure. Both
-    land with their producers in phase 5, where the fleet first exists.
+    `CANARY` has no predicate here, and the omission is deliberate rather than
+    pending. Its input is two replay hours of device telemetry, and nothing in
+    the project produces that yet. A predicate written now would be a pure
+    function over a measurement shape invented to suit it, tested against that
+    same invention, and rewritten when the devices report what they can actually
+    measure. It lands with its producer in phase 5, where the fleet first exists.
     """
 
     DATA = "data"
@@ -70,11 +69,27 @@ class Thresholds:
     floor is the condition doing more of the work. It is left at the design's
     number rather than re-derived from a guess: the design says to confirm it
     against real numbers, and there are none yet.
+
+    `max_quantization_loss` is the edge gate's, and it is deliberately looser
+    than design section 4.3's 2%. That number was written before anything had
+    been quantized. What the project needs from this gate is that a broken export
+    cannot ship, and a broken export is not a 3% model -- it is a 30% one, or a
+    graph that detects nothing. A threshold tight enough to reject a slightly
+    lossy but working artifact would stop the loop over a number the fleet would
+    never notice, and what quantization actually cost is in the verdict's reason
+    either way. Tighten it once several cycles have said what the real spread is.
+
+    `max_artifact_bytes` is design section 4.3's, unchanged. It is not a number
+    the export is near -- a quantized YOLO11n is a few megabytes against a 25 MB
+    ceiling -- which is the point: it catches an export that silently wrote the
+    fp32 graph, not one that is a little large.
     """
 
     min_new_images: int = 250
     min_instances_per_class: int = 10
     min_mean_delta: float = 0.005
+    max_quantization_loss: float = 0.05
+    max_artifact_bytes: int = 25 * 1024 * 1024
 
     def __post_init__(self) -> None:
         # Each of these admits everything rather than being obviously broken: a
@@ -85,6 +100,15 @@ class Thresholds:
         if self.min_instances_per_class < 1:
             raise ValueError(
                 f"a class-instance floor of {self.min_instances_per_class} is not a floor"
+            )
+        if not 0.0 < self.max_quantization_loss < 1.0:
+            raise ValueError(
+                f"a quantization allowance of {self.max_quantization_loss} is not a fraction "
+                f"between refusing every export and admitting one that detects nothing"
+            )
+        if self.max_artifact_bytes < 1:
+            raise ValueError(
+                f"an artifact ceiling of {self.max_artifact_bytes} bytes ships nothing"
             )
         if self.min_mean_delta <= 0.0:
             raise ValueError(

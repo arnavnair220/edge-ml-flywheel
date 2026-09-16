@@ -36,6 +36,7 @@ from edge_ml_flywheel.conventions import (
     ImageId,
     ModelVersion,
     PartitionVersion,
+    Precision,
     RunId,
     Seed,
     cohort_labels_prefix,
@@ -264,6 +265,62 @@ class TestArguments:
         arguments = a_request(champion=CHAMPION)["AppSpecification"]["ContainerArguments"]
         for flag in ("--min_mean_delta", "--resamples", "--confidence"):
             assert flag not in arguments
+
+
+class TestTheEdgeMeasurement:
+    """What the job is given so it can judge the artifact that ships.
+
+    The size arrives as an argument rather than being read off the object,
+    because this role holds no model grant at all -- `infra/evaluation.tf` keeps
+    `models/*` off every statement, which is what lets the account answer "what
+    could have contaminated the eval" with two identities and one answer each.
+    """
+
+    SIZE = 4 * 1024 * 1024
+
+    def test_the_int8_boxes_arrive_on_their_own_channel(self) -> None:
+        source = channel(a_request(artifact_bytes=self.SIZE), job.INT8_CHANNEL)
+        assert source is not None
+        assert source["S3Input"]["S3Uri"].endswith(
+            detections_prefix(CHALLENGER, Seed(1), Cohort.EVAL, Precision.INT8)
+        )
+
+    def test_it_is_the_deployed_seed_that_is_measured(self) -> None:
+        """Exactly one artifact ships, so exactly one is quantized. The lowest
+        seed, matching `entrypoint.deployed_seed`."""
+        source = channel(
+            a_request(seeds=(Seed(3), Seed(1)), artifact_bytes=self.SIZE), job.INT8_CHANNEL
+        )
+        assert source is not None
+        assert "seed=1/" in source["S3Input"]["S3Uri"]
+
+    def test_the_size_is_passed_to_the_container(self) -> None:
+        arguments = a_request(artifact_bytes=self.SIZE)["AppSpecification"]["ContainerArguments"]
+        assert arguments[arguments.index("--artifact_bytes") + 1] == str(self.SIZE)
+
+    def test_a_cycle_with_no_export_takes_neither_the_channel_nor_the_flag(self) -> None:
+        """Both halves are absent together: no export means no int8 detections
+        either, so the cycle reports no edge verdict rather than half of one."""
+        request = a_request()
+
+        assert channel(request, job.INT8_CHANNEL) is None
+        assert "--artifact_bytes" not in request["AppSpecification"]["ContainerArguments"]
+
+    def test_an_empty_artifact_is_refused_rather_than_measured(self) -> None:
+        """Zero bytes is a failed upload, and gating on it would report a size
+        pass for a file that is not a model."""
+        with pytest.raises(ValueError, match="is not an artifact"):
+            a_target(artifact_bytes=0)
+
+    def test_the_channel_counts_against_the_input_cap(self) -> None:
+        """SageMaker caps a Processing job at ten inputs, and the int8 channel is
+        one of them -- so the seed ceiling drops by one when an edge verdict is
+        being produced, and that is refused here rather than by an API error
+        naming a limit without naming the seed list."""
+        seeds = tuple(Seed(seed) for seed in range(1, 8))
+
+        with pytest.raises(ValueError, match="input channels"):
+            a_target(seeds=seeds, champion=CHAMPION, artifact_bytes=self.SIZE)
 
 
 class TestOutputNames:

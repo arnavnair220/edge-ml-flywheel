@@ -17,6 +17,7 @@ from edge_ml_flywheel.conventions import (
     Cycle,
     DetectionRow,
     ImageId,
+    Precision,
     RunId,
     Seed,
     detections_key,
@@ -208,7 +209,25 @@ class TestTheKey:
         fresh copy of an unchanged answer every time."""
         key = detections_key(new_model_version(RUN, Cycle(3)), Seed(1), Cohort.EVAL)
         assert key.startswith(f"run_id={RUN}/cycle=003/")
-        assert key.endswith("cohort=eval/part-00000.parquet")
+        assert key.endswith("cohort=eval/precision=fp32/part-00000.parquet")
+
+    def test_fp32_is_the_default_and_is_still_written_out(self) -> None:
+        """Marked rather than implied. The fp32 pass is the one every reader
+        wants, but leaving it unmarked would make it the case a reader has to
+        know about to address."""
+        assert detections_key(VERSION, Seed(1), Cohort.EVAL) == detections_key(
+            VERSION, Seed(1), Cohort.EVAL, precision=Precision.FP32
+        )
+
+    def test_the_two_precisions_do_not_collide(self) -> None:
+        """Same model, same seed, same cohort, two passes. Without the segment
+        the int8 boxes would overwrite the ones the selector and the paired
+        comparison read."""
+        fp32 = detections_key(VERSION, Seed(1), Cohort.EVAL, precision=Precision.FP32)
+        int8 = detections_key(VERSION, Seed(1), Cohort.EVAL, precision=Precision.INT8)
+
+        assert fp32 != int8
+        assert int8.endswith("cohort=eval/precision=int8/part-00000.parquet")
 
     def test_no_key_exists_for_a_cohort_nothing_scores(self) -> None:
         """The gate produces the path rather than being a check performed before
