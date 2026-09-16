@@ -57,6 +57,7 @@ from edge_ml_flywheel.conventions import (
     training_manifest_key,
     uri,
 )
+from edge_ml_flywheel.evaluation import job as evaluation
 from edge_ml_flywheel.run import registration as reg
 from edge_ml_flywheel.scoring import job as scoring
 from edge_ml_flywheel.training import images, job, labels
@@ -69,13 +70,13 @@ _CODE_ROOT: Final = "edge_ml_flywheel"
 _CONTAINER_DIR: Final = "container"
 _REQUIREMENTS: Final = "requirements.txt"
 
-# One archive, staged once per cycle, unpacked by both of the cycle's jobs. The
-# training entry point is at the root because script mode requires it there; the
-# scoring one is because `scoring.job.container_entrypoint` names that path in a
-# shell command. Neither job runs the other's file, and packing both is what
-# makes the code that scored a model the same tree that trained it -- one
-# `git_commit` in the manifest covering both halves of the cycle.
-_ROOT_FILES: Final = (job.ENTRY_POINT, scoring.ENTRY_POINT, _REQUIREMENTS)
+# One archive, staged once per cycle, unpacked by all three of the cycle's jobs.
+# The training entry point is at the root because script mode requires it there;
+# the other two are because `scoring.job.container_entrypoint` names their paths
+# in a shell command. No job runs another's file, and packing all three is what
+# makes the code that gated a model the same tree that trained and scored it --
+# one `git_commit` in the manifest covering the whole cycle.
+_ROOT_FILES: Final = (job.ENTRY_POINT, scoring.ENTRY_POINT, evaluation.ENTRY_POINT, _REQUIREMENTS)
 
 # Excluded from the archive: compiled bytecode is a function of an interpreter
 # that is not the container's, and shipping it invites a stale `.pyc` shadowing

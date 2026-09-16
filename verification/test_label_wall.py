@@ -41,12 +41,14 @@ frozen file overwritten by its own test.
 
 **What is deliberately not checked here.** That an allowlist still *admits* its
 members: the oracle loader exercises `label_reader_arns` as a real job whose
-whole function is reading those files, `eval_label_reader_arns` is empty and so
-admits nobody to check, and the partitioner's write exemption is exercised by the
-partitioner. Nor that Phase 3's training role is refused, which joins this suite
-when that role exists. Creating a stand-in for any of them would mean a standing
-role that can read or rewrite ground truth and be assumed from anywhere in the
-account, which is the exemption `storage.tf` refuses on purpose.
+whole function is reading those files, `eval_label_reader_arns` is exercised by
+the evaluation job -- whose whole function is matching against those boxes, so a
+cycle that produces a gate report is that allowlist working -- and the
+partitioner's write exemption is exercised by the partitioner. Nor that the
+training and scoring roles are refused, which needs a suite that can assume them.
+Creating a stand-in for any of them would mean a standing role that can read or
+rewrite ground truth and be assumed from anywhere in the account, which is the
+exemption `storage.tf` refuses on purpose.
 """
 
 import os
@@ -237,12 +239,14 @@ class TestTheEvalWall:
     def test_an_eval_label_cannot_be_read(
         self, s3: Any, bucket: str, partition_version: PartitionVersion
     ) -> None:
-        """Nobody at all, rather than nobody outside an allowlist.
+        """Nobody outside an allowlist of exactly one.
 
-        `eval_label_reader_arns` is empty today, so this deny carries no
-        condition and the identity running the suite is refused for the same
-        reason every other identity is. A reader added in Phase 3 makes this the
-        allowlist test the label wall above already is.
+        `eval_label_reader_arns` holds the evaluation role and nothing else, so
+        this is now the same shape of test as the label wall above: the identity
+        running the suite is an administrator, is not that role, and is refused.
+        An operator who can read these boxes can read the answer key to every
+        number the project reports, which is why the exemption is one job rather
+        than one person.
         """
         key = cohort_labels_key(partition_version, Cohort.EVAL)
         with pytest.raises(ClientError) as raised:

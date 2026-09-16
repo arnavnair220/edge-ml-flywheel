@@ -82,7 +82,7 @@ REQUIREMENTS: Final = "requirements.txt"
 UNPACKED: Final = "/opt/ml/processing/code"
 
 
-def container_entrypoint() -> list[str]:
+def container_entrypoint(entry_point: str = ENTRY_POINT) -> list[str]:
     """The command the container runs, unpacking the cycle's own source archive.
 
     A Processing job has no framework toolkit: SageMaker starts the image with
@@ -96,8 +96,14 @@ def container_entrypoint() -> list[str]:
     missing package and reports the import error as the fault, several minutes
     after the real one.
 
-    The trailing `ENTRY_POINT` is `$0`, which is what makes `"$@"` expand to the
+    The trailing `entry_point` is `$0`, which is what makes `"$@"` expand to the
     `ContainerArguments` SageMaker appends rather than swallowing the first one.
+
+    The argument is what makes this one definition rather than two. A cycle runs
+    two Processing jobs -- scoring and evaluation -- from one archive under one
+    `git_commit`, and they differ in the file at the root that is run and in
+    nothing else about how the container starts. A second copy of these four
+    lines would be a second place for the unpack path or the `-e` to go missing.
     """
     script = "; ".join(
         (
@@ -105,10 +111,10 @@ def container_entrypoint() -> list[str]:
             f"mkdir -p {UNPACKED}",
             f"tar xzf {INPUT_ROOT}/{CODE_CHANNEL}/{TRAINING_CODE_FILE} -C {UNPACKED}",
             f"pip install --no-cache-dir --quiet -r {UNPACKED}/{REQUIREMENTS}",
-            f'exec python {UNPACKED}/{ENTRY_POINT} "$@"',
+            f'exec python {UNPACKED}/{entry_point} "$@"',
         )
     )
-    return ["bash", "-c", script, ENTRY_POINT]
+    return ["bash", "-c", script, entry_point]
 
 
 @dataclass(frozen=True, slots=True)

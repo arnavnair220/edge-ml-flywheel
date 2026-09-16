@@ -1594,6 +1594,18 @@ def detections_key(version: ModelVersion, seed: Seed, cohort: Cohort, part: int 
     return f"{detections_prefix(version, seed, cohort)}part-{name}.parquet"
 
 
+def gate_report_prefix(run_id: RunId, cycle: Cycle) -> str:
+    """The directory the report lands in, which is what an output channel names.
+
+    Split out of `gate_report_key` for `detections_prefix`' reason: SageMaker
+    uploads a Processing output channel by prefix and the container writes a file
+    under it, so the two halves of that key are addressed by two callers. Deriving
+    the directory by trimming the key at the call site would be the one spelling
+    `conventions` exists to prevent.
+    """
+    return f"{cycle_prefix(run_id, cycle)}gates/"
+
+
 def gate_report_key(run_id: RunId, cycle: Cycle, suffix: str = "json") -> str:
     """Per cycle, not per model: the report covers the comparison, not one side.
 
@@ -1601,7 +1613,7 @@ def gate_report_key(run_id: RunId, cycle: Cycle, suffix: str = "json") -> str:
     would be a blob in a database. The log holds the event and a `detail_uri`
     pointing here.
     """
-    return f"{cycle_prefix(run_id, cycle)}gates/report.{_token('suffix', suffix)}"
+    return f"{gate_report_prefix(run_id, cycle)}report.{_token('suffix', suffix)}"
 
 
 def selection_report_key(run_id: RunId, cycle: Cycle) -> str:

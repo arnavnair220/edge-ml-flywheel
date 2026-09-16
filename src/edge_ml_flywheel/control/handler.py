@@ -1,17 +1,20 @@
 """One Lambda, one entry point, dispatching on a step name.
 
-Four steps today, because four of a cycle's states need Python that already
+Five steps today, because five of a cycle's states need Python that already
 exists: `prepare` writes the cycle's image manifest and source archive,
 `train_request` builds one seed's `CreateTrainingJob` request, `score_prepare`
-writes the two manifests naming what this cycle scores, and `score_request`
-builds one seed's `CreateProcessingJob` request. The state machine hands the
-last two to `sagemaker:createTrainingJob.sync` and
+writes the two manifests naming what this cycle scores, `score_request` builds
+one seed's `CreateProcessingJob` request, and `evaluate_request` builds the one
+that matches those detections against ground truth. The state machine hands the
+three request steps to `sagemaker:createTrainingJob.sync` and
 `sagemaker:createProcessingJob.sync`.
 
-**The two `*_request` steps build and do not call**, for the reason given below,
-and the two `*_prepare` steps run once per cycle rather than once per seed. Both
-pairs are the same split: what a cycle hands its seeds is written before the Map,
-and what one seed does with it is resolved inside.
+**The `*_request` steps build and do not call**, for the reason given below, and
+the two `*_prepare` steps run once per cycle rather than once per seed. Both are
+the same split: what a cycle hands its seeds is written before the Map, and what
+one seed does with it is resolved inside. `evaluate_request` sits on the cycle
+side of that line even though it follows a Map -- the paired delta is a mean over
+same-seed differences, so every seed belongs to one job.
 
 **One function rather than one Lambda per step.** The steps share their whole
 context -- a session, the bucket names, the run registration -- and none of them
@@ -53,6 +56,8 @@ from edge_ml_flywheel.conventions import (
     parse_model_version,
     parse_run_id,
 )
+from edge_ml_flywheel.evaluation import job as evaluation_job
+from edge_ml_flywheel.evaluation import launch as evaluation_launch
 from edge_ml_flywheel.scoring import job as scoring_job
 from edge_ml_flywheel.scoring import launch as scoring_launch
 from edge_ml_flywheel.training import job, launch
@@ -214,6 +219,40 @@ def score_request(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any
     return {"version": version, "seed": seed, "request": built}
 
 
+def evaluate_request(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the cycle's `CreateProcessingJob` request and return it unstarted.
+
+    Takes every seed at once, unlike `score_request`. A paired delta is a mean
+    over same-seed differences, so the comparison cannot be divided across jobs
+    and the seed list is the argument rather than the Map item.
+
+    `champion` is optional and absent today. Nothing records a champion yet --
+    `Promote` is still a stub -- so every cycle evaluates as its run's baseline,
+    and the quality gate says so rather than comparing against nothing. The
+    argument exists here because the comparison path is built and tested; what is
+    missing is the step that would name a model to compare against.
+
+    No `instance_type`, unlike the other two request steps. The one an execution
+    may set is the GPU type training and scoring share, and this job is numpy
+    over cached arrays -- so `job.Compute`'s CPU default is not a default a caller
+    may override into something that costs ten times as much to run the same
+    addition.
+    """
+    version = parse_model_version(str(event["version"]))
+    seeds = tuple(Seed(int(seed)) for seed in event["seeds"])
+
+    champion = event.get("champion")
+    built = evaluation_launch.request(
+        aws,
+        version,
+        seeds,
+        evaluation_job.Compute(),
+        parse_model_version(str(champion)) if champion else None,
+    )
+    log.info("built the evaluation request for %s at seeds %s", version, list(seeds))
+    return {"version": version, "seeds": list(seeds), "request": built}
+
+
 # The dispatch table, and the whole of this module's control flow. The keys are
 # the strings the ASL passes, so they are part of the interface between the two
 # files and are spelled once each.
@@ -222,6 +261,7 @@ STEPS: Final[Mapping[str, Callable[[boto3.Session, Mapping[str, Any]], dict[str,
     "train_request": train_request,
     "score_prepare": score_prepare,
     "score_request": score_request,
+    "evaluate_request": evaluate_request,
 }
 
 

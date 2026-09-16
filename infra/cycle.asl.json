@@ -224,17 +224,53 @@
         "seeds_scored": "{% $states.result %}"
       },
       "Output": {},
+      "Next": "EvaluateRequest"
+    },
+
+    "EvaluateRequest": {
+      "Comment": "`ScoringRequest`'s arrangement for the job that reads ground truth: the request is built by the same function a CLI calls, so this file is a second caller of one definition rather than a second definition written in a language with no tests. One job and not a Map, because a paired delta is a mean over same-seed differences and a comparison cannot be divided across jobs -- so the whole seed list goes in one payload, taken from what `Score` assigned rather than from the execution input, and a seed that failed to score is a seed nothing tries to evaluate. `instance_type` is deliberately absent: the one an execution may set is the GPU type training and scoring share, and this job is numpy over cached arrays.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${control_function_arn}",
+        "Payload": "{% {'step': 'evaluate_request', 'version': $seeds_scored[0].version, 'seeds': [$seeds_scored.seed]} %}"
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
       "Next": "Evaluate"
     },
 
     "Evaluate": {
-      "Comment": "STUB. Replaced by a Processing job that reads the detections `Score` wrote, matches them against the eval cohort's ground truth into the per-image match arrays `evaluation.match` caches, runs the four gates over those, and writes the per-slice regression report under the cycle prefix. That job is the one principal in the account admitted to `labels/cohort=eval/` -- scoring deliberately holds no label grant, so the matching is where the two halves meet.",
-      "Type": "Pass",
+      "Comment": "The job that matches this cycle's detections against the eval cohort's ground truth, caches the per-image match arrays, runs the paired bootstrap and writes the gate report. It is the one principal in the account admitted to `labels/cohort=eval/` -- scoring deliberately holds no label grant, so this is where the two halves of the plane meet. `.sync` owns the wait for `ScoreSeed`'s reasons, and a restart is safe for the same one: the job reads frozen inputs and overwrites its own outputs. A failed gate is a completed job -- the verdict is the product, and it is in the report for `Register` to read -- so a States.TaskFailed here is a job that could not reach a verdict at all.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sagemaker:createProcessingJob.sync",
+      "Arguments": "{% $states.input.request %}",
+      "Output": {},
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 60,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
       "Next": "Register"
     },
 
     "Register": {
-      "Comment": "STUB. Replaced by the Model Registry step that writes the manifest, checks it against the run registration, and records the verdict with its reason. It assigns `passed` because the branch below is real today and needs something to branch on; the real step assigns the gates' actual verdict.",
+      "Comment": "STUB. Replaced by the Model Registry step that writes the manifest, checks it against the run registration, and records the verdict with its reason. The verdict it will record is already written: `Evaluate` puts it at `conventions.gate_report_key`, so what this step is missing is the read and the manifest, not the decision. It assigns `passed` because the branch below is real today and needs something to branch on.",
       "Type": "Pass",
       "Assign": { "passed": true },
       "Next": "Passed"

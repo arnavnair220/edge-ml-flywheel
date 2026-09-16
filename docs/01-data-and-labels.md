@@ -387,10 +387,10 @@ oracle can address the split they are drawn from. Zero image-ID overlap between 
 `eval` is a hard gate failure with no override, and is the backstop rather than the mechanism.
 
 The eval boxes exist a second time under `labels/cohort=eval/`, outside the `raw/labels/` deny.
-`EvalLabelsAreScoringOnly` denies reads on that prefix to every principal, with no exemption. The
-scoring job needs none: it runs a model over images and writes the detections back, and its own
-policy denies every label prefix. The exemption belongs to the job that matches those detections
-against ground truth, which is named there when the `Evaluate` step is built. `cohort=bootstrap/`
+`EvalLabelsAreScoringOnly` denies reads on that prefix to every principal but one. The scoring job is
+not that one: it runs a model over images and writes the detections back, and its own policy denies
+every label prefix. The exemption belongs to the evaluation job that matches those detections against
+ground truth, which is the single ARN on `eval_label_reader_arns`. `cohort=bootstrap/`
 carries no read deny, because training owns those 8,000 labels. Both prefixes are write-denied to
 every principal but the partitioner by `LabelsAreFrozenExceptThePartitioner`, so cycle eight's number
 is comparable to cycle one's.

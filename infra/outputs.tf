@@ -68,6 +68,16 @@ output "training_role_arn" {
   value       = aws_iam_role.training.arn
 }
 
+output "scoring_role_arn" {
+  description = "SageMaker scoring jobs run as this. It reads images and a checkpoint, and can read no label anywhere."
+  value       = aws_iam_role.scoring.arn
+}
+
+output "evaluation_role_arn" {
+  description = "SageMaker evaluation jobs run as this. The one principal in the account admitted to labels/cohort=eval/."
+  value       = aws_iam_role.evaluation.arn
+}
+
 # An ARN rather than a name, unlike the buckets and tables: the one consumer is
 # `aws stepfunctions start-execution --state-machine-arn`, which takes an ARN.
 output "cycle_state_machine_arn" {
@@ -76,7 +86,7 @@ output "cycle_state_machine_arn" {
 }
 
 output "control_function_name" {
-  description = "The control plane's Lambda. Writes a cycle's training inputs and builds one seed's training request."
+  description = "The control plane's Lambda. Writes a cycle's job inputs and builds the training, scoring and evaluation requests."
   value       = aws_lambda_function.control.function_name
 }
 

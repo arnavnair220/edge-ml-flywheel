@@ -63,8 +63,17 @@ DLC_ACCOUNT: Final = "763104351884"
 # Turing, so the `ml.g4dn.xlarge` T4 in the cost model is unaffected.
 #
 # A tag and not `latest`. The container is half of what `recipe_version` means.
+#
+# `DLC_CPU_TAG` is the same build of the same framework version without CUDA,
+# and it exists for the one job in a cycle that holds no model: the evaluation
+# Processing job is numpy over cached arrays, so it runs on a CPU instance and a
+# GPU image there is a multi-gigabyte pull for drivers nothing loads. Pinned
+# beside its sibling rather than in `evaluation.job`, so the two tags cannot
+# drift to different framework versions -- which would mean the interpreter and
+# the pyarrow the two halves of the plane run under stopped matching.
 DLC_REPOSITORY: Final = "pytorch-training"
 DLC_TAG: Final = "2.9.0-gpu-py312-cu130-ubuntu22.04-sagemaker"
+DLC_CPU_TAG: Final = "2.9.0-cpu-py312-ubuntu22.04-sagemaker"
 
 # Where SageMaker puts a channel and where it collects the model, both fixed by
 # the service. Spelled here because `entrypoint` reads them and this module
@@ -108,15 +117,19 @@ MAX_JOB_NAME: Final = 63
 _ATTEMPT_FORMAT: Final = "%H%M%S"
 
 
-def image_uri(region: str) -> str:
+def image_uri(region: str, tag: str = DLC_TAG) -> str:
     """The prebuilt container this job runs in.
 
     No ECR image of our own, so there is nothing to build, scan or keep patched:
     the container plus a `requirements.txt` is the whole environment. SageMaker
     pulls a first-party image with the service's own credentials, which is why
     the training role holds no ECR grant.
+
+    `tag` defaults to the GPU build, which is what a training job and the scoring
+    job that loads the same weights both want. The evaluation job passes
+    `DLC_CPU_TAG`, being the one job in a cycle with no model to load.
     """
-    return f"{DLC_ACCOUNT}.dkr.ecr.{region}.amazonaws.com/{DLC_REPOSITORY}:{DLC_TAG}"
+    return f"{DLC_ACCOUNT}.dkr.ecr.{region}.amazonaws.com/{DLC_REPOSITORY}:{tag}"
 
 
 def job_name(version: ModelVersion, seed: Seed, attempt: datetime) -> str:
