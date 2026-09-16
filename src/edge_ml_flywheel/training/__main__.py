@@ -10,14 +10,15 @@ Three commands in the order a cycle uses them:
 when the bucket has none, so a fresh account bootstraps on its first cycle. The
 command survives for the case that file has to come from somewhere other than
 its release URL, which is what `--weights` supplies. `prepare` is run once per
-cycle, because the manifest it writes is what all five seeds train on and is the
-record of what the challenger was trained on. `launch` is run once per seed.
+cycle, because the manifest it writes is what every seed of that cycle trains on
+and is the record of what the challenger was trained on. `launch` is run once
+per seed.
 
-That split is why the seed count is not a flag here. Five seeds are five jobs
-over one prepared cycle, run in parallel from a Step Functions `Map` once the
-state machine exists (design section 4.2); by hand, they are five invocations of
-`launch`. A `--seeds 5` flag would be a loop in a CLI competing with the `Map`
-state that is meant to own it.
+That split is why the seed count is not a flag here. A cycle trains one seed
+(design section 4.2), and a run that wants the seed spread instead trains more
+jobs over the one prepared cycle -- in parallel from a Step Functions `Map`, or
+by hand as a second invocation of `launch`. A `--seeds` flag would be a loop in
+a CLI competing with the `Map` state that is meant to own it.
 
 Logging goes to stderr and the job name to stdout, the way `run register` puts
 the run ID there: the name is what `wait` and every console lookup take.
@@ -76,11 +77,6 @@ def _parser() -> argparse.ArgumentParser:
     started.add_argument("--batch", type=int, default=job.Recipe(epochs=1).batch)
     started.add_argument("--instance-type", default=job.Compute().instance_type)
     started.add_argument(
-        "--on-demand",
-        action="store_true",
-        help="Turn managed spot off. Spot is the default and an interrupt restarts the job.",
-    )
-    started.add_argument(
         "--wait",
         action="store_true",
         help="Block until the job stops, then report the channel download time.",
@@ -122,7 +118,7 @@ def main(argv: list[str] | None = None) -> None:
             version,
             Seed(args.seed),
             job.Recipe(epochs=args.epochs, batch=args.batch),
-            job.Compute(instance_type=args.instance_type, use_spot=not args.on_demand),
+            job.Compute(instance_type=args.instance_type),
         )
         print(name)
 

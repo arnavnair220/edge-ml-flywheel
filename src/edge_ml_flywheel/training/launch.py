@@ -79,9 +79,9 @@ _EPOCH: Final = 0
 
 _POLL_SECONDS: Final = 30
 
-# Where a training job stops. `Stopped` is in here because a managed spot job
-# that ran out of `MaxWaitTimeInSeconds` waiting for capacity ends this way, and
-# it is a result rather than a hang.
+# Where a training job stops. `Stopped` is in here because a job stopped by hand
+# or by an aborted execution ends this way, and it is a result rather than a
+# hang.
 _TERMINAL: Final = frozenset({"Completed", "Failed", "Stopped"})
 
 
@@ -280,10 +280,10 @@ def prepare(
     """Write this cycle's two inputs -- the image manifest and the source archive
     -- and return how many images the manifest names.
 
-    Both at once, and once per cycle rather than once per seed, because the five
-    seeds of a challenger have to differ in the seed and in nothing else. A
-    package step on each launch would let seed 4 run a tree seed 1 never saw,
-    which is not a comparison between five seeds of one model.
+    Both at once, and once per cycle rather than once per seed, because the seeds
+    of a challenger have to differ in the seed and in nothing else. A package step
+    on each launch would let a second seed run a tree the first never saw, which
+    is not a comparison between two seeds of one model.
     """
     run = registration(aws, run_id)
     artifacts = buckets(aws).artifacts

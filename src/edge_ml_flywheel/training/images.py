@@ -6,7 +6,7 @@ scattered subset of those, so an `S3Prefix` channel would take the whole prefix
 and a manifest is the only way to name the subset.
 
 **This document is also the record of what the challenger trained on.** It is
-written once at prepare time, read by all five seeds, and lives under the
+written once at prepare time, read by every seed of that cycle, and lives under the
 write-once cycle prefix -- so the training set of cycle six is a file rather than
 a set someone reconstructs later from a ledger and a partition. That is what
 makes `max_images` a parameter here rather than in the container: a short

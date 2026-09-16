@@ -35,9 +35,9 @@ from edge_ml_flywheel.ingest.labels import Box
 CLASSES = CLASS_SET
 
 IMAGES = 12
-# Three, not five. The pairing is what is under test and it does not care how many
-# seeds there are, so the fixture pays for three scoring passes rather than five
-# (design section 4.2 trains five).
+# Three, not one. The pairing is what is under test and it does not care how many
+# seeds there are, so the fixture uses more than the one design section 4.2 trains
+# -- averaging over seeds is only visible when there is something to average.
 SEEDS = (Seed(1), Seed(2), Seed(3))
 
 

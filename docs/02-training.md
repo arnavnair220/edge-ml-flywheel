@@ -11,11 +11,14 @@ Fine-tunes YOLO11n on one cycle's labeled set as a SageMaker training job, one j
 |---|---|
 | Container | `pytorch-training:2.9.0-gpu-py312-cu130-ubuntu22.04-sagemaker` |
 | Added packages | `ultralytics==8.4.146`, `pyarrow>=18` |
-| Instance | `ml.g4dn.xlarge`, managed spot, one instance |
+| Instance | `ml.g4dn.xlarge`, on demand, one instance |
 | Entry point | `container/train.py`, which calls `training.entrypoint` |
-| Max runtime | 2 hours, 3 hours including the spot wait |
+| Max runtime | 2 hours |
 
-A spot interrupt restarts the job. There is no `CheckpointConfig` to resume from.
+On demand rather than managed spot. A cycle trains one seed, so a spot interrupt would discard the
+cycle's training and a wait for capacity would block every step after it; the saving is under a
+dollar per job. A retry restarts the job from the beginning: there is no `CheckpointConfig` to
+resume from.
 
 ---
 
@@ -31,6 +34,11 @@ A spot interrupt restarts the job. There is no `CheckpointConfig` to resume from
 
 Validation is off; the shipped checkpoint is `last.pt`. Python, NumPy and Torch are seeded at process
 start.
+
+A cycle trains one seed, seed 1 — the one that ships. The seed is a per-job argument rather than a
+recipe knob, so a run that trains more adds jobs over the same prepared cycle: `--seeds 1 2 3` on
+`run start`, or a second `launch`. Each extra seed costs another GPU hour and needs instance quota
+to cover it.
 
 ---
 
@@ -98,5 +106,5 @@ The partition and class set come from the run registration.
 
 ## Incomplete
 
-The overview's plane 2 covers five seeds and an int8 ONNX export. Neither is built: `launch` starts
-one seed at a time, and the exported artifact is `model.pt` only.
+The overview's plane 2 covers an int8 ONNX export. It is not built: the exported artifact is
+`model.pt` only.

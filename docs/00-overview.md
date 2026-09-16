@@ -48,9 +48,10 @@ made against.
 
 **Challenger** — the model newly trained in this cycle, competing to replace the champion.
 
-**Seed** — the random seed for one training run. Each model is trained at five fixed seeds and
-compared seed-to-seed against the champion's matching seed, so variance common to both models
-cancels. Seed 1 is always the artifact that ships.
+**Seed** — the random seed for one training run. A cycle trains one fixed seed, compared
+seed-to-seed against the champion's matching seed, so variance common to both models cancels. Seed 1
+is always the artifact that ships. A run may train more seeds, and the comparison then averages over
+the matching pairs.
 
 **Promotion** — a challenger passing every gate and becoming the champion. The inverse is a
 **rejection**, which is recorded with its reason rather than discarded.
@@ -96,7 +97,7 @@ flowchart TB
     end
 
     subgraph TRAIN["Training plane"]
-        SEEDS["YOLO11n, 5 matched seeds from the COCO base<br/>seeded, spot, discard on interrupt"]
+        SEEDS["YOLO11n, one matched seed from the COCO base<br/>seeded, on demand, restart on failure"]
         EXPORT["ONNX int8 export for ARM64"]
     end
 
@@ -157,11 +158,11 @@ Listed in the order a cycle passes through them.
 | # | Plane | What it does in a cycle | Invariant it owns |
 |---|---|---|---|
 | 1 | **Data and label supply** | Partitions the dataset once, ranks the remaining pool by mean per-object uncertainty from the champion's offline scoring pass, buys the top of that ranking, records the batch's condition mix beside the pool's, and sells labels against a hard budget | Labels can only be obtained by paying the oracle, and `eval` is not purchasable at any price |
-| 2 | **Training** | Fine-tunes YOLO11n on the cumulative labeled set with five fixed seeds, from the COCO base every time, and exports an int8 ONNX artifact | Seed *k* is fixed and recorded; seed 1 is the artifact that ships, never the best-scoring seed |
+| 2 | **Training** | Fine-tunes YOLO11n on the cumulative labeled set at one fixed seed, from the COCO base every time, and exports an int8 ONNX artifact | Seed *k* is fixed and recorded; seed 1 is the artifact that ships, never the best-scoring seed |
 | 3 | **Evaluation** | Scores each model once over `eval` and the pool, persists per-image match arrays, then answers every later question from that cache — paired deltas, confidence bands, per-slice metrics | Bootstrap the *paired* delta on a shared eval resample, never each model independently |
 | 4 | **Gating** | Runs four pass/fail checks in order — data, quality, edge, canary — and emits the per-slice regression report. Any hard failure stops the cycle and the champion stays put; the labels stay bought | Zero image-ID overlap with either eval set is a hard fail with no override |
 | 5 | **Control** | Sequences the cycle, owns retries, branching and short-circuit on gate failure, and holds a single-flight lock so two cycles cannot overlap | Control flow exists exactly once, in ASL — there is no second local orchestrator to diverge from |
-| 6 | **Registry and promotion** | Advances a version through an explicit state machine and records every rejection with its reason | No manifest, no promotion; all five champion seed artifacts are retained, not just the deployed one |
+| 6 | **Registry and promotion** | Advances a version through an explicit state machine and records every rejection with its reason | No manifest, no promotion; every champion seed artifact is retained, not just the deployed one |
 | 7 | **Edge and fleet** | Publishes the promoted artifact as a Greengrass component, and the service deploys it: verify digest, one device, then two, then the fleet, rolling back on a failed health check | Deployment is a pointer flip, never a container rebuild; rollback is a single command |
 | 8 | **Telemetry and reporting** | Captures what the fleet saw and feeds the charts. The fleet's own ranking is a realism check, not a selector | Every promotion and rejection is charted with its evidence, so the loop's behaviour is read off the record rather than described |
 | 9 | **Experiment and validation** | Runs cycles *as experiments* rather than running inside one: the A/A control | The gate's false-positive rate is measured, not assumed |
@@ -173,8 +174,8 @@ Listed in the order a cycle passes through them.
 Planes 1-8 turn the loop. Plane 9 establishes that the loop's measurements can be trusted.
 
 - **The A/A test** trains a challenger on a bootstrap resample of the champion's own labels, same
-  five seeds. Zero new information, so a healthy quality gate must refuse to promote. If it ever
-  promotes, the evaluation machinery itself has a false positive.
+  seed. Zero new information, so a healthy quality gate must refuse to promote. If it ever promotes,
+  the evaluation machinery itself has a false positive.
 
 The A/A test needs no second selection rule — it changes what the challenger trains on, not how the
 batch was chosen — which is why it is the control this project runs. The two controls that *would*
@@ -187,8 +188,8 @@ need a second rule are deferred. See [planned additions](#planned-additions).
 Work the design accommodates but does not build.
 
 **The label-efficiency A/B.** A second run of the same length buying at random instead of by
-uncertainty, orchestration and fleet stripped out, both arms paired on the same five seeds and the
-same bootstrap. The gap between the two curves is the case for uncertainty sampling specifically.
+uncertainty, orchestration and fleet stripped out, both arms paired on the same seed and the same
+bootstrap. The gap between the two curves is the case for uncertainty sampling specifically.
 Until it is measured, the supported claim is a closed loop that meters label spend, gates against
 fixed thresholds, and promotes or rolls back — not that uncertainty selection is the cheaper way to
 buy labels.
@@ -228,9 +229,8 @@ Properties every plane honors, rather than components living anywhere:
 - **Idempotency keys on anything that spends budget.** Retries and redeliveries are normal; a
   double charge against the label ledger has no undo.
 - **Training is seeded and short.** Seed *k* fixes initialization and augmentation order, which is
-  what the matched-seed comparison shares between champion and challenger. An interrupted job is
-  discarded and restarted rather than resumed, which bounds model size, input resolution and
-  dataset size.
+  what the matched-seed comparison shares between champion and challenger. A failed job is discarded
+  and restarted rather than resumed, which bounds model size, input resolution and dataset size.
 - **`recipe_version` and `partition_version`.** A change to either means the paired comparison is no
   longer the same test on the same data universe, and forces a fresh champion baseline instead of a
   promotion decision. The class set is not among them because there is only one: it cannot differ

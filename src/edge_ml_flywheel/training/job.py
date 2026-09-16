@@ -2,20 +2,19 @@
 
 A pure function returning the `CreateTrainingJob` argument dictionary, with no
 client and no call. That is the point: the walking skeleton starts a job from a
-CLI and every later cycle starts five from a Step Functions `Map`, and both read
-the definition out of here. An ASL block spelling out channels and
+CLI and every later cycle starts one per seed from a Step Functions `Map`, and
+both read the definition out of here. An ASL block spelling out channels and
 hyperparameters would be a second definition of the same job, in a language with
 no tests, that nothing checks against this one.
 
 **Three things this request deliberately does not carry.**
 
-`CheckpointConfig` is absent, and its absence is the interrupt policy (design
-section 3). A managed spot job with nowhere to checkpoint has nothing to resume
-from, so an interrupted run restarts from the beginning rather than resuming
-half-trained state -- which is what keeps "seed *k* fixes the run" true. The
-rule is a property of the job definition and not of an interrupt handler
-somebody maintains, so it is enforced by a test over this function rather than
-described in a comment somewhere.
+`CheckpointConfig` is absent, and its absence is the restart policy (design
+section 3). A job with nowhere to checkpoint has nothing to resume from, so a
+retry starts from the beginning rather than resuming half-trained state -- which
+is what keeps "seed *k* fixes the run" true. The rule is a property of the job
+definition and not of a retry handler somebody maintains, so it is enforced by a
+test over this function rather than described in a comment somewhere.
 
 `VpcConfig` is absent, so the job runs on SageMaker's own network and reaches S3
 without a NAT gateway.
@@ -117,8 +116,8 @@ def job_name(version: ModelVersion, seed: Seed, attempt: datetime) -> str:
 
     The version and seed are what a human reads off a console listing, so they
     lead. The attempt stamp is there because a job name is unique per account
-    forever: a retry after a spot interrupt, or a second skeleton run of the same
-    cycle, would otherwise be refused as a name collision rather than run. It
+    forever: a retry after a failure, or a second skeleton run of the same cycle,
+    would otherwise be refused as a name collision rather than run. It
     identifies an attempt and nothing else -- what the artifacts are keyed by is
     the version and the seed, which two attempts share.
     """
@@ -211,26 +210,23 @@ class Target:
 class Compute:
     """What the job runs on and how long it is allowed to take.
 
-    Spot by default, with `max_wait_seconds` covering the wait for capacity on
-    top of the run itself. The runtime ceiling is a bound on a hang rather than
-    an estimate, and it is deliberately close to design section 3's ~90-minute
-    figure for a seed run: discard-and-restart is cheap while a run is short and
-    ruinous when it is hours, so a job that overruns is a recipe that has drifted
-    off the constraint rather than a job to wait out.
+    On demand, with no managed-spot knob to turn. A cycle trains one seed, so
+    the whole cycle waits on one job: an interrupt discards ninety minutes with
+    nothing to resume from and a wait for capacity blocks everything downstream,
+    against a saving of well under a dollar on the GPU hour. Spot is absent from
+    the request rather than switched off inside it, because SageMaker's default
+    is on demand and a field set to `False` is a policy that invites flipping.
+
+    The runtime ceiling is a bound on a hang rather than an estimate, and it is
+    deliberately close to design section 3's ~90-minute figure for a seed run:
+    discard-and-restart is cheap while a run is short and ruinous when it is
+    hours, so a job that overruns is a recipe that has drifted off the constraint
+    rather than a job to wait out.
     """
 
     instance_type: str = "ml.g4dn.xlarge"
     volume_size_gb: int = 30
     max_runtime_seconds: int = 2 * 60 * 60
-    max_wait_seconds: int = 3 * 60 * 60
-    use_spot: bool = True
-
-    def __post_init__(self) -> None:
-        if self.use_spot and self.max_wait_seconds < self.max_runtime_seconds:
-            raise ValueError(
-                f"a spot job's max wait ({self.max_wait_seconds}s) must cover its max runtime "
-                f"({self.max_runtime_seconds}s), since the wait includes the run"
-            )
 
 
 def _channel(name: str, s3_uri: str, data_type: str) -> dict[str, Any]:
@@ -361,15 +357,15 @@ def training_job(
     Four arguments, and each is one of the questions the request answers: which
     model, trained how, on what, started when. `attempt` is separate from
     `Target` because it is the one input that differs between two runs of an
-    otherwise identical job -- a retry after a spot interrupt is the same target
-    at a new attempt.
+    otherwise identical job -- a retry after a failure is the same target at a
+    new attempt.
     """
     buckets = target.buckets
     version = target.version
     seed = target.seed
     output_prefix = f"{model_seed_prefix(version, seed)}_sagemaker/"
 
-    request: dict[str, Any] = {
+    return {
         "TrainingJobName": job_name(version, seed, attempt),
         "RoleArn": target.role_arn,
         "AlgorithmSpecification": {
@@ -398,7 +394,6 @@ def training_job(
             ),
         },
         "Environment": environment(target.region),
-        "EnableManagedSpotTraining": compute.use_spot,
         "Tags": [
             {"Key": key, "Value": value}
             for key, value in {
@@ -409,8 +404,3 @@ def training_job(
             }.items()
         ],
     }
-
-    if compute.use_spot:
-        request["StoppingCondition"]["MaxWaitTimeInSeconds"] = compute.max_wait_seconds
-
-    return request

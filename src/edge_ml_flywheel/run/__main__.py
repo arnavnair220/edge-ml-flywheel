@@ -133,9 +133,12 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="Epochs per training job. Required for `control.handler`'s reason: it is the recipe.",
     )
-    # A list rather than a count, so an account whose spot quota is lower runs
-    # three of the five the design names without editing the state machine, and
-    # so the seeds a run trained are recorded in its execution input.
+    # A list rather than a count, so a run that wants the seed spread the design
+    # no longer trains asks for it without editing the state machine, and so the
+    # seeds a run trained are recorded in its execution input. One seed is the
+    # design (design section 4.2): the cycle waits on one GPU job either way, and
+    # every extra seed is another on-demand hour against a quota that has to
+    # cover it.
     started.add_argument(
         "--seeds",
         type=int,

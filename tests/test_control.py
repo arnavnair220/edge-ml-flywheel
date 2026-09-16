@@ -66,7 +66,7 @@ STUBS = frozenset({"Score", "Evaluate", "Register", "Promote", "Select", "Purcha
 # are listed here rather than derived because the point of the test below is that
 # leaving one out is allowed, and a list derived from the ASL would agree with the
 # ASL by construction.
-OPTIONAL_INPUTS = frozenset({"max_images", "replace", "instance_type", "use_spot"})
+OPTIONAL_INPUTS = frozenset({"max_images", "replace", "instance_type"})
 
 # The step name inside a payload expression, which is where it now lives.
 STEP_IN_PAYLOAD = re.compile(r"'step':\s*'(\w+)'")
