@@ -16,6 +16,7 @@ from edge_ml_flywheel.conventions import (
     CLASS_SET,
     NATIVE_IMAGE_SIZE,
     ImageId,
+    Split,
 )
 from edge_ml_flywheel.ingest.labels import Box
 from edge_ml_flywheel.training import dataset, images
@@ -180,27 +181,36 @@ class TestTheChannelAndTheLabelsMustAgree:
 
 class TestTheImageManifest:
     def test_it_leads_with_one_prefix_and_then_names_keys_under_it(self) -> None:
-        document = images.document("bucket", [an_image_id(2), an_image_id(1)])
+        document = images.document("bucket", [an_image_id(2), an_image_id(1)], Split.TRAIN)
 
         assert document[0] == {"prefix": "s3://bucket/raw/images/100k/train/"}
         assert document[1:] == [f"{an_image_id(1)}.jpg", f"{an_image_id(2)}.jpg"]
+
+    def test_the_split_decides_the_prefix(self) -> None:
+        """The argument exists because scoring writes one of these per cohort and
+        `eval` draws from `val`. A default would be how the wrong prefix gets
+        named by a caller with no opinion, so there is not one."""
+        document = images.document("bucket", [an_image_id(1)], Split.VAL)
+
+        assert document[0] == {"prefix": "s3://bucket/raw/images/100k/val/"}
+        assert document[1:] == [f"{an_image_id(1)}.jpg"]
 
     def test_it_is_sorted_and_deduplicated(self) -> None:
         """Sorted so two runs over one labeled set write the same file, and
         deduplicated because an image named twice is downloaded twice."""
         repeated = [an_image_id(3), an_image_id(1), an_image_id(3)]
-        assert images.document("bucket", repeated)[1:] == [
+        assert images.document("bucket", repeated, Split.TRAIN)[1:] == [
             f"{an_image_id(1)}.jpg",
             f"{an_image_id(3)}.jpg",
         ]
 
-    def test_a_cycle_with_no_images_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="no images to train on"):
-            images.document("bucket", [])
+    def test_a_manifest_naming_nothing_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="naming no images"):
+            images.document("bucket", [], Split.TRAIN)
 
     def test_it_round_trips_through_json(self, tmp_path: Path) -> None:
         path = tmp_path / "images.manifest"
-        named = images.write(path, "bucket", [an_image_id(1), an_image_id(2)])
+        named = images.write(path, "bucket", [an_image_id(1), an_image_id(2)], Split.TRAIN)
 
         assert named == 2
         assert json.loads(path.read_text(encoding="utf-8"))[0]["prefix"].startswith("s3://bucket/")

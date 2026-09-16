@@ -38,6 +38,13 @@ locals {
   # 70,000 images a training set can draw from and none of the `val` ones.
   raw_train_images_prefix = "raw/images/100k/train/"
 
+  # Both splits, which exactly one role is granted: scoring runs the model over
+  # the eval cohort as well as the pool, and eval is drawn from `val`. Widening
+  # the prefix costs nothing that matters -- an image carries no boxes, so this
+  # is a grant over pixels and the label wall is untouched by it. What keeps the
+  # eval frames a job may see bounded is the manifest it is handed, not this.
+  raw_images_prefix = "raw/images/100k/"
+
   # Wildcarded over `partition_version=` so a re-partition is covered by the
   # statement that already exists rather than by an edit nobody makes. Mirrors
   # `cohort_labels_prefix(version, Cohort.EVAL)` in `conventions`.
@@ -51,9 +58,12 @@ locals {
   cohort_label_objects = "${local.bucket_arns["data"]}/derived/partition_version=*/labels/*"
 
   # Empty, and the emptiness is the current state rather than a placeholder: no
-  # role that exists today has a reason to read the eval labels. The scoring
-  # plane arrives in Phase 3 and adds its ARN here, which is the same one-line
-  # diff that would admit it to `label_reader_arns`.
+  # role that exists today has a reason to read the eval labels. The scoring role
+  # is not the one that will -- it runs a model over images and writes what came
+  # back, so it holds no label grant of any kind and carries an explicit deny
+  # over this prefix in its own policy. What belongs here is the evaluation job
+  # that matches those detections against ground truth, and it arrives with the
+  # `Evaluate` step.
   eval_label_reader_arns = []
 
   # The partitioner writes these files and nothing else may. Not empty for the

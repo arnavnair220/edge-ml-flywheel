@@ -102,6 +102,10 @@ python -m edge_ml_flywheel.training launch --run-id <id> --cycle 0 --seed 1 --ep
 and source archive; it refuses to overwrite either without `--replace`. `launch` runs once per seed.
 The partition and class set come from the run registration.
 
+The archive `prepare` writes carries both of the cycle's entry points, `train.py` and `score.py`, and
+the scoring job unpacks the same object. Training and scoring therefore run from one tree, under the
+single `git_commit` the manifest records.
+
 ---
 
 ## Incomplete

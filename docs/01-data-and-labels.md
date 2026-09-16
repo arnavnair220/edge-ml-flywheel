@@ -296,8 +296,8 @@ aws codebuild start-build --project-name edge-ml-flywheel-register \
 ```
 
 The build prints the minted `run_id`, which is the input to every later step. `RUN_SLUG` and
-`RUN_NOTE` have no defaults. `SELECTOR`, `LABEL_BUDGET`, `PARTITION_VERSION`, `CLASS_SET_VERSION` and
-`RECIPE_VERSION` default to the loop as designed and are overridable per build.
+`RUN_NOTE` have no defaults. `LABEL_BUDGET`, `PARTITION_VERSION`, `RECIPE_VERSION` and `CYCLE_CAP`
+default to the loop as designed and are overridable per build.
 
 There is no webhook: this job mints a new `run_id` on every invocation, so a push to `main` would
 start a run.
@@ -308,9 +308,10 @@ start a run.
 
 One cycle spends its budget in five steps:
 
-1. The champion scores every remaining pool image as a batch transform job. This is inference over
-   image features only; no label is read. The fleet's own scores over the frames it replayed are
-   reported beside this ranking, never used to rank the purchase.
+1. The champion scores every remaining pool image as a SageMaker Processing job, in the same pass
+   that scores the eval cohort. This is inference over image features only; no label is read. The
+   fleet's own scores over the frames it replayed are reported beside this ranking, never used to
+   rank the purchase.
 2. Each image gets a **mean per-object uncertainty** score, rather than an image-level maximum, which
    would be decided by a frame's single worst box.
 3. The top 1,000 of the ranked list are the batch, bought unfiltered.
@@ -386,7 +387,10 @@ oracle can address the split they are drawn from. Zero image-ID overlap between 
 `eval` is a hard gate failure with no override, and is the backstop rather than the mechanism.
 
 The eval boxes exist a second time under `labels/cohort=eval/`, outside the `raw/labels/` deny.
-`EvalLabelsAreScoringOnly` denies reads on that prefix to every principal; the evaluation plane is
-named there when it is built. `cohort=bootstrap/` carries no read deny, because training owns those
-8,000 labels. Both prefixes are write-denied to every principal but the partitioner by
-`LabelsAreFrozenExceptThePartitioner`, so cycle eight's number is comparable to cycle one's.
+`EvalLabelsAreScoringOnly` denies reads on that prefix to every principal, with no exemption. The
+scoring job needs none: it runs a model over images and writes the detections back, and its own
+policy denies every label prefix. The exemption belongs to the job that matches those detections
+against ground truth, which is named there when the `Evaluate` step is built. `cohort=bootstrap/`
+carries no read deny, because training owns those 8,000 labels. Both prefixes are write-denied to
+every principal but the partitioner by `LabelsAreFrozenExceptThePartitioner`, so cycle eight's number
+is comparable to cycle one's.
