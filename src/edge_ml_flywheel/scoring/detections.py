@@ -28,6 +28,7 @@ from typing import Final
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from pyarrow import compute
 
 from edge_ml_flywheel.conventions import DetectionRow, ImageId, columns, parse_image_id
 from edge_ml_flywheel.evaluation.coco import Detection
@@ -106,14 +107,29 @@ def parquet_files(root: Path) -> list[Path]:
     return sorted(path for path in root.rglob("*.parquet") if path.is_file())
 
 
-def read(path: Path) -> Iterator[DetectionRow]:
+def read(path: Path, score_floor: float = 0.0) -> Iterator[DetectionRow]:
     """One detections file, row by row.
 
     Every row is reconstructed through `DetectionRow`, so a file written under a
     different schema fails here rather than becoming boxes with plausible numbers
     in the wrong fields -- which would score as a model that is simply bad.
+
+    `score_floor` drops the low-confidence tail before any Python object is built,
+    and it is what makes this file readable by both of its consumers. Evaluation
+    takes the whole thing, because AP is the area under a curve swept by lowering
+    a threshold and the tail is most of what it integrates. Selection cannot: the
+    pool file is 62,000 images at up to `MAX_DETS` boxes each, which is millions
+    of rows, and it needs none of them below `selection.score.BAND_LOW`. Filtering
+    in Arrow rather than in the loop is the difference between holding a filtered
+    dict and holding every box the model emitted.
+
+    0.0 is the whole file rather than a floor nobody chose, so a caller with no
+    opinion reads what was written.
     """
     table = pq.read_table(path, columns=list(_COLUMNS))
+    if score_floor > 0.0:
+        table = table.filter(compute.greater_equal(table.column("score"), score_floor))
+
     for values in zip(*(table.column(name).to_pylist() for name in _COLUMNS), strict=True):
         record = dict(zip(_COLUMNS, values, strict=True))
         yield DetectionRow(
@@ -160,3 +176,15 @@ def group(rows: Iterable[DetectionRow]) -> dict[ImageId, tuple[Detection, ...]]:
             )
         )
     return {image_id: tuple(boxes) for image_id, boxes in found.items()}
+
+
+def grouped(root: Path, score_floor: float = 0.0) -> dict[ImageId, tuple[Detection, ...]]:
+    """`collect` and `group` in one pass, holding the grouping and nothing else.
+
+    `collect` builds the whole list first, which is the right shape for a reader
+    that wants every row and the wrong one for the pool: the list and the grouping
+    would be two copies of the same millions of boxes, live at once, inside a
+    Lambda. Streaming the rows through means one file's Arrow table is the only
+    thing alive beside the answer.
+    """
+    return group(row for path in parquet_files(root) for row in read(path, score_floor))

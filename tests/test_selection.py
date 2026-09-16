@@ -27,6 +27,7 @@ from edge_ml_flywheel.conventions import (
 from edge_ml_flywheel.evaluation.coco import Detection
 from edge_ml_flywheel.selection import (
     BAND_HIGH,
+    BAND_LOW,
     BLIND_SPOT,
     DECISIVE,
     Mix,
@@ -119,8 +120,39 @@ def test_seeing_nothing_and_seeing_everything_clearly_are_opposite_scores() -> N
     assert BLIND_SPOT > DECISIVE
 
 
-def test_a_detection_exactly_on_the_band_edge_counts() -> None:
-    assert image_score([a_detection(BAND_HIGH)]) == pytest.approx(uncertainty(BAND_HIGH))
+def test_only_the_sub_band_tail_is_still_a_blind_spot() -> None:
+    """The case that made this rule a floor rather than a filter.
+
+    The scoring job emits every box down to 0.001, because AP integrates that
+    tail, so a frame the model saw nothing in arrives carrying rows rather than
+    empty. Telling the two ends apart on emptiness scored every image in a real
+    pool `DECISIVE` and flattened the ranking across all 62,000 of them.
+    """
+    tail = [a_detection(0.004), a_detection(0.02), a_detection(0.049)]
+    assert image_score(tail) == BLIND_SPOT
+
+
+def test_one_real_detection_is_enough_to_stop_being_a_blind_spot() -> None:
+    """A frame the model was confident about, under a pile of 0.001 noise. It saw
+    something and was sure, which is the opposite of having seen nothing."""
+    assert image_score([a_detection(0.001), a_detection(0.99)]) == DECISIVE
+
+
+def test_the_tail_does_not_dilute_a_score() -> None:
+    """Sub-band rows are dropped from the mean as well as from the verdict.
+
+    Averaging them in would pull every frame toward the top of the range in
+    proportion to how much noise the detector happened to emit, which is a
+    ranking by clutter rather than by uncertainty.
+    """
+    clean = image_score([a_detection(0.5)])
+    noisy = image_score([a_detection(0.5)] + [a_detection(0.002)] * 50)
+    assert noisy == pytest.approx(clean)
+
+
+@pytest.mark.parametrize("edge", [BAND_HIGH, BAND_LOW])
+def test_a_detection_exactly_on_a_band_edge_counts(edge: float) -> None:
+    assert image_score([a_detection(edge)]) == pytest.approx(uncertainty(edge))
 
 
 # --- Scoring the pool ---------------------------------------------------------

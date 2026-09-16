@@ -21,6 +21,13 @@ easiest images in the batch next to the most interesting ones. They are scored a
 opposite ends, and the blind spots are counted in the selection report -- ranking
 them top is a choice no cycle has yet reported on, and the count is what turns
 the first bad batch into a number.
+
+**"Found nothing" means nothing at or above `BAND_LOW`, not an empty list.** The
+scoring job emits every box down to 0.001, because AP integrates that tail, so a
+frame the model saw nothing in still arrives carrying dozens of rows. Telling the
+two cases apart on emptiness would therefore have made every image in the pool
+"decisive" and collapsed the two ends into one -- which is the failure this module
+is written to avoid, arriving through the file rather than through the rule.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -32,12 +39,18 @@ from edge_ml_flywheel.evaluation.coco import Detection
 
 # The confidence range a detection has to fall in to count toward the mean.
 #
-# The upper edge is the one doing the work. A detection at 0.99 is not evidence
-# of anything the champion finds hard, and averaging it in dilutes a frame's
-# score in proportion to how many easy objects happen to share the frame -- which
-# would rank a quiet road above a busy one for being quiet. The lower edge is
-# near-symmetric and mostly inert: whatever runs inference has already applied its
-# own confidence threshold, so detections below it do not arrive.
+# The upper edge is the one doing the work on the mean. A detection at 0.99 is
+# not evidence of anything the champion finds hard, and averaging it in dilutes a
+# frame's score in proportion to how many easy objects happen to share the frame
+# -- which would rank a quiet road above a busy one for being quiet.
+#
+# The lower edge does a second job the upper one does not, and it is the reason
+# this is a floor rather than a filter. A detection below it is not a weak opinion
+# the ranking should discount; it is not a detection at all. The scoring job runs
+# at a confidence floor of 0.001 because AP integrates that tail, so every frame
+# in the pool arrives carrying rows the model is not claiming to have seen
+# anything in -- and `image_score` reads this edge as the line between "saw
+# something" and "saw nothing" for exactly that reason.
 #
 # Constants rather than fields on a config object, for `gates.thresholds`'
 # reason: these are design parameters with one setting for the life of the
@@ -46,15 +59,16 @@ from edge_ml_flywheel.evaluation.coco import Detection
 BAND_LOW: Final = 0.05
 BAND_HIGH: Final = 0.95
 
-# What an image with no detections at all scores. The top of the range the
-# formula below can produce, so a blind spot outranks every frame the champion
-# did see something in. It ties with a perfectly ambiguous image -- every box at
-# exactly 0.5 -- which floating point makes a case that does not arise, and which
+# What an image the champion saw nothing in scores -- nothing at or above
+# `BAND_LOW`, which is what "saw" means here. The top of the range the formula
+# below can produce, so a blind spot outranks every frame the champion did see
+# something in. It ties with a perfectly ambiguous image -- every box at exactly
+# 0.5 -- which floating point makes a case that does not arise, and which
 # `selection.select` breaks on image ID anyway rather than leaving to chance.
 BLIND_SPOT: Final = 1.0
 
-# What an image scores when it has detections and none of them are in the band.
-# The champion was decisive about everything it saw, which is the opposite
+# What an image scores when the champion saw something in it and was above the
+# band about all of it. Decisive about everything it saw, which is the opposite
 # statement from having seen nothing, and the two must not collapse together.
 DECISIVE: Final = 0.0
 
@@ -121,15 +135,20 @@ def image_score(detections: Sequence[Detection]) -> float:
     The two empty cases are told apart here rather than by the caller, because
     the caller only has the same list to tell them apart with -- and one of them
     is the top of the ranking while the other is the bottom.
+
+    What tells them apart is `seen` and not `detections`. A row below `BAND_LOW`
+    is the scoring job's 0.001 tail rather than something the model claims to have
+    found, so an image carrying only those is a blind spot and not a decisive
+    frame. Reading the argument's emptiness instead would score every image in a
+    real pool `DECISIVE`, because at that floor almost none of them are empty --
+    and the ranking would then be flat across the 62,000 frames it is supposed to
+    order.
     """
-    in_band = [
-        uncertainty(detection.score)
-        for detection in detections
-        if BAND_LOW <= detection.score <= BAND_HIGH
-    ]
+    seen = [detection for detection in detections if detection.score >= BAND_LOW]
+    in_band = [uncertainty(detection.score) for detection in seen if detection.score <= BAND_HIGH]
     if in_band:
         return sum(in_band) / len(in_band)
-    return DECISIVE if detections else BLIND_SPOT
+    return DECISIVE if seen else BLIND_SPOT
 
 
 def score_pool(pool: Iterable[ImageId], predictions: Predictions) -> dict[ImageId, float]:

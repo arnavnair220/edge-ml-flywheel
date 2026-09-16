@@ -49,6 +49,7 @@ from edge_ml_flywheel.conventions import (
     new_model_version,
     table_name,
 )
+from edge_ml_flywheel.oracle import handler as oracle
 from edge_ml_flywheel.run import control as ctl
 from edge_ml_flywheel.training import launch
 
@@ -65,9 +66,17 @@ ACCOUNT = "123456789012"
 # not as an empty parse.
 ASL = Path(__file__).resolve().parents[1] / "infra" / "cycle.asl.json"
 
-# The steps the diagram draws as stubs. Named here so that implementing one and
-# leaving it a `Pass` is a failing test.
-STUBS = frozenset({"Select", "Purchase"})
+# The steps the diagram draws as stubs. Empty, and kept rather than deleted: the
+# assertion is now that every state of a cycle does something, which is the
+# property that made the set worth writing down in the first place. A `Pass`
+# appearing here again would be a step going back to being a placeholder.
+STUBS: frozenset[str] = frozenset()
+
+# The two Lambdas a cycle calls, as the ASL names them before Terraform fills
+# them in. Two rather than one because the purchase reads `raw/labels/` and the
+# control function is denied it, so the label wall is drawn between two functions.
+CONTROL_FUNCTION = "${control_function_arn}"
+ORACLE_FUNCTION = "${oracle_function_arn}"
 
 # The execution inputs an execution may leave out, and the handler defaults. They
 # are listed here rather than derived because the point of the test below is that
@@ -361,12 +370,19 @@ class TestTheHandler:
         `TestTheDefinition` checks and why.
         """
         definition = json.loads(ASL.read_text(encoding="utf-8"))
-        passed = {
-            match.group(1)
-            for payload in _payloads(definition["States"])
-            if (match := STEP_IN_PAYLOAD.search(payload))
-        }
-        assert passed == set(ctrl.STEPS)
+        assert _steps_of(definition["States"], CONTROL_FUNCTION) == set(ctrl.STEPS)
+
+    def test_the_purchase_is_asked_of_the_other_function(self) -> None:
+        """The label wall as a fact about the definition.
+
+        The oracle reads `raw/labels/` and this function is denied it, so the two
+        are two Lambdas -- and a purchase step appearing in `ctrl.STEPS` would
+        mean the read had been moved inside the identity that must not have it.
+        """
+        definition = json.loads(ASL.read_text(encoding="utf-8"))
+
+        assert _steps_of(definition["States"], ORACLE_FUNCTION) == set(oracle.STEPS)
+        assert "purchase" not in ctrl.STEPS
 
     def test_a_refusal_underneath_becomes_a_reportable_error(
         self, monkeypatch: pytest.MonkeyPatch
@@ -457,9 +473,84 @@ class TestTheDefinition:
 
     def test_the_stubs_are_the_ones_still_to_land(self, definition: dict[str, Any]) -> None:
         """A `Pass` becoming a `Task` is a step landing, and it should be a test
-        that has to be edited rather than a change nobody notices."""
+        that has to be edited rather than a change nobody notices.
+
+        `STUBS` is empty now, so this asserts every state of a cycle does
+        something. The last two to land were `Select` and `Purchase`, which is
+        what closed the loop: until they did, a run ranked nothing and bought
+        nothing and stopped after one cycle.
+        """
         passes = {name for name, state in definition["States"].items() if state["Type"] == "Pass"}
         assert passes == STUBS
+
+    def test_the_cycle_ranks_the_pool_and_buys_the_top_of_it(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """The two steps that make this a flywheel rather than a training
+        pipeline that happens to run eight times."""
+        select = definition["States"]["Select"]
+        assert select["Type"] == "Task"
+        assert "'step': 'select'" in select["Arguments"]["Payload"]
+        assert select["Next"] == "Purchase"
+
+        purchase = definition["States"]["Purchase"]
+        assert purchase["Type"] == "Task"
+        assert "'step': 'purchase'" in purchase["Arguments"]["Payload"]
+        assert purchase["Next"] == "MoreCycles"
+
+    def test_the_purchase_runs_as_the_oracle_and_nothing_else_does(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """The label wall, as which function each step is sent to.
+
+        Every other Lambda step goes to the control function, which is denied
+        `raw/labels/` outright. This one goes to the identity that may read a
+        withheld label, and it is the only one that does.
+        """
+        sent = {
+            name: state["Arguments"]["FunctionName"]
+            for name, state in definition["States"].items()
+            if state.get("Resource", "").endswith("lambda:invoke")
+        }
+
+        assert sent["Purchase"] == ORACLE_FUNCTION
+        assert {name for name, fn in sent.items() if fn == ORACLE_FUNCTION} == {"Purchase"}
+
+    def test_selection_ranks_on_one_seed_and_it_is_the_deployed_one(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """Not every seed, unlike `EvaluateRequest`. An uncertainty score is what
+        one detector found in one frame, so a mean over seeds would rank the pool
+        by a model that does not exist -- and the seed it takes is the lowest,
+        which is the one `Register` calls deployed.
+        """
+        payload = definition["States"]["Select"]["Arguments"]["Payload"]
+
+        assert "'seed': $seeds_scored[0].seed" in payload
+        assert "'seeds'" not in payload
+
+    def test_the_batch_is_not_an_argument_to_the_purchase(self, definition: dict[str, Any]) -> None:
+        """The oracle reads its image IDs out of the ranking `Select` wrote.
+
+        A batch passed through the state machine is a batch a retry can carry
+        differently, which would hash to a second digest and charge a second time
+        for the same thousand images. There is no undo on that.
+        """
+        payload = definition["States"]["Purchase"]["Arguments"]["Payload"]
+
+        assert "'run_id'" in payload
+        assert "'cycle': $cycle" in payload
+        assert "image" not in payload
+
+    def test_the_loop_branches_on_what_the_oracle_left(self, definition: dict[str, Any]) -> None:
+        """`pool_remaining` was a literal 0 while `Purchase` was a stub, which
+        stopped every run after one cycle. It is now assigned from what was
+        actually bought, which is what lets the machine go round."""
+        purchase = definition["States"]["Purchase"]
+        assert purchase["Assign"]["pool_remaining"] == "{% $states.result.Payload.pool_remaining %}"
+
+        condition = definition["States"]["MoreCycles"]["Choices"][0]["Condition"]
+        assert "$pool_remaining > 0" in condition
 
     def test_every_stub_says_what_replaces_it(self, definition: dict[str, Any]) -> None:
         for name in STUBS:
@@ -649,17 +740,31 @@ def _targets(state: dict[str, Any]) -> list[str]:
     return targets
 
 
-def _payloads(states: dict[str, Any]) -> Iterator[str]:
-    """Every Lambda payload in the definition, at any depth.
+def _payloads(states: dict[str, Any]) -> Iterator[tuple[str, str]]:
+    """Every Lambda invocation in the definition, as (function, payload).
 
-    A string rather than a dict, because each one is a single JSONata object
-    constructor -- which is what makes a key optional; see `_expressions`.
+    The payload is a string rather than a dict, because each one is a single
+    JSONata object constructor -- which is what makes a key optional; see
+    `_expressions`.
+
+    The function name comes with it because a cycle calls two of them, and which
+    one a step goes to is the label wall: the control function does every step
+    that does not read a withheld label and the oracle does the one that does.
     """
     for scope in _scopes(states):
         for state in scope.values():
             arguments = state.get("Arguments")
             if isinstance(arguments, dict) and isinstance(arguments.get("Payload"), str):
-                yield arguments["Payload"]
+                yield str(arguments.get("FunctionName", "")), arguments["Payload"]
+
+
+def _steps_of(states: dict[str, Any], function: str) -> set[str]:
+    """The step names one function is asked for."""
+    return {
+        match.group(1)
+        for name, payload in _payloads(states)
+        if name == function and (match := STEP_IN_PAYLOAD.search(payload))
+    }
 
 
 def _expressions(node: Any) -> Iterator[str]:
