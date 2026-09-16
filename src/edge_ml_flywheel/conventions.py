@@ -433,6 +433,37 @@ def model_version_cycle(version: ModelVersion) -> Cycle:
     return _locate(version)[1]
 
 
+# SageMaker's ceiling on the names it calls entities, which a model package group
+# is one of. Stated here because the group is named below and the check that it
+# fits belongs beside the name rather than in the module that makes the call.
+MAX_ENTITY_NAME: Final = 63
+
+
+def model_package_group(run_id: RunId) -> str:
+    """The Model Registry group a run's versions are registered into.
+
+    One group per run, named the run and nothing else. No project prefix, for two
+    reasons. The account holds this project alone, so a prefix would namespace
+    nothing; and a run ID is already 49 characters at the longest slug
+    `RUN_SLUG_MAX_LEN` permits, which leaves 14 for a prefix that would then make
+    a legal run unregisterable at its first cycle -- the worst place to discover
+    that a name is too long, since the run is minted and its cycle is spent.
+    Identifying the group as this project's is what the tags on it are for.
+
+    A group per run rather than per project because the champion a version is
+    compared against is a fact about its run (design section 5): a partition or
+    recipe change forces a new run and a re-baselined champion, so versions from
+    two runs are not two entries on one ladder.
+    """
+    name = str(parse_run_id(run_id))
+    if len(name) > MAX_ENTITY_NAME:
+        raise ValueError(
+            f"model package group name is {len(name)} characters, over SageMaker's "
+            f"{MAX_ENTITY_NAME}: {name}"
+        )
+    return name
+
+
 # --- Image tags ---------------------------------------------------------------
 #
 # The three BDD100K attributes the eval slices and the batch's condition mix
@@ -1325,15 +1356,20 @@ class ModelManifest:
     leakage statement, and `eval` appearing in it is the failure the field exists
     to make representable and then refuse.
 
-    `artifact_sha256` is the digest of each seed's `model.onnx`, every seed the
-    cycle trained and not only the deployed one -- the matched-seed saving in
+    `artifact_sha256` is the digest of each seed's deployable file, every seed
+    the cycle trained and not only the deployed one -- the matched-seed saving in
     design section 7 depends on each one existing and being identifiable at the
-    cycle it was trained in. The device agent verifies
-    the digest before loading (design section 6), so a truncated download becomes
-    a rejection instead of a model that silently returns nonsense.
+    cycle it was trained in. The device agent verifies the digest before loading
+    (design section 6), so a truncated download becomes a rejection instead of a
+    model that silently returns nonsense. Which file that is follows the export:
+    `ModelArtifact.TORCH` today, taken where the bytes were produced and
+    published beside them as `ModelArtifact.SHA256`, and `ModelArtifact.ONNX`
+    once the int8 export lands. The field names a digest rather than a file for
+    exactly that reason -- what the device verifies changes, that it verifies
+    does not.
 
-    Serialization is deliberately absent. It lands with Phase 3's manifest
-    emission, next to the registration step that reads it back.
+    `registry.manifest` serializes this, and the registration step writes it
+    before it reads it back.
     """
 
     version: ModelVersion

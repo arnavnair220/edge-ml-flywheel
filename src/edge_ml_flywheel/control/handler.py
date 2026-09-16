@@ -1,13 +1,21 @@
 """One Lambda, one entry point, dispatching on a step name.
 
-Five steps today, because five of a cycle's states need Python that already
+Six steps today, because six of a cycle's states need Python that already
 exists: `prepare` writes the cycle's image manifest and source archive,
 `train_request` builds one seed's `CreateTrainingJob` request, `score_prepare`
 writes the two manifests naming what this cycle scores, `score_request` builds
-one seed's `CreateProcessingJob` request, and `evaluate_request` builds the one
-that matches those detections against ground truth. The state machine hands the
-three request steps to `sagemaker:createTrainingJob.sync` and
-`sagemaker:createProcessingJob.sync`.
+one seed's `CreateProcessingJob` request, `evaluate_request` builds the one that
+matches those detections against ground truth, and `register` writes the model
+manifest and builds the `CreateModelPackage` that records the verdict. The state
+machine hands the three request steps to `sagemaker:createTrainingJob.sync` and
+`sagemaker:createProcessingJob.sync`, and the registration to the `aws-sdk`
+integration for `sagemaker:createModelPackage`.
+
+**`register` is the one step that writes something a later cycle reads back.**
+The other five produce inputs to a job that is about to run. This one writes the
+manifest, which is the precondition of ever promoting the model (design section
+5) and the document the promotion path reads -- so it is the one step whose
+output outlives its cycle.
 
 **The `*_request` steps build and do not call**, for the reason given below, and
 the two `*_prepare` steps run once per cycle rather than once per seed. Both are
@@ -18,8 +26,8 @@ same-seed differences, so every seed belongs to one job.
 
 **One function rather than one Lambda per step.** The steps share their whole
 context -- a session, the bucket names, the run registration -- and none of them
-is hot, large, or differently privileged. Five functions would be five
-deployment packages, five log groups and five roles for the sake of a dispatch
+is hot, large, or differently privileged. Six functions would be six
+deployment packages, six log groups and six roles for the sake of a dispatch
 that is a dictionary lookup. The step name is in the ASL, so a typo is a failed
 execution naming the step it could not find rather than a call that silently
 does nothing.
@@ -58,6 +66,7 @@ from edge_ml_flywheel.conventions import (
 )
 from edge_ml_flywheel.evaluation import job as evaluation_job
 from edge_ml_flywheel.evaluation import launch as evaluation_launch
+from edge_ml_flywheel.registry import launch as registry_launch
 from edge_ml_flywheel.scoring import job as scoring_job
 from edge_ml_flywheel.scoring import launch as scoring_launch
 from edge_ml_flywheel.training import job, launch
@@ -253,6 +262,42 @@ def evaluate_request(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, 
     return {"version": version, "seeds": list(seeds), "request": built}
 
 
+def register(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
+    """Write the cycle's model manifest and build the request that records its
+    verdict.
+
+    Takes the version and every seed, as `evaluate_request` does and for the same
+    reason: the manifest records a digest per seed, so the seed list is an
+    argument rather than a Map item. The run is passed beside the version even
+    though the version contains one, because the execution claimed its cycle
+    under that run and the version was built several states later -- so the two
+    are separate values here and checking them against each other is a check.
+
+    `passed` is the value the cycle branches on, and this is the first step that
+    returns a real one -- the gates ran in the evaluation job and this reads
+    their report. Returned beside the request rather than derived from it later,
+    because the branch and the approval status the registry records have to be
+    one decision.
+
+    The group is returned separately from the request it also appears in. The
+    state machine opens it before registering into it, and a state that had to
+    reach inside a request to find the name of the thing it creates would be a
+    second spelling of it.
+    """
+    run_id = parse_run_id(str(event["run_id"]))
+    version = parse_model_version(str(event["version"]))
+    seeds = tuple(Seed(int(seed)) for seed in event["seeds"])
+
+    registered = registry_launch.register(aws, run_id, version, seeds)
+    log.info("%s registered as %s", version, "approved" if registered.passed else "rejected")
+    return {
+        "version": registered.version,
+        "passed": registered.passed,
+        "group": registered.group,
+        "request": registered.request,
+    }
+
+
 # The dispatch table, and the whole of this module's control flow. The keys are
 # the strings the ASL passes, so they are part of the interface between the two
 # files and are spelled once each.
@@ -262,6 +307,7 @@ STEPS: Final[Mapping[str, Callable[[boto3.Session, Mapping[str, Any]], dict[str,
     "score_prepare": score_prepare,
     "score_request": score_request,
     "evaluate_request": evaluate_request,
+    "register": register,
 }
 
 

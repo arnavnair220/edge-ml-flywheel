@@ -56,6 +56,21 @@ locals {
   # cycle hands its seeds exactly what this wrote.
   control_scoring_objects = "${local.bucket_arns["artifacts"]}/run_id=*/cycle=*/scoring/*"
 
+  # What `register` reads to build a manifest and what it writes when it has one.
+  #
+  # The gate report is the verdict, written by the evaluation job; the model
+  # prefix carries each seed's `model.sha256` and SageMaker's own `model.tar.gz`,
+  # which are the digest the manifest records and the object the registry points
+  # at. Both are reads of a prefix this role already lists.
+  control_gate_objects  = "${local.bucket_arns["artifacts"]}/run_id=*/cycle=*/gates/*"
+  control_model_objects = "${local.bucket_arns["artifacts"]}/run_id=*/cycle=*/models/*"
+
+  # `model_manifest_key`, and deliberately narrower than the prefix above. The
+  # training role writes everything else under `models/`; this role writes the
+  # one document in it that is not a model, which is what keeps "the job that
+  # produced the artifact did not also write the claims about it" true.
+  control_manifest_objects = "${local.bucket_arns["artifacts"]}/run_id=*/cycle=*/models/version=*/manifest.json"
+
   # `base_weights_key()`. Written by `launch.ensure_base` on the first cycle of a
   # fresh account and read by nothing here -- the training role is what reads it,
   # as a channel. One object rather than the prefix, so this grant cannot become
@@ -194,6 +209,28 @@ data "aws_iam_policy_document" "control" {
     resources = [local.control_base_object]
   }
 
+  # What `register` reads: the verdict the evaluation job wrote, and the digests
+  # and tarball the training job left beside each seed's model. Reads only -- the
+  # gate report is evidence about a decision already taken, and a control plane
+  # that could rewrite one could change a verdict after the fact.
+  statement {
+    sid       = "ReadTheVerdictAndTheArtifacts"
+    effect    = "Allow"
+    actions   = ["s3:GetObject"]
+    resources = [local.control_gate_objects, local.control_model_objects]
+  }
+
+  # The manifest, which is the one object this role writes under `models/`.
+  # `GetObject` is the read-back: the step does not report a registered model on
+  # the strength of a `put_object` that returned, the same arrangement the
+  # partitioner and the training job's upload use.
+  statement {
+    sid       = "WriteTheModelManifest"
+    effect    = "Allow"
+    actions   = ["s3:PutObject", "s3:GetObject"]
+    resources = [local.control_manifest_objects]
+  }
+
   statement {
     sid       = "ListTheCyclePrefix"
     effect    = "Allow"
@@ -206,12 +243,15 @@ data "aws_iam_policy_document" "control" {
 
       # `base/` alongside the cycle prefixes, because `ensure_base` decides
       # whether to fetch by listing and a denied listing reads as "not there yet"
-      # -- which would re-stage the base on every cycle. `models/*`,
-      # `detections/*` and `eval/*` are listed and never read: each `*_request`
-      # step checks that the inputs it is about to point a job at exist, which is
-      # a listing, and it opens none of the files. The distinction matters most
-      # for `eval/*`, which holds the cached match arrays -- the control plane
-      # confirms a champion has them and is in no position to read one.
+      # -- which would re-stage the base on every cycle. `detections/*` and
+      # `eval/*` are listed and never read: each `*_request` step checks that the
+      # inputs it is about to point a job at exist, which is a listing, and it
+      # opens none of the files. The distinction matters most for `eval/*`, which
+      # holds the cached match arrays -- the control plane confirms a champion has
+      # them and is in no position to read one. `models/*` is the exception and
+      # the reason is `register`: SageMaker files its `model.tar.gz` under a
+      # directory named for the training job, so the key the registry points at
+      # is found rather than built.
       values = [
         "run_id=*/cycle=*/training/*",
         "run_id=*/cycle=*/scoring/*",
@@ -394,6 +434,37 @@ data "aws_iam_policy_document" "cycle" {
 
     resources = [
       "arn:aws:sagemaker:${var.aws_region}:${var.account_id}:processing-job/*",
+    ]
+  }
+
+  # The registry. One group per run, opened by the first cycle that reaches the
+  # registration, and one version per cycle written into it with the gate's
+  # verdict as its approval status.
+  #
+  # No `UpdateModelPackage` and no delete. An approval status is the verdict a
+  # gate reached, and a role that could revise one could approve a model the
+  # gates rejected -- which is the single fact this whole plane exists to record
+  # faithfully. A promotion changes which version a device is pointed at, not
+  # what the registry says happened.
+  #
+  # `AddTags` because the request carries tags, and SageMaker treats tagging on
+  # create as its own action. Wildcarded resources for `RunProcessingJobs`'
+  # reason: neither the group nor the version exists before the call that names
+  # it, so there is nothing narrower to name.
+  statement {
+    sid    = "RegisterModelVersions"
+    effect = "Allow"
+
+    actions = [
+      "sagemaker:CreateModelPackageGroup",
+      "sagemaker:CreateModelPackage",
+      "sagemaker:DescribeModelPackage",
+      "sagemaker:AddTags",
+    ]
+
+    resources = [
+      "arn:aws:sagemaker:${var.aws_region}:${var.account_id}:model-package-group/*",
+      "arn:aws:sagemaker:${var.aws_region}:${var.account_id}:model-package/*",
     ]
   }
 

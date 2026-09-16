@@ -1,5 +1,5 @@
 {
-  "Comment": "One cycle of the flywheel, and the loop back to the next. Five of the thirteen steps are Pass stubs today, each carrying the comment that names the task replacing it. Start it with {\"run_id\": <id>, \"epochs\": <n>, \"seeds\": [1]}, and optionally max_images, replace and instance_type -- the last three apply to training and scoring alike, since both are capped and re-prepared together.",
+  "Comment": "One cycle of the flywheel, and the loop back to the next. Three of the sixteen steps are Pass stubs today, each carrying the comment that names the task replacing it. Start it with {\"run_id\": <id>, \"epochs\": <n>, \"seeds\": [1]}, and optionally max_images, replace and instance_type -- the last three apply to training and scoring alike, since both are capped and re-prepared together.",
   "QueryLanguage": "JSONata",
   "StartAt": "ClaimCycle",
   "States": {
@@ -270,9 +270,68 @@
     },
 
     "Register": {
-      "Comment": "STUB. Replaced by the Model Registry step that writes the manifest, checks it against the run registration, and records the verdict with its reason. The verdict it will record is already written: `Evaluate` puts it at `conventions.gate_report_key`, so what this step is missing is the read and the manifest, not the decision. It assigns `passed` because the branch below is real today and needs something to branch on.",
-      "Type": "Pass",
-      "Assign": { "passed": true },
+      "Comment": "Writes the cycle's model manifest and builds the request that records its verdict. It reaches no verdict of its own -- `Evaluate` wrote one at `conventions.gate_report_key` and this reads it -- and it refuses outright if the manifest contradicts the run registration, because that is a broken comparison rather than a rejected model. The three values it assigns are used by three different states, so they are variables rather than output: a state that had to reach into a request to find the group it creates would be a second spelling of that name. Retries are runtime faults only, for `Prepare`'s reason: ControlError is a refusal and is refused identically on a second attempt.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${control_function_arn}",
+        "Payload": "{% {'step': 'register', 'run_id': $states.context.Execution.Input.run_id, 'version': $seeds_scored[0].version, 'seeds': [$seeds_scored.seed]} %}"
+      },
+      "Assign": {
+        "passed": "{% $states.result.Payload.passed %}",
+        "package_group": "{% $states.result.Payload.group %}",
+        "package_request": "{% $states.result.Payload.request %}"
+      },
+      "Output": {},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "OpenTheRegistryGroup"
+    },
+
+    "OpenTheRegistryGroup": {
+      "Comment": "One model package group per run, opened by the first cycle that reaches this state. The catch is deliberately blanket: every cycle after the first finds the group already there, and what SageMaker calls that failure is a validation error whose message is not a contract worth matching on. Nothing else is being swallowed in practice -- a group is a name rather than a resource with state, so the only other way this fails is a missing grant, and `RegisterTheVersion` cannot succeed without the same grant and reports it one state later. Opening it here rather than at run registration keeps every SageMaker call in this file, where the execution history records it.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:sagemaker:createModelPackageGroup",
+      "Arguments": {
+        "ModelPackageGroupName": "{% $package_group %}",
+        "ModelPackageGroupDescription": "{% 'Model versions of run ' & $states.context.Execution.Input.run_id %}"
+      },
+      "Output": {},
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "RegisterTheVersion",
+          "Output": {}
+        }
+      ],
+      "Next": "RegisterTheVersion"
+    },
+
+    "RegisterTheVersion": {
+      "Comment": "The verdict as the registry records it, with ModelApprovalStatus set from the gates and the manifest attached as metadata. A rejected challenger is registered too, and that is the point: the rejection log is a feature (design section 5), and a registry holding only the approvals cannot show one. Built by the step above and created here for the reason the three job requests are -- the control function holds no SageMaker grant, so the function that builds a registration cannot make one.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:sagemaker:createModelPackage",
+      "Arguments": "{% $package_request %}",
+      "Output": {},
+      "Retry": [
+        {
+          "ErrorEquals": ["SageMaker.ThrottlingException", "SageMaker.SdkClientException"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
       "Next": "Passed"
     },
 

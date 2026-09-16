@@ -60,7 +60,7 @@ ASL = Path(__file__).resolve().parents[1] / "infra" / "cycle.asl.json"
 
 # The steps the diagram draws as stubs. Named here so that implementing one and
 # leaving it a `Pass` is a failing test.
-STUBS = frozenset({"Register", "Promote", "Select", "Purchase"})
+STUBS = frozenset({"Promote", "Select", "Purchase"})
 
 # The execution inputs an execution may leave out, and the handler defaults. They
 # are listed here rather than derived because the point of the test below is that
@@ -309,9 +309,13 @@ class TestTheHandler:
             ctrl.handler({"run_id": RUN})
 
     def test_names_the_steps_it_does_have(self) -> None:
-        """The message is what an operator reads off a failed execution."""
-        with pytest.raises(ctrl.ControlError, match="prepare, score_prepare"):
+        """The message is what an operator reads off a failed execution, so it
+        names every step rather than a sample -- and asserting on all of them
+        means a step added without being offered here is a failing test."""
+        with pytest.raises(ctrl.ControlError) as refusal:
             ctrl.handler({"step": "nope"})
+
+        assert all(step in str(refusal.value) for step in ctrl.STEPS)
 
     def test_the_step_names_are_the_ones_the_asl_passes(self) -> None:
         """The two files are an interface, and this is the half that can drift
@@ -494,6 +498,43 @@ class TestTheDefinition:
                     f"leaves it out fails here instead of taking the handler's default: "
                     f"{expression}"
                 )
+
+    def test_the_verdict_the_cycle_branches_on_comes_from_the_gates(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """`passed` was a literal `true` while `Register` was a stub, which made
+        the branch below decorative. It is now assigned from what the step
+        returned, and the step reads the gate report."""
+        register = definition["States"]["Register"]
+        assert register["Type"] == "Task"
+        assert register["Assign"]["passed"] == "{% $states.result.Payload.passed %}"
+
+    def test_the_version_is_registered_whatever_the_verdict(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """The rejection log is a feature (design section 5). Registration sits
+        before the branch, so there is no path on which a refused challenger goes
+        unrecorded."""
+        assert definition["States"]["Register"]["Next"] == "OpenTheRegistryGroup"
+        assert definition["States"]["OpenTheRegistryGroup"]["Next"] == "RegisterTheVersion"
+        assert definition["States"]["RegisterTheVersion"]["Next"] == "Passed"
+
+    def test_the_registry_calls_are_the_state_machines(self, definition: dict[str, Any]) -> None:
+        """The control function builds the request and holds no SageMaker grant,
+        so the call happens here, where the execution history records it."""
+        for name, action in (
+            ("OpenTheRegistryGroup", "sagemaker:createModelPackageGroup"),
+            ("RegisterTheVersion", "sagemaker:createModelPackage"),
+        ):
+            assert definition["States"][name]["Resource"] == f"arn:aws:states:::aws-sdk:{action}"
+
+    def test_a_group_that_already_exists_is_not_a_failed_cycle(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """One group per run, so every cycle after the first finds it there."""
+        catch = definition["States"]["OpenTheRegistryGroup"]["Catch"]
+        assert catch[0]["ErrorEquals"] == ["States.ALL"]
+        assert catch[0]["Next"] == "RegisterTheVersion"
 
     def test_the_claim_is_conditional_on_the_cap(self, definition: dict[str, Any]) -> None:
         """The single-flight lock. Without the condition this is a counter two
