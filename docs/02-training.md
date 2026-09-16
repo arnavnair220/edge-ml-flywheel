@@ -84,9 +84,48 @@ writes only `run_id=*/cycle=*/models/*`. See [infra/training.tf](../infra/traini
 |---|---|
 | `model.tar.gz` | `seed=<n>/_sagemaker/` |
 | `model.pt` | `model_artifact_key(version, seed, TORCH)` |
+| `model.onnx` | `model_artifact_key(version, seed, ONNX)` |
 | `model.sha256` | `model_artifact_key(version, seed, SHA256)` |
 
-The job reads its upload back and compares digests before reporting success.
+`model.pt` is the checkpoint the scoring job loads. `model.onnx` is the int8 graph the fleet runs,
+and the digest the model manifest carries. Every seed exports one, so `artifact_sha256` names the
+same kind of file for the seed that ships and for the seeds retained beside it.
+
+`model.sha256` lists both digests in `sha256sum -c` format, one line per artifact, so a device
+verifies its download with the tool it already has. The job reads every upload back and compares
+digests before reporting success.
+
+---
+
+## Export
+
+The deployed artifact is produced in this job rather than a later one, so the weights and the file
+that ships are never separated by a step that can fail between them.
+
+| Step | Setting |
+|---|---|
+| ONNX export | opset 17, static shapes, NMS outside the graph |
+| Quantization | `onnxruntime` static, QDQ format, convolutions only |
+| Weight scales | per channel |
+| Detection head | excluded, left at full precision |
+| Calibration | 256 training images, letterboxed as inference letterboxes them |
+
+Ultralytics' own int8 path targets TensorRT and OpenVINO, so the export is fp32 and the
+quantization is a second pass over it.
+
+Per-channel scales and the excluded head are the starting configuration, not a remedy applied after
+a failure. One scale shared across a convolution's output channels quantizes the narrow ones to a
+constant; the head's convolutions emit box coordinates directly, where a rounded value displaces a
+box past the IoU threshold rather than blurring a feature. Neither is a finding worth a cycle of GPU
+time, and the head is a small share of a model whose parameters are in its backbone.
+
+The head is named by module path: Ultralytics exports each node under `/model.<n>/`, numbered in
+definition order with `Detect` last, so the highest index present is the head. A graph the rule
+cannot read produces no artifact — quantizing the head silently is the failure it exists to prevent.
+
+Calibration frames are drawn from the cycle's training images. `eval` frames would fold the cohort
+the model is scored on into how the model is built, and the training role cannot read them in any
+case.
 
 ---
 
@@ -110,5 +149,7 @@ one tree.
 
 ## Incomplete
 
-The overview's plane 2 covers an int8 ONNX export. It is not built: the exported artifact is
-`model.pt` only.
+The quantized model's accuracy is not yet measured against fp32. Two of the edge gate's four
+thresholds need no device — artifact size and accuracy within 2% relative — and until the second is
+checked, the export is known to produce a small artifact and not known to preserve the model. That
+measurement is plane 3's, over `eval`.

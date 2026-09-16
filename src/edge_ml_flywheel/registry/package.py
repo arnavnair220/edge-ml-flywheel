@@ -141,7 +141,7 @@ def model_card(manifest: ModelManifest, buckets: Buckets) -> dict[str, Any]:
     elsewhere or not at all, and a card padded with restated defaults is a card
     nobody reads twice.
     """
-    deployed = model_artifact_key(manifest.version, manifest.deployed_seed, ModelArtifact.TORCH)
+    deployed = model_artifact_key(manifest.version, manifest.deployed_seed, ModelArtifact.ONNX)
     return {
         "model_overview": {
             "model_name": str(manifest.version),

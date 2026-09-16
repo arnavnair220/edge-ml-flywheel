@@ -88,14 +88,21 @@ ignore_missing_imports = true
 module = ["boto3.*", "botocore.*"]
 ignore_missing_imports = true
 
-# The training container's two packages, which are deliberately not in the
-# lockfile: they are installed by pip inside the prebuilt image from
+# The training container's packages, which are deliberately not in the lockfile:
+# they are installed by pip inside the prebuilt image from
 # `container/requirements.txt`, against a torch build the image was assembled
 # around. So they are absent locally by design rather than by omission, and the
 # alternative to this override is a multi-gigabyte CUDA install in CI to type
-# check one module. `entrypoint` is the only module that imports either.
+# check two modules.
+#
+# `cv2` arrives with `ultralytics` rather than on its own line in the
+# requirements file, and is listed here because `training.export` imports it
+# directly to preprocess calibration frames. `onnx` and `onnxruntime` are the
+# export path's own. Only `entrypoint`, `scoring.entrypoint` and
+# `training.export` import any of them -- `training.quantization` holds the part
+# of the export worth testing precisely so that it imports none.
 [[tool.mypy.overrides]]
-module = ["ultralytics.*", "torch.*"]
+module = ["ultralytics.*", "torch.*", "cv2.*", "onnx.*", "onnxruntime.*"]
 ignore_missing_imports = true
 
 [dependency-groups]

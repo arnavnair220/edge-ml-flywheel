@@ -811,11 +811,71 @@ def partition_spec(partition_version: PartitionVersion) -> PartitionSpec:
 
 
 class ModelArtifact(StrEnum):
-    """Filenames under a seed's model prefix."""
+    """Filenames under a seed's model prefix.
+
+    `TORCH` is the checkpoint the scoring job loads. `ONNX` is the int8 graph the
+    fleet runs and the file the manifest's digest names. `SHA256` lists the
+    digests of the other two in the format `sha256sums` reads.
+    """
 
     ONNX = "model.onnx"
     TORCH = "model.pt"
     SHA256 = "model.sha256"
+
+
+# A `sha256sum -c` line is the digest and the filename, and nothing else. A
+# third field is a file this package did not write, not a line to read past.
+_SHA256SUM_FIELDS: Final = 2
+
+
+def sha256sums_document(digests: Mapping[ModelArtifact, str]) -> str:
+    """The `ModelArtifact.SHA256` file, as the training job writes it.
+
+    `sha256sum -c` format -- `<digest>  <filename>`, two spaces, one line per
+    artifact -- so the device verifies its download with the tool it already has
+    rather than with a parser this project ships to it.
+
+    Written here rather than in the job so that the writer and `sha256sums`
+    below cannot disagree about the format. They are the two halves of one file,
+    separated by an S3 object and several hours.
+    """
+    return "".join(
+        f"{digests[artifact]}  {artifact.value}\n" for artifact in sorted(digests, key=str)
+    )
+
+
+def sha256sums(document: str) -> dict[ModelArtifact, str]:
+    """The digests a `ModelArtifact.SHA256` file lists, keyed by artifact.
+
+    Strict about both halves of every line, because this is the last place a
+    malformed digest can be caught with the bytes still nearby: the next reader
+    is a device refusing to load a model, hours later and out of reach. A line
+    naming a file the enum does not know is refused rather than skipped -- an
+    artifact this package cannot name is one nothing here can deploy.
+    """
+    digests: dict[ModelArtifact, str] = {}
+    for number, line in enumerate(document.splitlines(), start=1):
+        if not line.strip():
+            continue
+        fields = line.split()
+        if len(fields) != _SHA256SUM_FIELDS:
+            raise ValueError(f"line {number} is not `<digest>  <filename>`: {line!r}")
+        digest, filename = fields
+        if not _SHA256.match(digest):
+            raise ValueError(f"line {number} is not a lowercase hex sha256: {digest!r}")
+        try:
+            artifact = ModelArtifact(filename)
+        except ValueError:
+            listed = ", ".join(sorted(str(item) for item in ModelArtifact))
+            raise ValueError(
+                f"line {number} names {filename!r}, which is not a model artifact. Named: {listed}"
+            ) from None
+        if artifact in digests:
+            raise ValueError(
+                f"line {number} repeats {filename}, with no way to tell which line is the file"
+            )
+        digests[artifact] = digest
+    return digests
 
 
 # --- Buckets -----------------------------------------------------------------
@@ -1361,12 +1421,14 @@ class ModelManifest:
     design section 7 depends on each one existing and being identifiable at the
     cycle it was trained in. The device agent verifies the digest before loading
     (design section 6), so a truncated download becomes a rejection instead of a
-    model that silently returns nonsense. Which file that is follows the export:
-    `ModelArtifact.TORCH` today, taken where the bytes were produced and
-    published beside them as `ModelArtifact.SHA256`, and `ModelArtifact.ONNX`
-    once the int8 export lands. The field names a digest rather than a file for
-    exactly that reason -- what the device verifies changes, that it verifies
-    does not.
+    model that silently returns nonsense.
+
+    The file it names is `ModelArtifact.ONNX`, the int8 graph, because that is
+    what the device loads and a digest of anything else verifies nothing it
+    does. Every seed exports one, so the field means the same thing for the seed
+    that ships and for the seeds retained beside it. The digest is taken where
+    the bytes were produced and published beside them as `ModelArtifact.SHA256`,
+    which `sha256sums` reads the line out of.
 
     `registry.manifest` serializes this, and the registration step writes it
     before it reads it back.

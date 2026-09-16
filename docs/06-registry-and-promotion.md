@@ -20,7 +20,7 @@ cannot be promoted.
 | `cohorts_trained_on` | `bootstrap`, and `pool` once anything has been bought |
 | `labels_spent` | images under `derived/purchases/<run_id>/` |
 | `deployed_seed` | the lowest seed the cycle trained |
-| `artifact_sha256` | each seed's `model.sha256` |
+| `artifact_sha256` | the `model.onnx` line of each seed's `model.sha256` |
 | `gates` | the report at `gate_report_key(run_id, cycle)` |
 
 The document is read back and re-parsed after the write, so a field that does not survive the round
@@ -111,7 +111,10 @@ Lambda environment variable set at deploy time.
 registration it checks against, so it becomes live only once a version reaches this step from the
 job that ran under it rather than from the item that job was configured from.
 
-`artifact_sha256` is the digest of `model.pt`. The int8 ONNX export is plane 2's, and unbuilt.
+`artifact_sha256` is the digest of `model.onnx`, the int8 graph the device loads — a digest of
+anything else verifies nothing the device does. It is read out of `model.sha256` by filename rather
+than by position, so a third artifact appearing in that file cannot change which line the manifest
+records. A seed that published no ONNX digest is refused registration.
 
 The overview's plane 6 covers a candidate → shadow → canary → champion → archived progression. The
 approval status and the champion pointer exist; the intermediate states belong with the fleet.

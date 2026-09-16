@@ -53,6 +53,7 @@ from edge_ml_flywheel.conventions import (
     model_version_cycle,
     model_version_run_id,
     purchases_run_prefix,
+    sha256sums,
     uri,
 )
 from edge_ml_flywheel.registry import manifest as document
@@ -113,8 +114,12 @@ def artifact_digests(
     and it is precisely a disagreement between those two that the device's check
     exists to catch.
 
-    `sha256sum -c` format, so the file is `<digest>  <filename>` and the first
-    token is what the manifest records.
+    `sha256sum -c` format, so the file is one `<digest>  <filename>` line per
+    artifact the job published. The line this reads is `ModelArtifact.ONNX`: the
+    manifest's digest is the one the device checks before loading, and what the
+    device loads is the int8 graph. Selected by name rather than by position,
+    because a file whose first line is the answer is a file that silently
+    changes answer when a third artifact sorts above it.
     """
     digests: dict[Seed, str] = {}
     for seed in sorted(seeds):
@@ -125,7 +130,14 @@ def artifact_digests(
                 f"digest. A model whose artifact cannot be identified cannot be registered."
             )
         body = aws.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
-        digests[seed] = body.decode().split(maxsplit=1)[0]
+        published = sha256sums(body.decode())
+        if ModelArtifact.ONNX not in published:
+            raise SystemExit(
+                f"{uri(bucket, key)} lists no digest for {ModelArtifact.ONNX.value}, so seed "
+                f"{seed} of {version} published no deployable artifact. The manifest's digest is "
+                f"what the device verifies, and it cannot name a file that was never exported."
+            )
+        digests[seed] = published[ModelArtifact.ONNX]
 
     return digests
 
