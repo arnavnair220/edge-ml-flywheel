@@ -60,7 +60,7 @@ ASL = Path(__file__).resolve().parents[1] / "infra" / "cycle.asl.json"
 
 # The six steps the diagram draws as stubs. Named here so that implementing one
 # and leaving it a `Pass` is a failing test.
-STUBS = frozenset({"Score", "Evaluate", "Register", "Promote", "Select", "Purchase"})
+STUBS = frozenset({"Evaluate", "Register", "Promote", "Select", "Purchase"})
 
 # The execution inputs an execution may leave out, and the handler defaults. They
 # are listed here rather than derived because the point of the test below is that
@@ -310,7 +310,7 @@ class TestTheHandler:
 
     def test_names_the_steps_it_does_have(self) -> None:
         """The message is what an operator reads off a failed execution."""
-        with pytest.raises(ctrl.ControlError, match="prepare, train_request"):
+        with pytest.raises(ctrl.ControlError, match="prepare, score_prepare"):
             ctrl.handler({"step": "nope"})
 
     def test_the_step_names_are_the_ones_the_asl_passes(self) -> None:
@@ -349,7 +349,7 @@ class TestTheHandler:
 class TestTheDeployedArchive:
     """The wrinkle the Lambda exists around: it has no git checkout, so the tree
     it packs is what Terraform deployed -- the package under `LAMBDA_TASK_ROOT`
-    and the two script-mode root files in a layer at `/opt`."""
+    and the root files in a layer at `/opt`."""
 
     def _deployment(self, root: Path) -> tuple[Path, Path]:
         package = root / "task" / "edge_ml_flywheel"
@@ -360,18 +360,24 @@ class TestTheDeployedArchive:
         layer = root / "opt"
         layer.mkdir()
         (layer / "train.py").write_text("# entry point", encoding="utf-8")
+        (layer / "score.py").write_text("# entry point", encoding="utf-8")
         (layer / "requirements.txt").write_text("ultralytics==8.4.146\n", encoding="utf-8")
 
         return package, layer
 
-    def test_puts_the_entry_point_at_the_root_beside_the_package(self, tmp_path: Path) -> None:
-        """Script mode requires `train.py` at the root of the archive, and the
-        package below it -- which is the whole reason the two directories are
-        separate arguments."""
+    def test_puts_both_entry_points_at_the_root_beside_the_package(self, tmp_path: Path) -> None:
+        """Script mode requires `train.py` at the root of the archive and
+        `scoring.job.container_entrypoint` names `score.py` there, which is the
+        whole reason the two directories are separate arguments.
+
+        One archive serving both jobs is also the provenance claim: the code that
+        scored a model is the tree that trained it, under one `git_commit`.
+        """
         package, layer = self._deployment(tmp_path)
         names = _tar_names(launch.archive(package, layer))
 
         assert "train.py" in names
+        assert "score.py" in names
         assert "requirements.txt" in names
         assert "edge_ml_flywheel/training/job.py" in names
 
@@ -407,7 +413,7 @@ class TestTheDefinition:
                     continue
                 assert state.get("End") or _targets(state), f"{name} goes nowhere"
 
-    def test_the_stubs_are_the_six_the_diagram_draws(self, definition: dict[str, Any]) -> None:
+    def test_the_stubs_are_the_ones_still_to_land(self, definition: dict[str, Any]) -> None:
         """A `Pass` becoming a `Task` is a step landing, and it should be a test
         that has to be edited rather than a change nobody notices."""
         passes = {name for name, state in definition["States"].items() if state["Type"] == "Pass"}

@@ -1,5 +1,5 @@
 {
-  "Comment": "One cycle of the flywheel, and the loop back to the next. Six of the eleven steps are Pass stubs today, each carrying the comment that names the task replacing it. Start it with {\"run_id\": <id>, \"epochs\": <n>, \"seeds\": [1]}, and optionally max_images, replace and instance_type.",
+  "Comment": "One cycle of the flywheel, and the loop back to the next. Five of the thirteen steps are Pass stubs today, each carrying the comment that names the task replacing it. Start it with {\"run_id\": <id>, \"epochs\": <n>, \"seeds\": [1]}, and optionally max_images, replace and instance_type -- the last three apply to training and scoring alike, since both are capped and re-prepared together.",
   "QueryLanguage": "JSONata",
   "StartAt": "ClaimCycle",
   "States": {
@@ -129,17 +129,106 @@
         "seeds_trained": "{% $states.result %}"
       },
       "Output": {},
+      "Next": "ScorePrepare"
+    },
+
+    "ScorePrepare": {
+      "Comment": "Writes the two manifests naming what this cycle scores: the frozen eval cohort, and the pool minus everything the run has bought. Once per cycle rather than once per seed, for `Prepare`'s reason -- every seed scores the same images, and two documents differing by seed would be one list written twice with nothing to say which was ranked. Placed after `Train` rather than beside `Prepare` because the pool it names is the pool this cycle's challenger will rank, and reading it later is what makes the document the record of that. The payload is one JSONata object for `Prepare`'s reason, so `max_images` and `replace` stay optional.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${control_function_arn}",
+        "Payload": "{% {'step': 'score_prepare', 'run_id': $states.context.Execution.Input.run_id, 'cycle': $cycle, 'max_images': $states.context.Execution.Input.max_images, 'replace': $states.context.Execution.Input.replace} %}"
+      },
+      "Assign": {
+        "scored": "{% $states.result.Payload.images %}"
+      },
+      "Output": {},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
       "Next": "Score"
     },
 
     "Score": {
-      "Comment": "STUB. Replaced by a Batch Transform over the eval cohort and the remaining pool, caching per-image match arrays so that every later question -- paired deltas, confidence bands, per-slice metrics -- is answered from the cache rather than by scoring again.",
-      "Type": "Pass",
+      "Comment": "One scoring job per seed the cycle trained, over the two manifests above. `Items` is `$seeds_trained` rather than the execution's seed list, so a seed that failed to train is a seed nothing tries to score -- and the version and seed each job needs are already in what `Train` assigned. MaxConcurrency for `Train`'s reason: these are the same GPU instance type and the same on-demand quota, so a wider fan-out here competes with nothing today and fails on ResourceLimitExceeded the moment the seed list grows.",
+      "Type": "Map",
+      "Items": "{% $seeds_trained %}",
+      "MaxConcurrency": 1,
+      "ItemSelector": {
+        "version": "{% $states.context.Map.Item.Value.version %}",
+        "seed": "{% $states.context.Map.Item.Value.seed %}"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "ScoringRequest",
+        "States": {
+          "ScoringRequest": {
+            "Comment": "`TrainingRequest`'s arrangement for the other job: the request is built by the same function a CLI calls, so this file is a second caller of one definition rather than a second definition written in a language with no tests. `instance_type` is the only compute field an execution may set, and the scoring recipe -- resolution, confidence floor, detection cap -- is not among them: each is pinned to a value another component depends on, so an input for one would be a way to score two cycles of one run differently.",
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Arguments": {
+              "FunctionName": "${control_function_arn}",
+              "Payload": "{% {'step': 'score_request', 'version': $states.input.version, 'seed': $states.input.seed, 'instance_type': $states.context.Execution.Input.instance_type} %}"
+            },
+            "Output": "{% $states.result.Payload %}",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+              }
+            ],
+            "Next": "ScoreSeed"
+          },
+
+          "ScoreSeed": {
+            "Comment": "`.sync` owns the wait, for `TrainSeed`'s reasons. A failed job restarts from the beginning, which costs a pass over the images rather than a training run and is safe to repeat: the job reads a frozen model and two frozen manifests and writes one object per cohort, so a second attempt produces the same detections and overwrites its own partial output. Two attempts rather than many -- a job that cannot get an instance twice is a quota problem and not a flake.",
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sagemaker:createProcessingJob.sync",
+            "Arguments": "{% $states.input.request %}",
+            "Output": {
+              "seed": "{% $states.input.seed %}",
+              "version": "{% $states.input.version %}",
+              "job": "{% $states.result.ProcessingJobName %}"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": ["States.TaskFailed"],
+                "IntervalSeconds": 60,
+                "MaxAttempts": 2,
+                "BackoffRate": 2
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "Assign": {
+        "seeds_scored": "{% $states.result %}"
+      },
+      "Output": {},
       "Next": "Evaluate"
     },
 
     "Evaluate": {
-      "Comment": "STUB. Replaced by a Processing job running the four gates over the cached matches and writing the per-slice regression report under the cycle prefix.",
+      "Comment": "STUB. Replaced by a Processing job that reads the detections `Score` wrote, matches them against the eval cohort's ground truth into the per-image match arrays `evaluation.match` caches, runs the four gates over those, and writes the per-slice regression report under the cycle prefix. That job is the one principal in the account admitted to `labels/cohort=eval/` -- scoring deliberately holds no label grant, so the matching is where the two halves meet.",
       "Type": "Pass",
       "Next": "Register"
     },

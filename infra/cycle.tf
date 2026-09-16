@@ -40,10 +40,21 @@ locals {
   # what the manifest names. `cohort=eval/` is absent here and denied to every
   # principal by the bucket, so the manifest cannot name an eval frame even if
   # this role were wrong about which prefix it was reading.
+  #
+  # `assignments_prefix(v)` joins them for `score_prepare`, which subtracts what
+  # a run has bought from the pool the partition drew. Two columns and no box: an
+  # assignment says which cohort an image is in, which is the fact the eval wall
+  # is built on rather than a thing the wall keeps out.
   control_label_objects = [
     "${local.bucket_arns["data"]}/derived/partition_version=*/labels/cohort=bootstrap/*",
+    "${local.bucket_arns["data"]}/derived/partition_version=*/assignments/*",
     "${local.bucket_arns["data"]}/derived/purchases/*",
   ]
+
+  # `scoring_manifest_key`. Written by `score_prepare` and read by the scoring
+  # role, the same arrangement the training prefix has one step earlier: one
+  # cycle hands its seeds exactly what this wrote.
+  control_scoring_objects = "${local.bucket_arns["artifacts"]}/run_id=*/cycle=*/scoring/*"
 
   # `base_weights_key()`. Written by `launch.ensure_base` on the first cycle of a
   # fresh account and read by nothing here -- the training role is what reads it,
@@ -146,6 +157,7 @@ data "aws_iam_policy_document" "control" {
 
       values = [
         "derived/partition_version=*/labels/cohort=bootstrap/*",
+        "derived/partition_version=*/assignments/*",
         "derived/purchases/*",
       ]
     }
@@ -158,16 +170,16 @@ data "aws_iam_policy_document" "control" {
     resources = local.control_label_objects
   }
 
-  # The manifest and the source archive. `PutObject` and no delete against a
-  # write-once bucket, and `ListBucket` because `prepare` refuses to overwrite a
-  # cycle that has already been prepared -- that refusal is a listing, and
-  # without this grant it would read as "not there yet" and overwrite the record
-  # of what a challenger trained on.
+  # The manifests and the source archive, both cycles' worth. `PutObject` and no
+  # delete against a write-once bucket, and `ListBucket` below because both
+  # prepare steps refuse to overwrite a cycle that has already been prepared --
+  # that refusal is a listing, and without the grant it would read as "not there
+  # yet" and overwrite the record of what a challenger trained on or ranked.
   statement {
-    sid       = "WriteTheCycleTrainingInputs"
+    sid       = "WriteTheCycleJobInputs"
     effect    = "Allow"
     actions   = ["s3:PutObject", "s3:GetObject"]
-    resources = [local.control_training_objects]
+    resources = [local.control_training_objects, local.control_scoring_objects]
   }
 
   # The COCO base, staged by `prepare` when the bucket has none so that a fresh
@@ -191,11 +203,15 @@ data "aws_iam_policy_document" "control" {
       test     = "StringLike"
       variable = "s3:prefix"
 
-      # `base/` alongside the cycle prefix, because `ensure_base` decides whether
-      # to fetch by listing and a denied listing reads as "not there yet" -- which
-      # would re-stage the base on every cycle.
+      # `base/` alongside the cycle prefixes, because `ensure_base` decides
+      # whether to fetch by listing and a denied listing reads as "not there yet"
+      # -- which would re-stage the base on every cycle. `models/*` is listed and
+      # not read: `score_request` checks that the checkpoint it is about to point
+      # a job at exists, which is a listing, and it never opens the file.
       values = [
         "run_id=*/cycle=*/training/*",
+        "run_id=*/cycle=*/scoring/*",
+        "run_id=*/cycle=*/models/*",
         "base/*",
       ]
     }
@@ -240,7 +256,7 @@ resource "aws_cloudwatch_log_group" "control" {
 
 resource "aws_lambda_function" "control" {
   function_name = local.control_function_name
-  description   = "Two steps of a cycle that are Python: writing the image manifest, and building one seed's training request."
+  description   = "The steps of a cycle that are Python: writing the training and scoring manifests, and building one seed's request for each job."
   role          = aws_iam_role.control.arn
   handler       = "edge_ml_flywheel.control.handler.handler"
   runtime       = local.control_runtime
@@ -302,7 +318,7 @@ data "aws_iam_policy_document" "cycle_trust" {
 
 resource "aws_iam_role" "cycle" {
   name               = local.cycle_machine_name
-  description        = "The cycle state machine. Claims a cycle, invokes the control function, and starts training jobs as the training role."
+  description        = "The cycle state machine. Claims a cycle, invokes the control function, and starts training and scoring jobs as their own roles."
   assume_role_policy = data.aws_iam_policy_document.cycle_trust.json
 }
 
@@ -349,15 +365,42 @@ data "aws_iam_policy_document" "cycle" {
     ]
   }
 
-  # The one grant that makes the label wall a question about this role. Handing
-  # SageMaker the training role is how a job gets any data access at all, so the
-  # condition pins the service it can be handed to: without it, a principal that
-  # could start a training job could pass this role to anything that accepts one.
+  # The same four `.sync` needs, for the other job a cycle runs. A separate
+  # statement rather than more actions on the one above, because the resource is
+  # a different type and collapsing them would mean granting training actions on
+  # processing jobs and the reverse -- which is not a wider grant that matters,
+  # but is a policy that stops saying which job each action is for.
   statement {
-    sid       = "PassTheTrainingRole"
+    sid    = "RunScoringJobs"
+    effect = "Allow"
+
+    actions = [
+      "sagemaker:CreateProcessingJob",
+      "sagemaker:DescribeProcessingJob",
+      "sagemaker:StopProcessingJob",
+      "sagemaker:AddTags",
+      "sagemaker:ListTags",
+    ]
+
+    resources = [
+      "arn:aws:sagemaker:${var.aws_region}:${var.account_id}:processing-job/*",
+    ]
+  }
+
+  # The grant that makes the label wall a question about this role. Handing
+  # SageMaker one of these roles is how a job gets any data access at all, so the
+  # condition pins the service they can be handed to: without it, a principal that
+  # could start a job could pass either role to anything that accepts one.
+  #
+  # Two roles and not one, and that is the point of there being two. This role can
+  # start a job that reads the labels a run owns, and a job that reads no label at
+  # all, and which of those a given job is follows from which role it was passed
+  # -- not from what its container happens to do with the grant.
+  statement {
+    sid       = "PassTheJobRoles"
     effect    = "Allow"
     actions   = ["iam:PassRole"]
-    resources = [aws_iam_role.training.arn]
+    resources = [aws_iam_role.training.arn, aws_iam_role.scoring.arn]
 
     condition {
       test     = "StringEquals"
@@ -368,9 +411,10 @@ data "aws_iam_policy_document" "cycle" {
 
   # `.sync` is implemented with a managed EventBridge rule that tells Step
   # Functions when the job reaches a terminal state, and the rule is created by
-  # this role on first use. The name is the service's, not ours.
+  # this role on first use. One rule per job type, and both names are the
+  # service's, not ours.
   statement {
-    sid    = "ManageTheSyncCompletionRule"
+    sid    = "ManageTheSyncCompletionRules"
     effect = "Allow"
 
     actions = [
@@ -381,6 +425,7 @@ data "aws_iam_policy_document" "cycle" {
 
     resources = [
       "arn:aws:events:${var.aws_region}:${var.account_id}:rule/StepFunctionsGetEventsForSageMakerTrainingJobsRule",
+      "arn:aws:events:${var.aws_region}:${var.account_id}:rule/StepFunctionsGetEventsForSageMakerProcessingJobsRule",
     ]
   }
 

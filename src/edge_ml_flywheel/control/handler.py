@@ -1,9 +1,17 @@
 """One Lambda, one entry point, dispatching on a step name.
 
-Two steps today, because two of a cycle's states need Python that already
-exists: `prepare` writes the cycle's image manifest and source archive, and
-`train_request` builds one seed's `CreateTrainingJob` request for the state
-machine to hand to `sagemaker:createTrainingJob.sync`.
+Four steps today, because four of a cycle's states need Python that already
+exists: `prepare` writes the cycle's image manifest and source archive,
+`train_request` builds one seed's `CreateTrainingJob` request, `score_prepare`
+writes the two manifests naming what this cycle scores, and `score_request`
+builds one seed's `CreateProcessingJob` request. The state machine hands the
+last two to `sagemaker:createTrainingJob.sync` and
+`sagemaker:createProcessingJob.sync`.
+
+**The two `*_request` steps build and do not call**, for the reason given below,
+and the two `*_prepare` steps run once per cycle rather than once per seed. Both
+pairs are the same split: what a cycle hands its seeds is written before the Map,
+and what one seed does with it is resolved inside.
 
 **One function rather than one Lambda per step.** The steps share their whole
 context -- a session, the bucket names, the run registration -- and none of them
@@ -38,7 +46,15 @@ from typing import Any, Final
 
 import boto3
 
-from edge_ml_flywheel.conventions import Cycle, Seed, new_model_version, parse_run_id
+from edge_ml_flywheel.conventions import (
+    Cycle,
+    Seed,
+    new_model_version,
+    parse_model_version,
+    parse_run_id,
+)
+from edge_ml_flywheel.scoring import job as scoring_job
+from edge_ml_flywheel.scoring import launch as scoring_launch
 from edge_ml_flywheel.training import job, launch
 
 log = logging.getLogger()
@@ -142,12 +158,70 @@ def train_request(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any
     return {"version": version, "seed": seed, "request": built}
 
 
+def score_prepare(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
+    """Write the two manifests naming what this cycle scores.
+
+    `max_images` and `replace` are read with defaults for `prepare`'s reason, and
+    they are the same two knobs meaning the same two things one step later: 0 is
+    every image in the cohort, and a cycle already prepared for scoring is an
+    error rather than something to overwrite.
+
+    The counts come back per cohort so the execution history records what each
+    manifest named. A pool that has stopped shrinking, or an eval that is not
+    5,000, is visible in the state output rather than only in a log group.
+    """
+    run_id = parse_run_id(str(event["run_id"]))
+    cycle = Cycle(int(event["cycle"]))
+
+    named = scoring_launch.prepare(
+        aws,
+        run_id,
+        cycle,
+        scoring_launch.Preparation(
+            max_images=int(event.get("max_images", 0)),
+            replace=bool(event.get("replace", False)),
+        ),
+    )
+    return {
+        "run_id": run_id,
+        "cycle": cycle,
+        "images": {cohort.value: count for cohort, count in named.items()},
+    }
+
+
+def score_request(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
+    """Build one seed's `CreateProcessingJob` request and return it unstarted.
+
+    Takes the version rather than a run and a cycle, unlike the two `prepare`
+    steps: by this point in a cycle the model exists and is what is being scored,
+    and the run and cycle are inside its version. Passing all three is how a job
+    comes to score a model under a cycle it was not trained in.
+
+    Every field of `Scoring` is a default here. They are the scoring half of the
+    recipe -- resolution, confidence floor, detection cap -- and each is pinned to
+    a value another component depends on, so an execution input for any of them
+    would be a way to score two cycles of one run differently.
+    """
+    version = parse_model_version(str(event["version"]))
+    seed = Seed(int(event["seed"]))
+
+    compute = scoring_job.Compute(
+        instance_type=str(event.get("instance_type", scoring_job.Compute().instance_type)),
+    )
+
+    built = scoring_launch.request(aws, version, seed, scoring_job.Scoring(), compute)
+    log.info("built the scoring request for %s seed %d", version, seed)
+    return {"version": version, "seed": seed, "request": built}
+
+
 # The dispatch table, and the whole of this module's control flow. The keys are
 # the strings the ASL passes, so they are part of the interface between the two
 # files and are spelled once each.
 STEPS: Final[Mapping[str, Callable[[boto3.Session, Mapping[str, Any]], dict[str, Any]]]] = {
     "prepare": prepare,
     "train_request": train_request,
+    "score_prepare": score_prepare,
+    "score_request": score_request,
 }
 
 

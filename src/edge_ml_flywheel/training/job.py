@@ -85,6 +85,14 @@ BASE_CHANNEL: Final = "base"
 # point there, and it does nothing but call into this package.
 ENTRY_POINT: Final = "train.py"
 
+# The input resolution, here rather than only as a field default because the
+# scoring job has to run the model at the resolution it was trained at and a
+# second `416` would be a second place for that to stop being true. 416 is a
+# handicap as much as an edge constraint (design section 3): a COCO-pretrained
+# detector at full resolution starts strong enough that a cycle's 1,000 labels
+# cannot move the metric.
+IMAGE_SIZE: Final = 416
+
 # SageMaker caps a training job name at 63 characters, and the name is built
 # from parts this project already fixed the width of: a 16-character timestamp,
 # the run slug, `-c` and three digits, `-s` and one, and a seven-character
@@ -140,9 +148,10 @@ class Recipe:
     to be a claim about, and so that a change to one of them is visible as a
     change to this class.
 
-    `image_size` is 416 and is a handicap as much as an edge constraint (design
-    section 3): a COCO-pretrained detector at full resolution starts strong
-    enough that a cycle's 1,000 labels cannot move the metric.
+    `image_size` is `IMAGE_SIZE`, which is a module constant rather than a
+    literal here because the scoring job runs the model at the same number and
+    two spellings of it is how a model comes to be evaluated at a resolution it
+    was not trained at.
 
     `freeze` holds the first ten modules, which is YOLO11n's backbone. Fine-tune
     the head, never train from scratch: it costs 10-100x more and lands in the
@@ -150,7 +159,7 @@ class Recipe:
     """
 
     epochs: int
-    image_size: int = 416
+    image_size: int = IMAGE_SIZE
     batch: int = 16
     freeze: int = 10
 

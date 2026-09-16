@@ -47,6 +47,7 @@ from edge_ml_flywheel.conventions import (
     RunId,
     RunRegistration,
     Seed,
+    Split,
     base_weights_key,
     cohort_labels_prefix,
     model_version_cycle,
@@ -57,15 +58,24 @@ from edge_ml_flywheel.conventions import (
     uri,
 )
 from edge_ml_flywheel.run import registration as reg
+from edge_ml_flywheel.scoring import job as scoring
 from edge_ml_flywheel.training import images, job, labels
 
 log = logging.getLogger(__name__)
 
-# What goes into the source archive. The package itself, plus the two files at
-# its root that SageMaker's script mode requires there.
+# What goes into the source archive. The package itself, plus the files at its
+# root that a container is pointed at by name.
 _CODE_ROOT: Final = "edge_ml_flywheel"
 _CONTAINER_DIR: Final = "container"
 _REQUIREMENTS: Final = "requirements.txt"
+
+# One archive, staged once per cycle, unpacked by both of the cycle's jobs. The
+# training entry point is at the root because script mode requires it there; the
+# scoring one is because `scoring.job.container_entrypoint` names that path in a
+# shell command. Neither job runs the other's file, and packing both is what
+# makes the code that scored a model the same tree that trained it -- one
+# `git_commit` in the manifest covering both halves of the cycle.
+_ROOT_FILES: Final = (job.ENTRY_POINT, scoring.ENTRY_POINT, _REQUIREMENTS)
 
 # Excluded from the archive: compiled bytecode is a function of an interpreter
 # that is not the container's, and shipping it invites a stale `.pyc` shadowing
@@ -97,10 +107,16 @@ def buckets(aws: boto3.Session) -> Buckets:
     return Buckets.for_account(account_id(aws))
 
 
-def role_arn(aws: boto3.Session) -> str:
-    """The training role, composed from the account and the name Terraform gives
-    it. A `terraform output` would be the same string behind a second tool."""
-    return f"arn:aws:iam::{account_id(aws)}:role/{PROJECT}-training"
+def role_arn(aws: boto3.Session, role: str) -> str:
+    """One of this project's roles, composed from the account and the name
+    Terraform gives it. A `terraform output` would be the same string behind a
+    second tool.
+
+    The suffix is an argument because the cycle now runs jobs under two of these
+    and they are deliberately not the same identity -- one may read the labels a
+    run owns, the other may read no label at all. Each name is still spelled in
+    exactly one place, at the call site that means it."""
+    return f"arn:aws:iam::{account_id(aws)}:role/{PROJECT}-{role}"
 
 
 def registration(aws: boto3.Session, run_id: RunId) -> RunRegistration:
@@ -134,16 +150,16 @@ def _members(package: Path, entry: Path) -> Iterator[tuple[Path, str]]:
     """Every file in the archive, as (source, name inside the archive), sorted.
 
     Two directories rather than one root. `package` is the `edge_ml_flywheel`
-    directory itself and `entry` is wherever `train.py` and `requirements.txt`
-    are, which script mode requires at the root of the archive. In a checkout
-    those are `src/edge_ml_flywheel` and `container/`; in the control Lambda they
-    are the deployed package and the layer that carries the same two files.
+    directory itself and `entry` is wherever `_ROOT_FILES` are, which is the root
+    of the archive. In a checkout those are `src/edge_ml_flywheel` and
+    `container/`; in the control Lambda they are the deployed package and the
+    layer that carries the same files.
     """
     for path in sorted(package.rglob("*")):
         if path.is_file() and not any(marker in str(path) for marker in _EXCLUDED):
             yield path, f"{_CODE_ROOT}/{path.relative_to(package).as_posix()}"
 
-    for name in (job.ENTRY_POINT, _REQUIREMENTS):
+    for name in _ROOT_FILES:
         yield entry / name, name
 
 
@@ -198,8 +214,12 @@ def stage_code(aws: boto3.Session, run_id: RunId, cycle: Cycle, code: bytes) -> 
     return key
 
 
-def _download_prefix(aws: boto3.Session, bucket: str, prefix: str, root: Path) -> int:
-    """Copy a prefix to local disk, keeping the key structure below it."""
+def download_prefix(aws: boto3.Session, bucket: str, prefix: str, root: Path) -> int:
+    """Copy a prefix to local disk, keeping the key structure below it.
+
+    Public because `scoring.launch` reads the partition's assignments the same
+    way. Generic enough that a second copy would be a second thing to fix.
+    """
     client = aws.client("s3")
     copied = 0
     for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
@@ -226,7 +246,7 @@ def labeled_set(aws: boto3.Session, run: RunRegistration, work: Path) -> Sequenc
     bootstrap = work / Cohort.BOOTSTRAP.value
     purchases = work / "purchases"
 
-    found = _download_prefix(
+    found = download_prefix(
         aws, data, cohort_labels_prefix(run.partition_version, Cohort.BOOTSTRAP), bootstrap
     )
     if not found:
@@ -234,7 +254,7 @@ def labeled_set(aws: boto3.Session, run: RunRegistration, work: Path) -> Sequenc
             f"partition v{run.partition_version} has no bootstrap labels in {data}. The "
             f"partitioner writes them; run it before training."
         )
-    _download_prefix(aws, data, purchases_run_prefix(run.run_id), purchases)
+    download_prefix(aws, data, purchases_run_prefix(run.run_id), purchases)
 
     return sorted(labels.collect([bootstrap, purchases]))
 
@@ -289,7 +309,7 @@ def prepare(
     artifacts = buckets(aws).artifacts
     key = training_manifest_key(run_id, cycle)
 
-    if not preparation.replace and _exists(aws, artifacts, key):
+    if not preparation.replace and exists(aws, artifacts, key):
         raise SystemExit(
             f"{uri(artifacts, key)} already exists, and it is the record of what this cycle "
             f"trained on. Pass --replace only if no seed has run against it."
@@ -309,7 +329,7 @@ def prepare(
         work = Path(scratch)
         image_ids = images.capped(labeled_set(aws, run, work), preparation.max_images)
         local = work / "images.manifest"
-        named = images.write(local, buckets(aws).data, image_ids)
+        named = images.write(local, buckets(aws).data, image_ids, Split.TRAIN)
 
         aws.client("s3").upload_file(str(local), artifacts, key)
         log.info("wrote %s", uri(artifacts, key))
@@ -342,7 +362,7 @@ def ensure_base(aws: boto3.Session) -> str:
     """
     key = base_weights_key()
     artifacts = buckets(aws).artifacts
-    if _exists(aws, artifacts, key):
+    if exists(aws, artifacts, key):
         return key
 
     log.info("no base weights in %s, fetching %s", artifacts, BASE_WEIGHTS_URL)
@@ -353,7 +373,9 @@ def ensure_base(aws: boto3.Session) -> str:
     return key
 
 
-def _exists(aws: boto3.Session, bucket: str, key: str) -> bool:
+def exists(aws: boto3.Session, bucket: str, key: str) -> bool:
+    """Whether one object is there. Public for `download_prefix`'s reason --
+    `scoring.launch` refuses to overwrite a prepared cycle the same way."""
     client = aws.client("s3")
     response = client.list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1)
     return any(entry["Key"] == key for entry in response.get("Contents", ()))
@@ -389,13 +411,13 @@ def request(
 
     artifacts = buckets(aws).artifacts
     for key in (training_manifest_key(run_id, cycle), training_code_key(run_id, cycle)):
-        if not _exists(aws, artifacts, key):
+        if not exists(aws, artifacts, key):
             raise SystemExit(f"{uri(artifacts, key)} does not exist. Run prepare for this cycle.")
 
     target = job.Target(
         buckets=buckets(aws),
         region=str(aws.region_name),
-        role_arn=role_arn(aws),
+        role_arn=role_arn(aws, "training"),
         version=version,
         seed=seed,
         partition_version=run.partition_version,

@@ -668,6 +668,18 @@ class Cohort(StrEnum):
 # and has labels nowhere.
 LABELED_COHORTS: Final = frozenset({Cohort.BOOTSTRAP, Cohort.EVAL})
 
+# The two cohorts a cycle puts in front of a model, which is a different question
+# from which cohorts have boxes and has a different answer. `eval` is scored
+# because it is the ruler, and `pool` because its scores are the ranking the
+# budget is spent down. `bootstrap` is absent because a model's confidence over
+# its own training set measures nothing anyone acts on, and `reserve` because it
+# is inert.
+#
+# Both are scored in one pass over each, and never again for that model: the
+# cohorts are fixed for the cycle, so a second pass would re-derive an answer
+# already on disk (design section 7).
+SCORED_COHORTS: Final = frozenset({Cohort.EVAL, Cohort.POOL})
+
 # Which split each cohort draws from: everything trainable out of `train`,
 # everything held out of `val`. The leakage rule as data rather than as a
 # predicate somewhere in the partitioner, so a leakage question is answered by
@@ -1446,6 +1458,142 @@ def eval_matches_key(version: ModelVersion, seed: Seed) -> str:
     return f"{eval_prefix(version)}seed={_padded('seed', seed, SEED_DIGITS)}/matches.npz"
 
 
+# --- Artifacts bucket: detections ---------------------------------------------
+#
+# What one model saw in the images of one cohort, before anything has been
+# compared against ground truth. It is the input to both halves of the cycle that
+# follow -- the match arrays the gates read, and the uncertainty ranking the
+# budget is spent down -- and it is produced once because scoring 67,000 images
+# is the expensive step and every later question is a query over its output
+# (design section 4.3).
+#
+# **Detections are not a metric.** Nothing here has been matched, scored or
+# judged; a detections file says what the model emitted and stays true whatever
+# is later decided about it. That is what lets one file serve two readers who
+# disagree about everything else: evaluation cares about the low-confidence tail
+# because AP sweeps it, and selection throws that tail away because a box at
+# 0.001 is a decision the model already made.
+
+
+@dataclass(frozen=True, slots=True)
+class DetectionRow:
+    """One box a model predicted, as a row of a detections file.
+
+    The fields of `evaluation.coco.Detection` plus the image it was found in, in
+    the same frame -- corners in `NATIVE_IMAGE_SIZE` pixels. Deliberately the
+    same seven facts in the same units, so reading a detections file back is a
+    field-for-field construction rather than a conversion with a rescale hidden
+    in it. Exactly one component rescales from the model's 416 px, and it is the
+    one holding the model.
+
+    `category` is the archive's name rather than a `ClassSet` position, unlike a
+    cached match array, which holds `2` and not `truck`. Those arrays are numpy,
+    where an integer is what there is to store; this is parquet, where a repeated
+    string is dictionary-encoded to the same integer anyway. What the name buys
+    is a file that still means something read without the class set beside it,
+    and `selection.score.Predictions` matches on names -- so storing IDs would be
+    converting twice to arrive back where the data started.
+
+    No `cohort` column and no `version`: both are in the prefix, for
+    `AssignmentRow`'s reason.
+    """
+
+    image_id: ImageId
+    category: str
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    score: float
+
+    def __post_init__(self) -> None:
+        parse_image_id(self.image_id)
+        # The same range `selection.score.uncertainty` refuses, checked where the
+        # number enters the project rather than where it is first divided by.
+        if not 0.0 <= self.score <= 1.0:
+            raise ValueError(f"a confidence outside [0, 1] is not a confidence: {self.score}")
+        # Corners in the order `Box` and `Detection` state them. A reversed pair
+        # converts to a negative width, which COCO's area filter reads as a box
+        # smaller than every threshold rather than as a malformed one -- so it
+        # would drop out of the small-object slice silently instead of raising.
+        if self.x2 <= self.x1 or self.y2 <= self.y1:
+            raise ValueError(
+                f"detection corners do not enclose a positive area: "
+                f"({self.x1}, {self.y1}) to ({self.x2}, {self.y2})"
+            )
+
+
+def _scored(cohort: Cohort) -> Cohort:
+    """Refuse a cohort nothing scores, while the caller still holds a cohort.
+
+    `cohort_labels_prefix`'s arrangement: the gate is the thing that produces the
+    path rather than a check someone performs before building one, so there is no
+    argument to these builders that names a detections file for `bootstrap`.
+    """
+    if cohort not in SCORED_COHORTS:
+        listed = ", ".join(sorted(member.value for member in SCORED_COHORTS))
+        raise ValueError(f"{cohort.value} is not a scored cohort ({listed} are)")
+    return cohort
+
+
+def scoring_manifest_key(run_id: RunId, cycle: Cycle, cohort: Cohort) -> str:
+    """The image keys one cycle scores for one cohort, in `ManifestFile` form.
+
+    `training_manifest_key`'s argument applied to the other set of images a cycle
+    puts in front of a model, and split by cohort for a reason that document does
+    not have. A manifest names keys below one shared prefix, `eval` draws from
+    `val` and `pool` from `train`, so a single document covering both would have
+    to name the prefix above the split -- which is the prefix holding all 80,000
+    images, and an input channel pointed there is one that can reach a frame the
+    cycle did not mean to score. The split `COHORT_SPLIT` already records is
+    therefore the split between two manifests.
+
+    Per cycle rather than per seed, like the training manifest: every seed of a
+    cycle scores the same images, and a document per seed would be one list
+    written once per seed with nothing to say which was authoritative.
+
+    Under the write-once cycle prefix because it is also the record of what was
+    scored. The remaining pool shrinks every cycle, so "which 61,000 images was
+    cycle two's ranking over" is not recoverable afterwards from a partition and
+    a ledger without replaying every purchase in order.
+    """
+    return f"{cycle_prefix(run_id, cycle)}scoring/images-{_scored(cohort).value}.manifest"
+
+
+def detections_prefix(version: ModelVersion, seed: Seed, cohort: Cohort) -> str:
+    """Where one model-seed's boxes for one cohort land.
+
+    Keyed by version and seed because detections are a function of the model, and
+    by cohort because the two are written by separate output channels of one job
+    and read by separate consumers -- which is the `key=value/` rule's "something
+    prunes on it", here a job's upload and a reader's prefix rather than a query
+    engine.
+
+    Under the cycle that produced the model, not the cycle being decided, for
+    `eval_prefix`'s reason: a champion is re-compared every cycle without being
+    re-scored, and keying this by the deciding cycle would write a fresh copy of
+    an unchanged answer every time.
+    """
+    padded = _padded("seed", seed, SEED_DIGITS)
+    return (
+        f"{cycle_prefix(*_locate(version))}detections/version={version}/"
+        f"seed={padded}/cohort={_scored(cohort).value}/"
+    )
+
+
+def detections_key(version: ModelVersion, seed: Seed, cohort: Cohort, part: int = 0) -> str:
+    """One cohort's detections in one parquet.
+
+    Parquet rather than the `.npz` the match cache uses, because these have two
+    readers that want different rows: evaluation takes the whole file and
+    selection takes a confidence band out of it, and a columnar file answers the
+    second without decompressing the first. The match arrays have exactly one
+    reader and are indexed rather than filtered, which is why they stay numpy.
+    """
+    name = _padded("part", part, PART_DIGITS)
+    return f"{detections_prefix(version, seed, cohort)}part-{name}.parquet"
+
+
 def gate_report_key(run_id: RunId, cycle: Cycle, suffix: str = "json") -> str:
     """Per cycle, not per model: the report covers the comparison, not one side.
 
@@ -1466,6 +1614,11 @@ def selection_report_key(run_id: RunId, cycle: Cycle) -> str:
     bought and nothing about the pool they were drawn out of.
     """
     return f"{cycle_prefix(run_id, cycle)}selection/report.json"
+
+
+# The source archive's file name, named because two jobs address it and only one
+# of them has a framework that unpacks it. See `training_code_key`.
+TRAINING_CODE_FILE: Final = "sourcedir.tar.gz"
 
 
 def training_manifest_key(run_id: RunId, cycle: Cycle) -> str:
@@ -1500,8 +1653,15 @@ def training_code_key(run_id: RunId, cycle: Cycle) -> str:
 
     Beside `training_manifest_key` because they are the two objects one cycle
     hands its seeds, and they are read by the same role under the same grant.
+
+    Read by the scoring job as well, which is why the file name is a constant: a
+    Processing job has no script mode to unpack an archive for it, so the
+    container command names this file directly and a second spelling would be a
+    command that unpacks nothing. Scoring reusing the training archive is also
+    the property worth having -- the code that scored a model is the same tree
+    that trained it, and the manifest's `git_commit` covers both.
     """
-    return f"{cycle_prefix(run_id, cycle)}training/sourcedir.tar.gz"
+    return f"{cycle_prefix(run_id, cycle)}training/{TRAINING_CODE_FILE}"
 
 
 # --- Telemetry bucket ---------------------------------------------------------

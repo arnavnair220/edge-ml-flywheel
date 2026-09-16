@@ -102,7 +102,7 @@ flowchart TB
     end
 
     subgraph EVAL["Evaluation plane"]
-        SCORE["batch transform over eval and pool<br/>score once, cache per-image match arrays"]
+        SCORE["processing job over eval and pool<br/>score once, cache per-image match arrays"]
         BOOT["paired bootstrap on the overall metric<br/>per-slice scores reported"]
     end
 
