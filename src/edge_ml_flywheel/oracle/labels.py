@@ -18,13 +18,32 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from edge_ml_flywheel.conventions import ImageId, parse_image_id, raw_label_key
 from edge_ml_flywheel.ingest.labels import Box, parse_label
 from edge_ml_flywheel.oracle.cohorts import Cohorts, purchasable_split
 
 log = logging.getLogger(__name__)
+
+# What a file of labels looks like, wherever it came from. `partition.cohort_labels`
+# writes the two cohorts the draw labels and this writes what a cycle bought, and
+# they are one schema rather than two identical ones: `training.labels` reads both
+# with one function, and that only stays true if there is one place for the column
+# names to change.
+SCHEMA: Final = pa.schema(
+    [
+        ("image_id", pa.string()),
+        ("boxes", pa.string()),
+    ]
+)
+
+# snappy for `partition.assign._COMPRESSION`'s reason: this file is written by the
+# oracle Lambda, and a Lambda's pyarrow is the managed layer, built without zstd.
+COMPRESSION: Final = "snappy"
 
 # The four corners, in the order they are written and read. A positional row
 # rather than an object per box: `[category, x1, y1, x2, y2]` costs four numbers
@@ -119,3 +138,47 @@ def local_fetch(root: Path, cohorts: Cohorts) -> Fetch:
         return read_label(root, cohorts, image_id)
 
     return fetch
+
+
+def s3_fetch(client: Any, bucket: str, cohorts: Cohorts) -> Fetch:
+    """Bind a bucket and a cohort index into a `Fetch`.
+
+    The other half of `local_fetch`, and deliberately the same three lines in a
+    different order: the key comes from `label_key`, which routes through the
+    gate, so this reaches S3 only for an image the gate has already admitted. A
+    refused image produces no `GetObject` at all -- which is what makes "unread
+    rather than merely unsold" a statement about the network and not only about
+    the code.
+
+    One object per image rather than a prefix download. A batch is a thousand
+    scattered keys out of 80,000, so there is no prefix that names them; and the
+    labels this role may read are exactly the ones it can build a key for.
+    """
+
+    def fetch(image_id: ImageId) -> SoldLabel:
+        key = label_key(cohorts, image_id)
+        body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+        parsed = parse_label(json.loads(body), image_id)
+        return SoldLabel(image_id=image_id, boxes=parsed.boxes)
+
+    return fetch
+
+
+def write_parquet(labels: Sequence[SoldLabel], path: Path) -> int:
+    """Write a purchase and return how many labels landed.
+
+    Two columns and no cohort, run or cycle: all three are in the key, for
+    `AssignmentRow`'s reason. The boxes go through `encode_boxes` rather than a
+    list column of structs, which is the worse parquet and the better arrangement
+    -- a bought label and a bootstrap one are then the same shape, which is what
+    makes the cumulative labeled set one thing rather than two.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "image_id": [label.image_id for label in labels],
+        "boxes": [encode_boxes(label.boxes) for label in labels],
+    }
+    pq.write_table(pa.table(data, schema=SCHEMA), path, compression=COMPRESSION)
+
+    log.info("wrote %d labels to %s", len(labels), path)
+    return len(labels)

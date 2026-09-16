@@ -52,6 +52,7 @@ from edge_ml_flywheel.conventions import (
     raw_label_key,
 )
 from edge_ml_flywheel.ingest.labels import Box, parse_label
+from edge_ml_flywheel.oracle import labels as sold
 from edge_ml_flywheel.oracle.labels import encode_boxes
 
 log = logging.getLogger(__name__)
@@ -61,17 +62,17 @@ log = logging.getLogger(__name__)
 # structs would be the better parquet and the worse arrangement: it would make
 # the two label sources different shapes, and the whole point of a cumulative
 # labeled set is that they are not.
-SCHEMA: Final = pa.schema(
-    [
-        ("image_id", pa.string()),
-        ("boxes", pa.string()),
-    ]
-)
+#
+# Taken from `oracle.labels` rather than restated, because that is the same
+# statement about the column names: two identical schemas are two places for one
+# of them to be renamed. This module already takes the encoder from there, so the
+# format arrives from one place entire.
+SCHEMA: Final = sold.SCHEMA
 
 # snappy for `assign.write_parquet`'s reason, and this is the file that found it:
 # `prepare` reads the bootstrap labels in a Lambda, where pyarrow comes from the
 # managed AWSSDKPandas layer with zstd trimmed out of the build.
-_COMPRESSION: Final = "snappy"
+_COMPRESSION: Final = sold.COMPRESSION
 
 # How many offending IDs a refusal lists before summarizing, for
 # `oracle.cohorts._REPORTED`'s reason.

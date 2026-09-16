@@ -308,16 +308,23 @@ start a run.
 
 One cycle spends its budget in five steps:
 
-1. The champion scores every remaining pool image as a SageMaker Processing job, in the same pass
-   that scores the eval cohort. This is inference over image features only; no label is read. The
-   fleet's own scores over the frames it replayed are reported beside this ranking, never used to
-   rank the purchase.
+1. The cycle's model scores every remaining pool image as a SageMaker Processing job, in the same
+   pass that scores the eval cohort. This is inference over image features only; no label is read.
+   The fleet's own scores over the frames it replayed are reported beside this ranking, never used
+   to rank the purchase.
 2. Each image gets a **mean per-object uncertainty** score, rather than an image-level maximum, which
    would be decided by a frame's single worst box.
 3. The top 1,000 of the ranked list are the batch, bought unfiltered.
-4. The batch's `weather` and `timeofday` mix is recorded beside the remaining pool's.
+4. The whole ranking is written to `selection_ranking_key` with the batch flagged on it.
 5. The oracle checks the idempotency key, debits the ledger, releases those labels, and appends them
    to the cumulative labeled set.
+
+The model that ranks is the challenger this cycle trained, at the deployed seed, promoted or not. The
+pool manifest a cycle writes is what that model was scored over, so the scores cover the set being
+ranked exactly. A rejected challenger still ranks: the labels stay bought and the champion stays put.
+
+Ranking runs in the control Lambda. The pass over 62,000 images happened in the scoring job, and what
+remains is a mean per image and a sort.
 
 The budget is a property of the run, not a constant of the system: it is set at registration, and the
 oracle creates a cycle's ledger item on that cycle's first purchase, seeded from the registered
@@ -358,8 +365,43 @@ Steps 2 and 3 are one rule: rank the remaining pool by mean per-object uncertain
 of it. `selection.select` takes a pool, its scores and a budget, and nothing that names a rule —
 there is no selector field on a run and no argument to pass, because every run ranks the same way.
 
+Ties break on `image_id`. Every image the model saw nothing in scores identically, so a tie at the
+batch boundary is routine, and the oracle identifies a purchase by a digest over the sorted image
+IDs. Two attempts proposing different sets debit the ledger twice.
+
+The score is a mean over detections inside a confidence band of 0.05 to 0.95. The upper edge keeps a
+frame of easy objects from outranking a quiet ambiguous one. The lower edge is a floor rather than a
+filter: the scoring job emits every box down to 0.001, so a frame the model found nothing in still
+carries rows, and emptiness does not distinguish it from a frame the model was certain about.
+
+An image with nothing at or above 0.05 scores at the top of the range; an image the model was
+decisive about scores at the bottom. Both leave the mean undefined and they are opposite facts. No
+threshold limits how many blind spots a batch may hold, so the count is reported per cycle.
+
+The batch is bought unfiltered. Redundancy and unlabelable frames are left in place, because
+correcting either means picking a threshold no cycle has measured.
+
 The controls that would buy by a different rule are deferred, and adding one means adding a rule
 rather than setting a value. See the planned additions in `00-overview.md`.
+
+### The ranking file
+
+`selection_ranking_key` holds one row per pool image: `image_id`, `score`, `rank` and `selected`. One
+file rather than a ranking and a batch beside it, since the batch is the top of the ranking by
+definition. The oracle reads its image IDs from these rows, so a retry names the same set and replays
+rather than buying a second batch.
+
+It is written under the write-once cycle prefix. The ledger records which images were bought; this
+records what they were ranked against, which is not recoverable afterwards.
+
+The batch's `weather` and `timeofday` mix is not written. It is a join of this file onto the image
+manifest, which is zstd and unreadable by the control plane's pyarrow, so the mix is a query over two
+files already in the bucket. It lands with the composition chart that reads it. A blind-spot count
+and the batch's predicted classes are logged per cycle.
+
+A short run capped with `max_images` must be registered with a budget it can afford: selection
+refuses a budget larger than the pool it ranked, rather than buying fewer labels than the run
+declared. A run reaching the end of its pool is refused the same way.
 
 ### The label wall
 
@@ -372,6 +414,12 @@ table. Cohort is a column in the assignments parquet rather than a component of 
 storage boundary separates a purchasable `pool` label from the `eval` labels beside it, and no IAM
 policy can express one. `edge_ml_flywheel.oracle.cohorts` is the single place the eval guarantee
 lives.
+
+The oracle runs as its own Lambda under its own role, the third and last principal on
+`label_reader_arns` and the only one that opens a withheld document. Its policy denies it
+`raw/labels/*/val/*`: `pool` draws from `train` and `eval` from `val`, so the line is expressible as
+a prefix and costs the oracle no access it is entitled to. The gate remains the mechanism; the deny
+means contamination requires a code bug and an IAM misconfiguration rather than either alone.
 
 - The gate runs before a key is built, and the key builder routes through it, so a refused image is
   unread rather than unsold.
@@ -393,3 +441,26 @@ images and writes the detections back, and its own policy denies every label pre
 carries no read deny, because training owns those 8,000 labels. Both prefixes are write-denied to
 every principal but the partitioner by `LabelsAreFrozenExceptThePartitioner`, so cycle eight's number
 is comparable to cycle one's.
+
+### Execution environment
+
+Two Lambdas, both states of the cycle state machine. Neither is started by hand and neither runs on
+an instance.
+
+| Step | Function | What it may read |
+|---|---|---|
+| `select` | `edge-ml-flywheel-control` | Pool detections and the scoring manifest; denied `raw/labels/` |
+| `purchase` | `edge-ml-flywheel-oracle` | `raw/labels/*/train/*`, the assignments and the ranking; denied `raw/labels/*/val/*` |
+
+The control function runs every Python step of a cycle except the purchase and is denied
+`raw/labels/`. The oracle must read that prefix, so it is a separate identity: one function holding
+both grants would let the step that writes a training manifest read the 62,000 withheld labels, with
+every gate still passing. They share a deployment package and differ in the handler and the role.
+
+The control function is 2,048 MB with 2 GB of ephemeral storage and a 900-second ceiling, sized for
+the pool detections `select` downloads and sorts. The oracle is 1,024 MB at 600 seconds: a thousand
+sequential `GetObject` calls, one transaction and one upload. Both take pyarrow from the managed
+AWSSDKPandas layer, which is why every file either one reads or writes is snappy rather than zstd.
+
+Neither holds `ListBucket` over `raw/`. Every key the oracle opens is built from an image ID the gate
+has already admitted, so it can read a label it can name and cannot discover one.

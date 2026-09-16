@@ -65,11 +65,29 @@ locals {
   control_gate_objects  = "${local.bucket_arns["artifacts"]}/run_id=*/cycle=*/gates/*"
   control_model_objects = "${local.bucket_arns["artifacts"]}/run_id=*/cycle=*/models/*"
 
+  # `detections_prefix(version, seed, POOL)`, which is what `select` ranks. The
+  # one grant in this policy over something a model produced rather than something
+  # a cycle was configured with, and it is admissible for the reason the whole
+  # selection plane is: a detection is a prediction. Ground truth enters the cycle
+  # in the evaluation job, under a role this one is not.
+  #
+  # The eval cohort's detections are inside the same wildcard and are read by
+  # nothing here -- narrowing to `cohort=pool/` would name a path component the
+  # key builder puts last, which the prefix above already reaches.
+  control_detection_objects = "${local.bucket_arns["artifacts"]}/run_id=*/cycle=*/detections/*"
+
   # `model_manifest_key`, and deliberately narrower than the prefix above. The
   # training role writes everything else under `models/`; this role writes the
   # one document in it that is not a model, which is what keeps "the job that
   # produced the artifact did not also write the claims about it" true.
   control_manifest_objects = "${local.bucket_arns["artifacts"]}/run_id=*/cycle=*/models/version=*/manifest.json"
+
+  # `selection_ranking_key`. Written by `select` and read by the oracle, the same
+  # arrangement the training and scoring prefixes have earlier in the cycle: one
+  # step writes what the next is handed. This role writes it and the oracle only
+  # reads it, which is what keeps the batch a record of how images were chosen
+  # rather than something the function that charges for them can author.
+  control_selection_objects = "${local.bucket_arns["artifacts"]}/run_id=*/cycle=*/selection/*"
 
   # `base_weights_key()`. Written by `launch.ensure_base` on the first cycle of a
   # fresh account and read by nothing here -- the training role is what reads it,
@@ -198,6 +216,17 @@ data "aws_iam_policy_document" "control" {
     resources = [local.control_training_objects, local.control_scoring_objects]
   }
 
+  # The ranking, which is the one thing this role writes that is not an input to a
+  # job about to run. `GetObject` beside it is the refusal to overwrite: `select`
+  # checks whether a cycle has already ranked, and a denied listing would read as
+  # "not there yet" and rewrite the record a purchase was charged against.
+  statement {
+    sid       = "WriteTheSelectionRanking"
+    effect    = "Allow"
+    actions   = ["s3:PutObject", "s3:GetObject"]
+    resources = [local.control_selection_objects]
+  }
+
   # The COCO base, staged by `prepare` when the bucket has none so that a fresh
   # account needs no setup command. `PutObject` and no delete, against a bucket
   # that is write-once: the first cycle creates it and every later cycle finds it
@@ -218,6 +247,15 @@ data "aws_iam_policy_document" "control" {
     effect    = "Allow"
     actions   = ["s3:GetObject"]
     resources = [local.control_gate_objects, local.control_model_objects]
+  }
+
+  # What `select` ranks. Predictions rather than boxes, which is what makes this
+  # grant compatible with a role denied every label prefix in the account.
+  statement {
+    sid       = "ReadThePoolDetections"
+    effect    = "Allow"
+    actions   = ["s3:GetObject"]
+    resources = [local.control_detection_objects]
   }
 
   # The manifest, which is the one object this role writes under `models/`.
@@ -243,20 +281,27 @@ data "aws_iam_policy_document" "control" {
 
       # `base/` alongside the cycle prefixes, because `ensure_base` decides
       # whether to fetch by listing and a denied listing reads as "not there yet"
-      # -- which would re-stage the base on every cycle. `detections/*` and
-      # `eval/*` are listed and never read: each `*_request` step checks that the
-      # inputs it is about to point a job at exist, which is a listing, and it
-      # opens none of the files. The distinction matters most for `eval/*`, which
-      # holds the cached match arrays -- the control plane confirms a champion has
-      # them and is in no position to read one. `models/*` is the exception and
-      # the reason is `register`: SageMaker files its `model.tar.gz` under a
-      # directory named for the training job, so the key the registry points at
-      # is found rather than built.
+      # -- which would re-stage the base on every cycle. `eval/*` is listed and
+      # never read: `evaluate_request` checks that the inputs it is about to point
+      # a job at exist, which is a listing, and it opens none of the files. That
+      # one matters most -- it holds the cached match arrays, so the control plane
+      # confirms a champion has them and is in no position to read one.
+      #
+      # `detections/*` was on the same footing until `select` landed, and is now
+      # the one prefix here this role genuinely reads: the pool's boxes are what
+      # the uncertainty ranking is computed from. They are predictions rather than
+      # ground truth, which is why selection can run in the plane that is denied
+      # every label prefix in the account.
+      #
+      # `models/*` is read for `register`: SageMaker files its `model.tar.gz`
+      # under a directory named for the training job, so the key the registry
+      # points at is found rather than built.
       values = [
         "run_id=*/cycle=*/training/*",
         "run_id=*/cycle=*/scoring/*",
         "run_id=*/cycle=*/models/*",
         "run_id=*/cycle=*/detections/*",
+        "run_id=*/cycle=*/selection/*",
         "run_id=*/cycle=*/eval/*",
         "base/*",
       ]
@@ -311,14 +356,27 @@ resource "aws_lambda_function" "control" {
   filename         = data.archive_file.control.output_path
   source_code_hash = data.archive_file.control.output_base64sha256
 
-  # `prepare` downloads a run's label parquet, reads the image IDs out of it and
-  # uploads a manifest. Minutes at the outside, and the ceiling is a bound on a
-  # hang rather than an estimate.
-  timeout = 300
+  # The ceiling is `select`'s now rather than `prepare`'s. That step downloads the
+  # pool's detections -- millions of rows across 62,000 images -- filters them and
+  # sorts the result, where `prepare` reads a few megabytes of labels. Still a
+  # bound on a hang rather than an estimate, and the first real cycle is what
+  # measures it.
+  timeout = 900
 
-  # pyarrow reading a few megabytes of parquet. Lambda scales CPU with memory, so
-  # this is as much about the read finishing quickly as about fitting.
-  memory_size = 1024
+  # Sized for `select` as well. The detections arrive as an Arrow table and leave
+  # as one `Detection` per surviving box, and both are live while the file is
+  # being read: a pool pass at the scoring job's 0.001 confidence floor is roughly
+  # a million rows above `BAND_LOW`. Lambda scales CPU with memory, and the parse
+  # loop over those rows is the wall clock here.
+  memory_size = 2048
+
+  # The detections are downloaded to `/tmp` before they are read, and the default
+  # is 512 MB. The pool's parquet is tens of megabytes compressed, so this is
+  # headroom rather than a measured requirement -- but running out of it is a
+  # cycle that fails after the expensive job rather than before it.
+  ephemeral_storage {
+    size = 2048
+  }
 
   # Two layers, for two things the deployment package cannot carry. The managed
   # one supplies pyarrow, which is a platform wheel and so cannot come out of
@@ -369,11 +427,15 @@ resource "aws_iam_role" "cycle" {
 }
 
 data "aws_iam_policy_document" "cycle" {
+  # Both functions, because a cycle's Python runs in two identities. The control
+  # function does every step that does not read a withheld label, and the oracle
+  # does the one that does -- see `oracle.tf`. The state machine is what calls
+  # each, so it is the one principal that invokes both.
   statement {
-    sid       = "InvokeTheControlFunction"
+    sid       = "InvokeTheCycleFunctions"
     effect    = "Allow"
     actions   = ["lambda:InvokeFunction"]
-    resources = [aws_lambda_function.control.arn]
+    resources = [aws_lambda_function.control.arn, aws_lambda_function.oracle.arn]
   }
 
   # `UpdateItem` and `GetItem` on one table. No `PutItem` and no `DeleteItem`:
@@ -582,6 +644,7 @@ resource "aws_sfn_state_machine" "cycle" {
   # is why it is a file rather than a heredoc in here.
   definition = templatefile("${path.module}/cycle.asl.json", {
     control_function_arn = aws_lambda_function.control.arn
+    oracle_function_arn  = aws_lambda_function.oracle.arn
     fleet_config_table   = aws_dynamodb_table.fleet_config.name
   })
 

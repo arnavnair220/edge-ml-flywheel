@@ -1,21 +1,27 @@
 """One Lambda, one entry point, dispatching on a step name.
 
-Six steps today, because six of a cycle's states need Python that already
+Seven steps today, because seven of a cycle's states need Python that already
 exists: `prepare` writes the cycle's image manifest and source archive,
 `train_request` builds one seed's `CreateTrainingJob` request, `score_prepare`
 writes the two manifests naming what this cycle scores, `score_request` builds
 one seed's `CreateProcessingJob` request, `evaluate_request` builds the one that
-matches those detections against ground truth, and `register` writes the model
-manifest and builds the `CreateModelPackage` that records the verdict. The state
-machine hands the three request steps to `sagemaker:createTrainingJob.sync` and
-`sagemaker:createProcessingJob.sync`, and the registration to the `aws-sdk`
-integration for `sagemaker:createModelPackage`.
+matches those detections against ground truth, `register` writes the model
+manifest and builds the `CreateModelPackage` that records the verdict, and
+`select` ranks the pool those detections cover and writes what the cycle chose to
+buy. The state machine hands the three request steps to
+`sagemaker:createTrainingJob.sync` and `sagemaker:createProcessingJob.sync`, and
+the registration to the `aws-sdk` integration for `sagemaker:createModelPackage`.
 
-**`register` is the one step that writes something a later cycle reads back.**
-The other five produce inputs to a job that is about to run. This one writes the
-manifest, which is the precondition of ever promoting the model (design section
-5) and the document the promotion path reads -- so it is the one step whose
-output outlives its cycle.
+**The purchase is deliberately not here.** It is the eighth step of a cycle and
+it runs in its own function under its own role, because this one is denied
+`raw/labels/` outright and the oracle is the single principal that must read
+exactly those files. See `oracle.handler`.
+
+**`register` and `select` are the two steps that write something read back
+later.** The other five produce inputs to a job that is about to run. `register`
+writes the manifest, which is the precondition of ever promoting the model
+(design section 5); `select` writes the ranking, which is what the purchase is
+charged against and the only record of what a batch was chosen over.
 
 **The `*_request` steps build and do not call**, for the reason given below, and
 the two `*_prepare` steps run once per cycle rather than once per seed. Both are
@@ -69,6 +75,7 @@ from edge_ml_flywheel.evaluation import launch as evaluation_launch
 from edge_ml_flywheel.registry import launch as registry_launch
 from edge_ml_flywheel.scoring import job as scoring_job
 from edge_ml_flywheel.scoring import launch as scoring_launch
+from edge_ml_flywheel.selection import launch as selection_launch
 from edge_ml_flywheel.training import job, launch
 
 log = logging.getLogger()
@@ -265,6 +272,35 @@ def evaluate_request(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, 
     return {"version": version, "seeds": list(seeds), "request": built}
 
 
+def select(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
+    """Rank this cycle's pool and write the file the purchase is charged against.
+
+    Takes the version and one seed, unlike `evaluate_request` and `register`. A
+    cycle ranks once, on one model: the uncertainty score is a statement about
+    what a detector found in a frame, so averaging it over seeds would rank the
+    pool by a model nothing in the fleet is or will be.
+
+    The seed is the lowest the cycle scored, which is the one `register` calls
+    deployed -- so the model that ranks the pool is the model that ships, and a
+    run training more seeds does not buy its labels by a checkpoint it discards.
+
+    `replace` is read with a default for `prepare`'s reason, and it is the more
+    consequential of the two uses: this file is what the oracle charges against.
+    """
+    version = parse_model_version(str(event["version"]))
+    seed = Seed(int(event["seed"]))
+
+    ranked = selection_launch.rank(aws, version, seed, bool(event.get("replace", False)))
+    log.info("%s ranked %d images and chose %d", version, ranked.pool, ranked.batch)
+    return {
+        "version": ranked.version,
+        "cycle": ranked.cycle,
+        "pool": ranked.pool,
+        "batch": ranked.batch,
+        "blind_spots": ranked.blind_spots,
+    }
+
+
 def register(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
     """Write the cycle's model manifest and build the request that records its
     verdict.
@@ -311,6 +347,7 @@ STEPS: Final[Mapping[str, Callable[[boto3.Session, Mapping[str, Any]], dict[str,
     "score_request": score_request,
     "evaluate_request": evaluate_request,
     "register": register,
+    "select": select,
 }
 
 

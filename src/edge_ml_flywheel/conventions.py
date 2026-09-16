@@ -1652,6 +1652,75 @@ def gate_report_key(run_id: RunId, cycle: Cycle, suffix: str = "json") -> str:
     return f"{gate_report_prefix(run_id, cycle)}report.{_token('suffix', suffix)}"
 
 
+@dataclass(frozen=True, slots=True)
+class SelectionRow:
+    """One pool image's place in a cycle's ranking, and whether it was bought.
+
+    `rank` is the position the ordering put it in, 0 for the most uncertain. It is
+    derivable from `score` plus the image ID tie-break, and it is stored anyway
+    for the reason `ManifestRow.n_boxes` is: a reader that re-derives it has to
+    know the tie-break rule, and a query engine hands back rows in whatever order
+    it likes. Storing it makes the file say what the ranking *was* rather than
+    what it can be reconstructed as.
+
+    `selected` is the batch. The top `budget` rows carry it, so the batch is a
+    predicate over this file rather than a second document that can disagree with
+    it -- which is what lets the purchase read its image IDs out of the evidence
+    that they were chosen.
+
+    No `version` or `seed` column, and the absence is worth stating: a cycle ranks
+    once, on one model, so they would be constant down all 62,000 rows. Which
+    model did the scoring is in `detections_prefix`, and which cycle this is is in
+    the key.
+    """
+
+    image_id: ImageId
+    score: float
+    rank: int
+    selected: bool
+
+    def __post_init__(self) -> None:
+        parse_image_id(self.image_id)
+        # The range `selection.score` produces, checked where the number is
+        # written rather than where it is next compared. A score outside it is a
+        # scorer that changed under a file already in the bucket.
+        if not 0.0 <= self.score <= 1.0:
+            raise ValueError(f"an uncertainty score outside [0, 1]: {self.score}")
+        if self.rank < 0:
+            raise ValueError(f"a rank is a position and cannot be negative: {self.rank}")
+
+
+def selection_prefix(run_id: RunId, cycle: Cycle) -> str:
+    """Where one cycle's selection files land.
+
+    Per cycle rather than per model, like the gate report: selection describes the
+    purchase, and a cycle makes exactly one.
+    """
+    return f"{cycle_prefix(run_id, cycle)}selection/"
+
+
+def selection_ranking_key(run_id: RunId, cycle: Cycle, part: int = 0) -> str:
+    """The whole ranked pool, and which of it this cycle bought.
+
+    One file rather than a ranking and a batch beside it. The batch is the top of
+    the ranking by definition, so two documents would be one fact with a way to
+    disagree -- and the purchase reads its image IDs out of the same rows the
+    ranking is evidence of, rather than out of a second document that says it
+    agrees.
+
+    Under the write-once cycle prefix because it is the evidence the selector
+    works, and it is not recoverable afterwards. The ledger records which images
+    were bought; only this says what they were chosen *over* -- the 61,000 that
+    scored lower, which is the comparison the whole ranking rests on.
+
+    A parquet rather than JSON: it is one row per pool image, which is 62,000 of
+    them at cycle one, and the chart that reads it wants two columns of the set
+    rather than the document.
+    """
+    name = _padded("part", part, PART_DIGITS)
+    return f"{selection_prefix(run_id, cycle)}ranking-part-{name}.parquet"
+
+
 def selection_report_key(run_id: RunId, cycle: Cycle) -> str:
     """What this cycle's batch was made of, beside what it left in the pool.
 
@@ -1660,8 +1729,14 @@ def selection_report_key(run_id: RunId, cycle: Cycle) -> str:
     because it is evidence about a decision already taken -- a batch's condition
     mix is not recoverable later from the ledger, which records which images were
     bought and nothing about the pool they were drawn out of.
+
+    Not written yet. The mix is a join of `selection_ranking_key` onto the image
+    manifest, and the manifest is zstd -- which the control plane's pyarrow cannot
+    open (see `partition.assign._COMPRESSION`). So the condition mix is a query
+    over two files in the bucket rather than a third file, and it lands with the
+    composition chart that is its only reader.
     """
-    return f"{cycle_prefix(run_id, cycle)}selection/report.json"
+    return f"{selection_prefix(run_id, cycle)}report.json"
 
 
 # The source archive's file name, named because two jobs address it and only one

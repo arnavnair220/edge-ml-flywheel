@@ -1,5 +1,5 @@
 {
-  "Comment": "One cycle of the flywheel, and the loop back to the next. Two of the sixteen steps are Pass stubs today, each carrying the comment that names the task replacing it. Start it with {\"run_id\": <id>, \"epochs\": <n>, \"seeds\": [1]}, and optionally max_images, replace and instance_type -- the last three apply to training and scoring alike, since both are capped and re-prepared together.",
+  "Comment": "One cycle of the flywheel, and the loop back to the next. Every step is live: the last two stubs, Select and Purchase, now rank the pool and buy the top of it, which is what closes the loop. Start it with {\"run_id\": <id>, \"epochs\": <n>, \"seeds\": [1]}, and optionally max_images, replace and instance_type -- the last three apply to training and scoring alike, since both are capped and re-prepared together. A short run capped with max_images must be registered with a label budget it can afford: selection refuses a budget larger than the pool it ranked, so a 300-image cycle against the design's 1,000 is refused rather than quietly buying fewer.",
   "QueryLanguage": "JSONata",
   "StartAt": "ClaimCycle",
   "States": {
@@ -380,15 +380,55 @@
     },
 
     "Select": {
-      "Comment": "STUB. Replaced by the ranking of the remaining pool by mean per-object uncertainty from the scoring pass above, and the batch that ranking picks.",
-      "Type": "Pass",
+      "Comment": "Ranks the remaining pool by mean per-object uncertainty over the detections `Score` wrote, and files the ranking with this cycle's batch flagged on it. One seed rather than every seed the cycle scored, unlike `EvaluateRequest`: an uncertainty score is a statement about what one detector found in one frame, so a mean over seeds would rank the pool by a model that does not exist. It is `$seeds_scored[0]`, which is the lowest seed and the one `Register` calls deployed -- so the model that spends the budget is the model that ships. No SageMaker call and no job: the expensive pass over 62,000 images already happened, and what is left is a mean per image and a sort. `replace` is carried for `Prepare`'s reason, and it is the more consequential use of that flag -- the file this writes is what the oracle charges against.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${control_function_arn}",
+        "Payload": "{% {'step': 'select', 'version': $seeds_scored[0].version, 'seed': $seeds_scored[0].seed, 'replace': $states.context.Execution.Input.replace} %}"
+      },
+      "Output": {},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
       "Next": "Purchase"
     },
 
     "Purchase": {
-      "Comment": "STUB. Replaced by the oracle: charge the ledger under an idempotency key, write the labels under this run and cycle, and record the charge in the audit log. It assigns pool_remaining as 0, which stops the loop after one cycle -- a stubbed purchase buys nothing, so a loop that carried on would retrain an identical challenger on identical data until the cap ran out. The real step assigns what the oracle left in the pool.",
-      "Type": "Pass",
-      "Assign": { "pool_remaining": 0 },
+      "Comment": "The oracle: gate the batch against the partition, charge the ledger under an idempotency key, then read the labels and file them under this run and cycle. A different function from every other Lambda step, and the only place in the cycle that is -- this one reads `raw/labels/`, which the control function is denied outright, so the two identities are two functions over one deployment package. The batch is not in this payload: the oracle reads it out of the ranking `Select` wrote, so a retry names the same images, hashes to the same digest and replays rather than buying a second batch. `pool_remaining` is what the loop below branches on, and it now comes from what the oracle left rather than from the stub's 0 -- which is what turns a machine that stopped after one cycle into one that runs the run. Retries are runtime faults only: OracleError is a refusal and is refused identically on a second attempt, and an exhausted budget arrives under its own name.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${oracle_function_arn}",
+        "Payload": "{% {'step': 'purchase', 'run_id': $states.context.Execution.Input.run_id, 'cycle': $cycle} %}"
+      },
+      "Assign": {
+        "pool_remaining": "{% $states.result.Payload.pool_remaining %}"
+      },
+      "Output": {},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
       "Next": "MoreCycles"
     },
 

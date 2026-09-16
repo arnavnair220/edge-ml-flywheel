@@ -157,7 +157,7 @@ Listed in the order a cycle passes through them.
 
 | # | Plane | What it does in a cycle | Invariant it owns |
 |---|---|---|---|
-| 1 | **Data and label supply** | Partitions the dataset once, ranks the remaining pool by mean per-object uncertainty from the champion's offline scoring pass, buys the top of that ranking, records the batch's condition mix beside the pool's, and sells labels against a hard budget | Labels can only be obtained by paying the oracle, and `eval` is not purchasable at any price |
+| 1 | **Data and label supply** | Partitions the dataset once, ranks the remaining pool by mean per-object uncertainty from the cycle's offline scoring pass, buys the top of that ranking, records the ranking beside what it bought, and sells labels against a hard budget | Labels can only be obtained by paying the oracle, and `eval` is not purchasable at any price |
 | 2 | **Training** | Fine-tunes YOLO11n on the cumulative labeled set at one fixed seed, from the COCO base every time, and exports an int8 ONNX artifact | Seed *k* is fixed and recorded; seed 1 is the artifact that ships, never the best-scoring seed |
 | 3 | **Evaluation** | Scores each model once over `eval` and the pool, persists per-image match arrays, then answers every later question from that cache — paired deltas, confidence bands, per-slice metrics | Bootstrap the *paired* delta on a shared eval resample, never each model independently |
 | 4 | **Gating** | Runs four pass/fail checks in order — data, quality, edge, canary — and emits the per-slice regression report. Any hard failure stops the cycle and the champion stays put; the labels stay bought | Zero image-ID overlap with either eval set is a hard fail with no override |
@@ -251,3 +251,4 @@ Each plane's document lands with the plane.
 | `01-data-and-labels.md` | 1 |
 | `02-training.md` | 2 |
 | `03-evaluation.md` | 3 |
+| `06-registry-and-promotion.md` | 6 |

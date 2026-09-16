@@ -121,6 +121,65 @@ class TestTheCodec:
         assert len(detections.collect(tmp_path)) == 2
 
 
+class TestTheConfidenceFloor:
+    """What lets one file serve two readers who disagree about the tail.
+
+    Evaluation takes the whole thing, because AP is the area under a curve swept
+    by lowering a threshold. Selection cannot: the pool file is 62,000 images at
+    up to `MAX_DETS` boxes each at a 0.001 confidence floor, which is millions of
+    rows, and none below `BAND_LOW` change a score.
+    """
+
+    def test_no_floor_reads_the_whole_file(self, tmp_path: Path) -> None:
+        """0.0 is the file as written rather than a floor nobody chose."""
+        rows = [a_row(image=1, score=0.001), a_row(image=2, score=0.9)]
+        path = tmp_path / "part-00000.parquet"
+        detections.write(rows, path)
+
+        assert list(detections.read(path)) == rows
+
+    def test_a_floor_drops_the_tail(self, tmp_path: Path) -> None:
+        rows = [a_row(image=1, score=0.004), a_row(image=2, score=0.5)]
+        path = tmp_path / "part-00000.parquet"
+        detections.write(rows, path)
+
+        assert [row.score for row in detections.read(path, 0.05)] == [0.5]
+
+    def test_a_row_exactly_on_the_floor_survives(self, tmp_path: Path) -> None:
+        """The floor is the line between "saw something" and "saw nothing", so
+        which side its own value falls on decides a blind spot."""
+        path = tmp_path / "part-00000.parquet"
+        detections.write([a_row(score=0.05)], path)
+
+        assert len(list(detections.read(path, 0.05))) == 1
+
+    def test_an_image_whose_every_row_is_below_the_floor_disappears(self, tmp_path: Path) -> None:
+        """Which is what makes it a blind spot: `score_pool` is driven by the pool
+        rather than by this mapping, so an absent image is scored rather than
+        dropped."""
+        detections.write(
+            [a_row(image=1, score=0.002), a_row(image=2, score=0.7)],
+            tmp_path / "part-00000.parquet",
+        )
+        grouped = detections.grouped(tmp_path, 0.05)
+
+        assert set(grouped) == {an_image_id(2)}
+
+    def test_grouped_reads_every_part(self, tmp_path: Path) -> None:
+        detections.write([a_row(image=1)], tmp_path / "part-00000.parquet")
+        detections.write([a_row(image=2)], tmp_path / "part-00001.parquet")
+
+        assert set(detections.grouped(tmp_path)) == {an_image_id(1), an_image_id(2)}
+
+    def test_grouped_agrees_with_collect_and_group(self, tmp_path: Path) -> None:
+        """The one-pass reader is the two-pass one without the intermediate list,
+        so it has to be the same answer."""
+        rows = [a_row(image=1), a_row(image=1, category="bus"), a_row(image=2)]
+        detections.write(rows, tmp_path / "part-00000.parquet")
+
+        assert detections.grouped(tmp_path) == detections.group(detections.collect(tmp_path))
+
+
 class TestTheShapeConsumersTake:
     def test_it_groups_by_image(self) -> None:
         rows = [a_row(image=1), a_row(image=1, category="bus"), a_row(image=2)]

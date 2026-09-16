@@ -40,8 +40,14 @@ locals {
   # any cohort outside `LABELED_COHORTS`, so no key this role can construct
   # addresses a `pool` label, and the partitioner asserts each file holds exactly
   # its cohort's IDs before writing either one.
+  # The oracle is the third and last label reader, and the only one that reads a
+  # *withheld* label. Ingest writes the archive and the partitioner copies out the
+  # two cohorts the draw labels; this is the one principal that opens a `pool`
+  # document, which is the read the whole budget exists to meter. Its own policy
+  # denies it the `val` half of the tree, so the widening here is to `train/` in
+  # practice -- see `oracle.tf`.
   raw_writer_arns   = [local.ingest_role_arn]
-  label_reader_arns = [local.ingest_role_arn, local.partition_role_arn]
+  label_reader_arns = [local.ingest_role_arn, local.partition_role_arn, local.oracle_role_arn]
 }
 
 # Conditioned on the calling project, not just the service. Without
