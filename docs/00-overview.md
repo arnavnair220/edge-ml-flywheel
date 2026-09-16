@@ -250,3 +250,4 @@ Each plane's document lands with the plane.
 |---|---|
 | `01-data-and-labels.md` | 1 |
 | `02-training.md` | 2 |
+| `03-evaluation.md` | 3 |

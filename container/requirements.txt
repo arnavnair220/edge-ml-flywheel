@@ -20,3 +20,15 @@ ultralytics==8.4.146
 # Reads the label parquet the bootstrap cohort and every purchase are written
 # as. The same version the `ingest` dependency group resolves.
 pyarrow>=18
+
+# The greedy IoU assignment the match cache is built from. Pinned to the version
+# `uv.lock` resolves, so the matching that produced a cached array in the
+# container is the matching the test suite checked on a laptop.
+#
+# One file for three jobs, so each installs a little it does not use: the
+# evaluation job has no need of the detector above, and the training job has no
+# need of this. The alternative is a requirements file per job, which would be
+# three files to keep in step for the sake of thirty seconds of pip -- and would
+# give up the one property the shared archive exists for, that all three jobs
+# run the same tree under one `git_commit`.
+pycocotools==2.0.11

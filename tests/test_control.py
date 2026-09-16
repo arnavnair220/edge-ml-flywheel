@@ -58,9 +58,9 @@ ACCOUNT = "123456789012"
 # not as an empty parse.
 ASL = Path(__file__).resolve().parents[1] / "infra" / "cycle.asl.json"
 
-# The six steps the diagram draws as stubs. Named here so that implementing one
-# and leaving it a `Pass` is a failing test.
-STUBS = frozenset({"Evaluate", "Register", "Promote", "Select", "Purchase"})
+# The steps the diagram draws as stubs. Named here so that implementing one and
+# leaving it a `Pass` is a failing test.
+STUBS = frozenset({"Register", "Promote", "Select", "Purchase"})
 
 # The execution inputs an execution may leave out, and the handler defaults. They
 # are listed here rather than derived because the point of the test below is that
@@ -361,23 +361,26 @@ class TestTheDeployedArchive:
         layer.mkdir()
         (layer / "train.py").write_text("# entry point", encoding="utf-8")
         (layer / "score.py").write_text("# entry point", encoding="utf-8")
+        (layer / "evaluate.py").write_text("# entry point", encoding="utf-8")
         (layer / "requirements.txt").write_text("ultralytics==8.4.146\n", encoding="utf-8")
 
         return package, layer
 
-    def test_puts_both_entry_points_at_the_root_beside_the_package(self, tmp_path: Path) -> None:
+    def test_puts_every_entry_point_at_the_root_beside_the_package(self, tmp_path: Path) -> None:
         """Script mode requires `train.py` at the root of the archive and
-        `scoring.job.container_entrypoint` names `score.py` there, which is the
-        whole reason the two directories are separate arguments.
+        `scoring.job.container_entrypoint` names the other two there, which is
+        the whole reason the two directories are separate arguments.
 
-        One archive serving both jobs is also the provenance claim: the code that
-        scored a model is the tree that trained it, under one `git_commit`.
+        One archive serving all three jobs is also the provenance claim: the code
+        that gated a model is the tree that trained and scored it, under one
+        `git_commit`.
         """
         package, layer = self._deployment(tmp_path)
         names = _tar_names(launch.archive(package, layer))
 
         assert "train.py" in names
         assert "score.py" in names
+        assert "evaluate.py" in names
         assert "requirements.txt" in names
         assert "edge_ml_flywheel/training/job.py" in names
 
@@ -443,6 +446,33 @@ class TestTheDefinition:
         nothing in this project polls a training job."""
         seed = definition["States"]["Train"]["ItemProcessor"]["States"]["TrainSeed"]
         assert seed["Resource"].endswith("sagemaker:createTrainingJob.sync")
+
+    def test_the_evaluation_runs_once_over_every_seed_that_scored(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """Not a `Map`, unlike the two steps before it. A paired delta is a mean
+        over same-seed differences, so a comparison split across jobs is not a
+        comparison -- and the seed list comes from what `Score` assigned, so a
+        seed that failed to score is one nothing tries to evaluate."""
+        request = definition["States"]["EvaluateRequest"]
+        assert request["Type"] == "Task"
+
+        payload = request["Arguments"]["Payload"]
+        assert "'step': 'evaluate_request'" in payload
+        assert "$seeds_scored" in payload
+
+        assert definition["States"]["Evaluate"]["Resource"].endswith(
+            "sagemaker:createProcessingJob.sync"
+        )
+
+    def test_the_evaluation_job_is_not_given_the_cycles_instance_type(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """The one an execution may set is the GPU type training and scoring
+        share, and this job is numpy over cached arrays. Passing it here would be
+        a way to run the addition on a GPU."""
+        payload = definition["States"]["EvaluateRequest"]["Arguments"]["Payload"]
+        assert "instance_type" not in payload
 
     def test_an_optional_input_is_only_read_where_absence_is_allowed(
         self, definition: dict[str, Any]

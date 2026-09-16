@@ -82,16 +82,17 @@ data "archive_file" "control" {
   excludes = ["**/__pycache__/**"]
 }
 
-# `container/train.py` and `requirements.txt`, in a layer.
+# `container/`'s three entry points and `requirements.txt`, in a layer.
 #
 # They are in the deployment for one reason: `prepare` builds the source archive
-# the training container unpacks, and SageMaker's script mode requires both of
-# them at the root of that archive. A Lambda has no git checkout to build it
-# from, so the tree has to arrive at deploy time -- and a Lambda package has
-# exactly one source directory, while these two files live outside `src/`. A
-# layer is the one place a Lambda can be handed files from a second directory,
-# so they land at `/opt` and `control.handler` tars them together with the
-# package from `/var/task`.
+# the cycle's three jobs unpack, and each of them is named at the root of that
+# archive -- `train.py` because script mode requires it there, `score.py` and
+# `evaluate.py` because `scoring.job.container_entrypoint` names their paths in a
+# shell command. A Lambda has no git checkout to build the tree from, so it has
+# to arrive at deploy time -- and a Lambda package has exactly one source
+# directory, while these files live outside `src/`. A layer is the one place a
+# Lambda can be handed files from a second directory, so they land at `/opt` and
+# `control.handler` tars them together with the package from `/var/task`.
 data "archive_file" "entry_point" {
   type        = "zip"
   source_dir  = "${path.module}/../container"
@@ -100,7 +101,7 @@ data "archive_file" "entry_point" {
 
 resource "aws_lambda_layer_version" "entry_point" {
   layer_name          = "${var.project}-entrypoint"
-  description         = "container/train.py and requirements.txt, which script mode requires at the root of the training source archive."
+  description         = "The three container entry points and requirements.txt, which belong at the root of the cycle's source archive."
   filename            = data.archive_file.entry_point.output_path
   source_code_hash    = data.archive_file.entry_point.output_base64sha256
   compatible_runtimes = [local.control_runtime]
@@ -205,13 +206,18 @@ data "aws_iam_policy_document" "control" {
 
       # `base/` alongside the cycle prefixes, because `ensure_base` decides
       # whether to fetch by listing and a denied listing reads as "not there yet"
-      # -- which would re-stage the base on every cycle. `models/*` is listed and
-      # not read: `score_request` checks that the checkpoint it is about to point
-      # a job at exists, which is a listing, and it never opens the file.
+      # -- which would re-stage the base on every cycle. `models/*`,
+      # `detections/*` and `eval/*` are listed and never read: each `*_request`
+      # step checks that the inputs it is about to point a job at exist, which is
+      # a listing, and it opens none of the files. The distinction matters most
+      # for `eval/*`, which holds the cached match arrays -- the control plane
+      # confirms a champion has them and is in no position to read one.
       values = [
         "run_id=*/cycle=*/training/*",
         "run_id=*/cycle=*/scoring/*",
         "run_id=*/cycle=*/models/*",
+        "run_id=*/cycle=*/detections/*",
+        "run_id=*/cycle=*/eval/*",
         "base/*",
       ]
     }
@@ -256,7 +262,7 @@ resource "aws_cloudwatch_log_group" "control" {
 
 resource "aws_lambda_function" "control" {
   function_name = local.control_function_name
-  description   = "The steps of a cycle that are Python: writing the training and scoring manifests, and building one seed's request for each job."
+  description   = "The steps of a cycle that are Python: writing the training and scoring manifests, and building each job's request."
   role          = aws_iam_role.control.arn
   handler       = "edge_ml_flywheel.control.handler.handler"
   runtime       = local.control_runtime
@@ -318,7 +324,7 @@ data "aws_iam_policy_document" "cycle_trust" {
 
 resource "aws_iam_role" "cycle" {
   name               = local.cycle_machine_name
-  description        = "The cycle state machine. Claims a cycle, invokes the control function, and starts training and scoring jobs as their own roles."
+  description        = "The cycle state machine. Claims a cycle, invokes the control function, and starts the training, scoring and evaluation jobs as their own roles."
   assume_role_policy = data.aws_iam_policy_document.cycle_trust.json
 }
 
@@ -365,13 +371,17 @@ data "aws_iam_policy_document" "cycle" {
     ]
   }
 
-  # The same four `.sync` needs, for the other job a cycle runs. A separate
-  # statement rather than more actions on the one above, because the resource is
-  # a different type and collapsing them would mean granting training actions on
-  # processing jobs and the reverse -- which is not a wider grant that matters,
-  # but is a policy that stops saying which job each action is for.
+  # The same four `.sync` needs, for the two Processing jobs a cycle runs --
+  # scoring and evaluation. One statement rather than two, because they are the
+  # same resource type and SageMaker has no way to name one Processing job and
+  # not another before either exists; what tells them apart is the role each is
+  # passed, above. A separate statement from the training one, because the
+  # resource *is* a different type and collapsing them would mean granting
+  # training actions on processing jobs and the reverse -- which is not a wider
+  # grant that matters, but is a policy that stops saying which job each action
+  # is for.
   statement {
-    sid    = "RunScoringJobs"
+    sid    = "RunProcessingJobs"
     effect = "Allow"
 
     actions = [
@@ -390,17 +400,23 @@ data "aws_iam_policy_document" "cycle" {
   # The grant that makes the label wall a question about this role. Handing
   # SageMaker one of these roles is how a job gets any data access at all, so the
   # condition pins the service they can be handed to: without it, a principal that
-  # could start a job could pass either role to anything that accepts one.
+  # could start a job could pass any of them to anything that accepts one.
   #
-  # Two roles and not one, and that is the point of there being two. This role can
-  # start a job that reads the labels a run owns, and a job that reads no label at
-  # all, and which of those a given job is follows from which role it was passed
-  # -- not from what its container happens to do with the grant.
+  # Three roles and not one, and that is the point of there being three. This role
+  # can start a job that reads the labels a run owns, a job that reads no label at
+  # all, and a job that reads the eval boxes and nothing else -- and which of those
+  # a given job is follows from which role it was passed, not from what its
+  # container happens to do with the grant.
   statement {
-    sid       = "PassTheJobRoles"
-    effect    = "Allow"
-    actions   = ["iam:PassRole"]
-    resources = [aws_iam_role.training.arn, aws_iam_role.scoring.arn]
+    sid     = "PassTheJobRoles"
+    effect  = "Allow"
+    actions = ["iam:PassRole"]
+
+    resources = [
+      aws_iam_role.training.arn,
+      aws_iam_role.scoring.arn,
+      aws_iam_role.evaluation.arn,
+    ]
 
     condition {
       test     = "StringEquals"

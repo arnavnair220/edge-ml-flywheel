@@ -262,3 +262,37 @@ class TestQualityGate:
         result = quality_gate(a_delta(), DETECTING, CLASSES)
         assert str(RESAMPLES) in result.reason
         assert "95%" in result.reason
+
+
+class TestTheFirstCycle:
+    """No champion, so `delta` is `None` and there is nothing to compare.
+
+    The case exists because a run's first model has to be able to become its
+    first champion. Reporting no verdict instead would leave
+    `ModelManifest.gates_passed` false for the only model that can ever hold that
+    position, which is a run that cannot start.
+    """
+
+    def test_a_baseline_passes_on_the_collapse_check_alone(self) -> None:
+        result = quality_gate(None, DETECTING, CLASSES)
+        assert result.passed
+        assert result.gate == Gate.QUALITY
+
+    def test_the_reason_says_it_is_a_baseline_rather_than_an_improvement(self) -> None:
+        """A green verdict that does not say why is one a reader six weeks later
+        would take for a measured improvement over a champion."""
+        result = quality_gate(None, DETECTING, CLASSES)
+        assert "no champion" in result.reason
+        assert "baseline" in result.reason
+
+    def test_a_collapsed_class_still_fails_with_no_champion(self) -> None:
+        """The check that survives is the one asking whether the model produces
+        output at all, which has an answer with one model in hand."""
+        result = quality_gate(None, {**DETECTING, "bus": 0.0}, CLASSES)
+        assert not result.passed
+        assert "scored zero AP" in result.reason
+
+    def test_no_band_is_reported_for_a_comparison_that_did_not_happen(self) -> None:
+        result = quality_gate(None, DETECTING, CLASSES)
+        assert "delta" not in result.reason
+        assert str(RESAMPLES) not in result.reason

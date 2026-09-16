@@ -57,14 +57,17 @@ locals {
   # to it lands inside this statement without an edit here.
   cohort_label_objects = "${local.bucket_arns["data"]}/derived/partition_version=*/labels/*"
 
-  # Empty, and the emptiness is the current state rather than a placeholder: no
-  # role that exists today has a reason to read the eval labels. The scoring role
-  # is not the one that will -- it runs a model over images and writes what came
-  # back, so it holds no label grant of any kind and carries an explicit deny
-  # over this prefix in its own policy. What belongs here is the evaluation job
-  # that matches those detections against ground truth, and it arrives with the
-  # `Evaluate` step.
-  eval_label_reader_arns = []
+  # One ARN, and it is the whole of the exemption. The evaluation job matches a
+  # cycle's detections against these boxes, which is the one operation in the
+  # project that needs both a prediction and a ground truth in the same process.
+  #
+  # The scoring role is deliberately not here and never will be: it runs a model
+  # over images and writes what came back, so it holds no label grant of any kind
+  # and carries an explicit deny over this prefix in its own policy. That split
+  # is what keeps this list at one entry -- the job that reads the `val` images
+  # and the job that reads their boxes are two identities, so neither one's blast
+  # radius covers the whole evaluation.
+  eval_label_reader_arns = [local.evaluation_role_arn]
 
   # The partitioner writes these files and nothing else may. Not empty for the
   # reason the list above is: a deny with no exemption would refuse the job that

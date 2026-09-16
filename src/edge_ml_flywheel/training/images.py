@@ -27,17 +27,23 @@ import json
 import logging
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from edge_ml_flywheel.conventions import (
     RAW_IMAGES_PREFIX,
     ImageId,
     Split,
+    parse_image_id,
     raw_image_key,
     uri,
 )
 
 log = logging.getLogger(__name__)
+
+# The prefix header plus at least one key. A manifest is a list whose first
+# element names the prefix the rest are relative to, so a document of one entry
+# names nothing.
+_MIN_ENTRIES: Final = 2
 
 
 def prefix_of(split: Split) -> str:
@@ -77,6 +83,32 @@ def write(path: Path, bucket: str, image_ids: Sequence[ImageId], split: Split) -
     named = len(entries) - 1
     log.info("manifest names %d images under %s", named, uri(bucket, prefix_of(split)))
     return named
+
+
+def manifest_ids(path: Path) -> tuple[ImageId, ...]:
+    """The images a written manifest names, read back out of the document.
+
+    The inverse of `document`, and the evaluation job's statement of which images
+    were scored. It cannot read that off the detections instead: a model that
+    found nothing in a frame contributes no row, so the detections name the images
+    with boxes rather than the images that were put in front of the model -- and
+    the difference is every frame the challenger missed entirely, which is exactly
+    what the metric has to count.
+
+    The leading `{"prefix": ...}` entry is dropped rather than checked against a
+    split. A manifest is a list of keys under one prefix whatever that prefix is,
+    and this reader's caller already knows which cohort it asked for.
+    """
+    entries = json.loads(path.read_text(encoding="utf-8"))
+    # A list of one is the prefix header and no images, which `document` refuses
+    # to write in the first place -- so reaching here means the file was
+    # truncated or produced by something else.
+    if not isinstance(entries, list) or len(entries) < _MIN_ENTRIES:
+        raise ValueError(f"{path.name} is not a manifest naming any image")
+
+    found = tuple(parse_image_id(Path(str(entry)).stem) for entry in entries[1:])
+    log.info("manifest %s names %d images", path.name, len(found))
+    return found
 
 
 def capped(image_ids: Sequence[ImageId], max_images: int) -> tuple[ImageId, ...]:

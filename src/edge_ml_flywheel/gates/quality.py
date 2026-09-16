@@ -26,6 +26,14 @@ never gated (design section 4.4). Acquisition is condition-blind, so a cycle
 makes no per-condition bet for a per-condition gate to settle. The one per-class
 condition here is not a slice test: it asks whether the model produces output at
 all, which is a different question from whether a slice moved.
+
+**A run's first model has no delta, and that is a verdict rather than a gap.**
+There is no champion to compare cycle 0's model against, so `delta` is `None` and
+the two statistical conditions have nothing to test. The collapse check still
+runs, because it asks whether the model detects anything at all and that question
+has an answer with one model in hand. Reporting no verdict instead would leave
+`ModelManifest.gates_passed` false for the only model that can ever become the
+first champion, which is a run that cannot start.
 """
 
 from collections.abc import Mapping
@@ -98,7 +106,7 @@ def _collapse(per_class: Mapping[str, float], classes: ClassSet) -> str | None:
 
 
 def quality_gate(
-    delta: PairedDelta,
+    delta: PairedDelta | None,
     per_class: Mapping[str, float],
     classes: ClassSet,
     thresholds: Thresholds = DEFAULT,
@@ -108,22 +116,33 @@ def quality_gate(
     `per_class` is the *challenger's* per-class AP over the whole eval cohort --
     the collapse check is about the model being promoted, not about the delta.
 
+    `delta` is `None` when there is no champion, which is the run's first cycle
+    and nothing else. See the module docstring: the two statistical conditions
+    have no second model to test against, and the verdict is the collapse check
+    alone rather than an absence.
+
     Every check runs even after one has failed, for `data_gate`'s reason: the
     next attempt costs a training run, so a verdict should say everything that is
     wrong with this one.
     """
+    compared = (_uplift(delta, thresholds), _band(delta)) if delta is not None else ()
     failures = [
-        failure
-        for failure in (
-            _uplift(delta, thresholds),
-            _band(delta),
-            _collapse(per_class, classes),
-        )
-        if failure is not None
+        failure for failure in (*compared, _collapse(per_class, classes)) if failure is not None
     ]
 
     if failures:
         return GateResult(gate=Gate.QUALITY, passed=False, reason="; ".join(failures))
+
+    detecting = f"all {len(classes.names)} classes detecting"
+    if delta is None:
+        return GateResult(
+            gate=Gate.QUALITY,
+            passed=True,
+            reason=(
+                f"no champion to compare against, so this model is the run's baseline rather "
+                f"than an improvement on one; {detecting}"
+            ),
+        )
 
     return GateResult(
         gate=Gate.QUALITY,
@@ -131,6 +150,6 @@ def quality_gate(
         reason=(
             f"mean paired delta {delta.observed:+.4f}, {delta.confidence:.0%} band "
             f"[{delta.lower:+.4f}, {delta.upper:+.4f}] over {delta.resamples} resamples, "
-            f"all {len(classes.names)} classes detecting"
+            f"{detecting}"
         ),
     )
