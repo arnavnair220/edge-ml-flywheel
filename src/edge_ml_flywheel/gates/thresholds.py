@@ -64,10 +64,12 @@ class Thresholds:
     images.
 
     `min_mean_delta` is the absolute mAP improvement a challenger must show
-    before its confidence band is consulted. The two conditions are close to
-    redundant at five seeds -- design section 4.2 works out that the band alone
-    implies a delta near +0.005 -- and both are kept because that redundancy is
-    something the design says to confirm against real numbers rather than assume.
+    before its confidence band is consulted. Design section 4.2 works the two
+    conditions out as close to redundant -- the band alone implies a delta near
+    +0.005 -- over a seed spread a cycle no longer trains, so at one seed this
+    floor is the condition doing more of the work. It is left at the design's
+    number rather than re-derived from a guess: the design says to confirm it
+    against real numbers, and there are none yet.
     """
 
     min_new_images: int = 250

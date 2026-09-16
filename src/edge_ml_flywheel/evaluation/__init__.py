@@ -6,9 +6,10 @@ contact with the outside world, so the test suite runs with no credentials and a
 promotion decision is reproducible from a saved `.npz`.
 
 The layer's shape follows from one number. The paired bootstrap needs 1,000
-resamples over 5 seeds and 2 models, and re-scoring per resample would be 10,000
-full mAP evaluations over 5,000 images -- tens of hours per cycle (design section
-4.2). So scoring happens once and every later statistic reads the cache:
+resamples over both models, and re-scoring per resample would be 2,000 full mAP
+evaluations over 5,000 images for a single-seed cycle -- hours, and multiplied
+again by every seed a run adds (design section 4.2). So scoring happens once and
+every later statistic reads the cache:
 
 - `coco` puts boxes and detections in the shapes `pycocotools` reads
 - `match` scores once, keeping the per-image match arrays at every IoU threshold

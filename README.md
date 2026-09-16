@@ -19,7 +19,7 @@ denominated in labels, so the pipeline reports accuracy gained per label spent a
 | Cloud | AWS |
 | Edge | Simulated fleet, AWS IoT Greengrass on Graviton EC2 |
 | Orchestration | Step Functions, single orchestrator |
-| Training | SageMaker training jobs on spot GPU, prebuilt PyTorch container |
+| Training | SageMaker training jobs, on-demand GPU, prebuilt PyTorch container |
 | Model | COCO-pretrained Ultralytics YOLO11n, frozen backbone, ONNX int8 |
 | IaC | Terraform, S3 backend with native S3 locking |
 | CI | GitHub Actions via OIDC, no long-lived keys |

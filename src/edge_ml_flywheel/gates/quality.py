@@ -8,9 +8,12 @@ floats.
 
 **Both statistical conditions are required, not either.** The mean paired delta
 must clear +0.005 *and* the resampling band must clear zero (design section 4.2).
-They are close to redundant at five seeds and that is the point -- the design
-predicts the redundancy and says to confirm it against real numbers, which is
-only possible if both are evaluated and both are reported.
+The design predicts the two are close to redundant and says to confirm it against
+real numbers, which is only possible if both are evaluated and both are reported.
+That arithmetic was worked out over a seed spread, and a cycle now trains one
+seed: the band resamples images and not seeds, so the floor carries more of the
+decision than the prediction assumed. Which is a reason to check it, not to drop
+either condition.
 
 **The band is the condition that makes this more than a demo.** Most pipelines
 promote on a raw metric bump sitting inside the noise, and most that do draw

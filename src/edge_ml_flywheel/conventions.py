@@ -50,7 +50,7 @@ Seed = NewType("Seed", int)
 
 # The partitioner's draw seed, kept distinct from `Seed` because the two are
 # different numbers with different lifetimes. `Seed` is a training seed, one of
-# the five a cycle trains, and a path component capped at one digit by
+# the seeds a cycle trains, and a path component capped at one digit by
 # `SEED_DIGITS`; a draw seed appears in no key, is fixed once per partition
 # version, and is six digits wider than that cap allows.
 PartitionSeed = NewType("PartitionSeed", int)
@@ -369,7 +369,7 @@ class RunRegistration:
 # consistent, bought for the sake of a shorter string.
 #
 # **One version per cycle**, which is what makes the cycle enough to identify it.
-# A cycle trains one challenger over five seeds (design section 4.2), and the
+# A cycle trains one challenger, at one seed by design (design section 4.2), and the
 # champion it is compared against is not retrained -- its cached seed runs are
 # reused (design section 7), so the cycle produces exactly one new model. Work
 # that falls outside that rhythm already has somewhere to live: the random arm of
@@ -1313,9 +1313,10 @@ class ModelManifest:
     leakage statement, and `eval` appearing in it is the failure the field exists
     to make representable and then refuse.
 
-    `artifact_sha256` is the digest of each seed's `model.onnx`, all five, not
-    only the deployed one -- the matched-seed saving in design section 7 depends
-    on the other four existing and being identifiable. The device agent verifies
+    `artifact_sha256` is the digest of each seed's `model.onnx`, every seed the
+    cycle trained and not only the deployed one -- the matched-seed saving in
+    design section 7 depends on each one existing and being identifiable at the
+    cycle it was trained in. The device agent verifies
     the digest before loading (design section 6), so a truncated download becomes
     a rejection instead of a model that silently returns nonsense.
 
@@ -1406,10 +1407,11 @@ class ModelManifest:
 def model_seed_prefix(version: ModelVersion, seed: Seed) -> str:
     """One seed's own prefix, which is what a training job is pointed at.
 
-    Per seed, because all five champion artifacts are retained. Seed 1 is the one
-    that ships, by convention. The other four are what the matched-seed cost
-    saving in design section 7 depends on -- keeping only seed 1 quietly removes
-    it.
+    Per seed, because every champion artifact is retained. Seed 1 is the one that
+    ships, by convention, and the only one a single-seed cycle produces. A cycle
+    trained at more keeps the rest as well: they are what the matched-seed cost
+    saving in design section 7 depends on, and keeping only seed 1 quietly
+    removes it.
     """
     return f"{model_prefix(version)}seed={_padded('seed', seed, SEED_DIGITS)}/"
 
@@ -1480,7 +1482,7 @@ def training_manifest_key(run_id: RunId, cycle: Cycle) -> str:
     one prefix, which holds here because `raw_image_key` varies only by split and
     a training set never crosses one.
 
-    Written at prepare time and read by all five seeds, so it doubles as the
+    Written at prepare time and read by every seed of the cycle, so it doubles as the
     record of what the challenger trained on: one list under a write-once cycle
     prefix, rather than a set reconstructed later from a ledger and a partition.
     """
@@ -1497,8 +1499,7 @@ def training_code_key(run_id: RunId, cycle: Cycle) -> str:
     tree that commit produced, uploaded before the job that read it started.
 
     Beside `training_manifest_key` because they are the two objects one cycle
-    hands its five seeds, and they are read by the same role under the same
-    grant.
+    hands its seeds, and they are read by the same role under the same grant.
     """
     return f"{cycle_prefix(run_id, cycle)}training/sourcedir.tar.gz"
 

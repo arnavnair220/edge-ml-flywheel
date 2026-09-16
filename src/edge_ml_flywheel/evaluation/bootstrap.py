@@ -14,10 +14,11 @@ independently and subtracting the intervals would measure two things that vary
 together as though they varied separately, which widens the band by most of the
 eval-set noise the pairing exists to cancel (design section 4.2).
 
-**Matched seeds.** A cycle trains five, so a delta is the mean over five
-same-seed differences rather than a difference of the best or the first. Seeds
-present on one side and not the other are refused: dropping them silently would
-compare a five-seed mean against a three-seed one.
+**Matched seeds.** A cycle trains one, so a delta is ordinarily that one seed's
+difference; a cycle trained at more takes the mean over same-seed differences
+rather than a difference of the best or the first. Seeds present on one side and
+not the other are refused either way: dropping them silently would compare a
+three-seed mean against a one-seed one.
 
 **The same draws every cycle.** `RESAMPLE_SEED` is fixed and the eval cohort is
 frozen, so cycle eight's band is computed over the same 1,000 image lists as

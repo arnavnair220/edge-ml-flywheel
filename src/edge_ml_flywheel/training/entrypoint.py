@@ -123,7 +123,7 @@ def seed_everything(seed: Seed) -> None:
     Seeded, not bit-exact, and the difference is stated rather than papered over
     (design section 3): GPU kernels leave residual non-determinism that no
     setting fully removes, and its contribution to a paired delta is far below
-    the seed spread the five seeds already average over.
+    the spread between two seeds of the same recipe.
 
     `PYTHONHASHSEED` is set for the record and takes effect only in subprocesses,
     since the interpreter read it before this line ran. Nothing in the training

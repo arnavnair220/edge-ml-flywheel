@@ -123,11 +123,11 @@ def prepare(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
 def train_request(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
     """Build one seed's `CreateTrainingJob` request and return it unstarted.
 
-    `epochs` is required and has no default here, unlike the compute fields. It
-    is the recipe, and a control plane that quietly trains one epoch because
-    nobody passed a number produces a model whose `recipe_version` is a claim
-    about a recipe it did not run. The compute fields default to `job.Compute`,
-    which is where the spot policy and the runtime ceiling are decided.
+    `epochs` is required and has no default here, unlike `instance_type`. It is
+    the recipe, and a control plane that quietly trains one epoch because nobody
+    passed a number produces a model whose `recipe_version` is a claim about a
+    recipe it did not run. The compute fields default to `job.Compute`, which is
+    where the purchasing mode and the runtime ceiling are decided.
     """
     version = new_model_version(parse_run_id(str(event["run_id"])), Cycle(int(event["cycle"])))
     seed = Seed(int(event["seed"]))
@@ -135,7 +135,6 @@ def train_request(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any
     recipe = job.Recipe(epochs=int(event["epochs"]))
     compute = job.Compute(
         instance_type=str(event.get("instance_type", job.Compute().instance_type)),
-        use_spot=bool(event.get("use_spot", job.Compute().use_spot)),
     )
 
     built = launch.request(aws, version, seed, recipe, compute)

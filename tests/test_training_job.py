@@ -65,33 +65,28 @@ def channel(request: dict[str, Any], name: str) -> dict[str, Any] | None:
 
 class TestNoResume:
     def test_the_request_carries_no_checkpoint_config(self) -> None:
-        """A spot job with nowhere to checkpoint restarts rather than resumes.
+        """A job with nowhere to checkpoint restarts rather than resumes.
 
         The rule is a property of the job definition, so this is where it is
-        enforced. Adding `CheckpointConfig` to make an interrupt cheaper would
-        make seed k stop fixing the run, which is the thing the matched-seed
+        enforced. Adding `CheckpointConfig` to make a retry cheaper would make
+        seed k stop fixing the run, which is the thing the matched-seed
         comparison shares between champion and challenger.
         """
         assert "CheckpointConfig" not in a_request()
 
-    def test_spot_is_on_and_the_wait_covers_the_run(self) -> None:
+    def test_the_job_is_on_demand(self) -> None:
+        """Managed spot is absent from the request rather than set to False in
+        it: SageMaker's default is on demand, and `MaxWaitTimeInSeconds` is a
+        field the service refuses on a job that is not spot."""
         request = a_request()
-        assert request["EnableManagedSpotTraining"] is True
-        assert (
-            request["StoppingCondition"]["MaxWaitTimeInSeconds"]
-            >= request["StoppingCondition"]["MaxRuntimeInSeconds"]
-        )
-
-    def test_on_demand_carries_no_wait_time(self) -> None:
-        """`MaxWaitTimeInSeconds` is only meaningful for a spot job, and
-        SageMaker refuses it on one that is not."""
-        request = a_request(compute=job.Compute(use_spot=False))
-        assert request["EnableManagedSpotTraining"] is False
+        assert "EnableManagedSpotTraining" not in request
         assert "MaxWaitTimeInSeconds" not in request["StoppingCondition"]
 
-    def test_a_spot_wait_shorter_than_the_run_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="must cover its max runtime"):
-            job.Compute(max_runtime_seconds=7200, max_wait_seconds=3600)
+    def test_the_runtime_ceiling_is_the_only_stopping_condition(self) -> None:
+        """A bound on a hang, and nothing about waiting for capacity."""
+        assert a_request()["StoppingCondition"] == {
+            "MaxRuntimeInSeconds": job.Compute().max_runtime_seconds
+        }
 
 
 class TestChannels:
