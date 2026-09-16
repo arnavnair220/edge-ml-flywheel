@@ -380,6 +380,12 @@ data "aws_iam_policy_document" "cycle" {
   # the run's control item is created by the registration and advanced by this
   # role, and the difference between "the cap was reached" and "the counter was
   # reset to zero mid-run" is exactly the absence of a put here.
+  #
+  # Two updates use it and they write different attributes of the same item: the
+  # claim advances `next_cycle`, and the promotion advances `champion_version`.
+  # One grant rather than two because DynamoDB scopes an action to a table and
+  # not to an attribute -- what keeps each write to its own field is the update
+  # expression, and each carries a condition that refuses the other's mistake.
   statement {
     sid    = "ClaimACycle"
     effect = "Allow"

@@ -1,10 +1,10 @@
 {
-  "Comment": "One cycle of the flywheel, and the loop back to the next. Three of the sixteen steps are Pass stubs today, each carrying the comment that names the task replacing it. Start it with {\"run_id\": <id>, \"epochs\": <n>, \"seeds\": [1]}, and optionally max_images, replace and instance_type -- the last three apply to training and scoring alike, since both are capped and re-prepared together.",
+  "Comment": "One cycle of the flywheel, and the loop back to the next. Two of the sixteen steps are Pass stubs today, each carrying the comment that names the task replacing it. Start it with {\"run_id\": <id>, \"epochs\": <n>, \"seeds\": [1]}, and optionally max_images, replace and instance_type -- the last three apply to training and scoring alike, since both are capped and re-prepared together.",
   "QueryLanguage": "JSONata",
   "StartAt": "ClaimCycle",
   "States": {
     "ClaimCycle": {
-      "Comment": "The single-flight lock, and the only place a cycle number comes from. One conditional update adds one to next_cycle and returns the item as it was, so the number handed back is the cycle this execution now owns and no other execution can own. The condition carries the cap too, which is why a run that has spent its cycles is refused here rather than by a check upstream that has to remember to run. ALL_OLD rather than UPDATED_OLD because the cap is read off the same call. The retries below are throttles and transient faults only: a failed condition means the cap is spent or another execution holds this run, and both are the same answer on a second attempt.",
+      "Comment": "The single-flight lock, and the only place a cycle number comes from. One conditional update adds one to next_cycle and returns the item as it was, so the number handed back is the cycle this execution now owns and no other execution can own. The condition carries the cap too, which is why a run that has spent its cycles is refused here rather than by a check upstream that has to remember to run. ALL_OLD rather than UPDATED_OLD because the cap and the champion are read off the same call -- the pointer `Promote` wrote at the end of the previous cycle arrives with the cycle number, so nothing reads this item twice. The champion is a ternary rather than a bare path because a run's first cycle has no such attribute, and a JSONata expression resolving to nothing fails the state; `null` is what the evaluation step reads as \"this model is the run's baseline\". The retries below are throttles and transient faults only: a failed condition means the cap is spent or another execution holds this run, and both are the same answer on a second attempt.",
       "Type": "Task",
       "Resource": "arn:aws:states:::dynamodb:updateItem",
       "Arguments": {
@@ -20,7 +20,8 @@
       },
       "Assign": {
         "cycle": "{% $number($states.result.Attributes.next_cycle.N) %}",
-        "cycle_cap": "{% $number($states.result.Attributes.cycle_cap.N) %}"
+        "cycle_cap": "{% $number($states.result.Attributes.cycle_cap.N) %}",
+        "champion": "{% $exists($states.result.Attributes.champion_version.S) ? $states.result.Attributes.champion_version.S : null %}"
       },
       "Output": {},
       "Retry": [
@@ -233,7 +234,7 @@
       "Resource": "arn:aws:states:::lambda:invoke",
       "Arguments": {
         "FunctionName": "${control_function_arn}",
-        "Payload": "{% {'step': 'evaluate_request', 'version': $seeds_scored[0].version, 'seeds': [$seeds_scored.seed]} %}"
+        "Payload": "{% {'step': 'evaluate_request', 'version': $seeds_scored[0].version, 'seeds': [$seeds_scored.seed], 'champion': $champion} %}"
       },
       "Output": "{% $states.result.Payload %}",
       "Retry": [
@@ -279,6 +280,7 @@
       },
       "Assign": {
         "passed": "{% $states.result.Payload.passed %}",
+        "registered": "{% $states.result.Payload.version %}",
         "package_group": "{% $states.result.Payload.group %}",
         "package_request": "{% $states.result.Payload.request %}"
       },
@@ -348,8 +350,32 @@
     },
 
     "Promote": {
-      "Comment": "STUB. Replaced by the champion pointer flip: the registry advances the version and the fleet_config device items take the new desired_version.",
-      "Type": "Pass",
+      "Comment": "The champion pointer flip, and the state that makes the next cycle a comparison rather than another baseline. One conditional update on the item the cycle was claimed from, so the pointer arrives back at ClaimCycle with the cycle number. Only reached when the gates passed -- the registry already recorded the verdict either way, and promotion is what a rejected challenger is denied. The condition only ever moves forward: a version sorts lexicographically by its padded cycle within one run, so a cycle re-run against an older model is refused here rather than silently regressing the champion every later comparison is paired against. What this does NOT do is deploy: the fleet_config device items take a desired_version when the fleet plane writes one, and the registry's own candidate-to-archived states land with it.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Arguments": {
+        "TableName": "${fleet_config_table}",
+        "Key": {
+          "run_id": { "S": "{% $states.context.Execution.Input.run_id %}" },
+          "entity": { "S": "run" }
+        },
+        "UpdateExpression": "SET champion_version = :version",
+        "ConditionExpression": "attribute_not_exists(champion_version) OR champion_version < :version",
+        "ExpressionAttributeValues": { ":version": { "S": "{% $registered %}" } }
+      },
+      "Output": {},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "DynamoDB.ThrottlingException",
+            "DynamoDB.ProvisionedThroughputExceededException",
+            "DynamoDB.InternalServerErrorException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 4,
+          "BackoffRate": 2
+        }
+      ],
       "Next": "Select"
     },
 

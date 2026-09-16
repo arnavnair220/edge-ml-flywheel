@@ -34,9 +34,12 @@ from edge_ml_flywheel.conventions import (
     PROJECT,
     RUN_ENTITY,
     Cycle,
+    ModelVersion,
     RunId,
     Table,
     columns,
+    model_version_run_id,
+    parse_model_version,
     parse_run_id,
     table_name,
 )
@@ -71,16 +74,38 @@ class RunControl:
     `next_cycle` is the cycle the *next* claim gets, not the one running. It is 0
     at registration, so the first execution claims cycle 0 and leaves 1 behind
     it.
+
+    `champion_version` is the run's current champion, and `None` until one has
+    been promoted -- which is a run's first cycle and nothing else. It lives on
+    this item rather than beside the model artifacts for the reason the counter
+    does: the claim that opens a cycle is a conditional `UpdateItem` returning
+    `ALL_OLD`, so a pointer on the same item arrives with the cycle number and
+    costs the state machine no second read. It is the run's champion and not the
+    fleet's -- what a device is told to run is `desired_version` on that device's
+    own item, which the fleet plane writes.
     """
 
     run_id: RunId
     next_cycle: Cycle
     cycle_cap: int
+    champion_version: ModelVersion | None = None
 
     def __post_init__(self) -> None:
         parse_run_id(self.run_id)
         if self.next_cycle < 0:
             raise ValueError(f"next cycle cannot be negative: {self.next_cycle}")
+        if self.champion_version is not None:
+            parse_model_version(self.champion_version)
+            # A champion from another run is the one pointer error that cannot be
+            # seen by looking at it: the string is well formed, the model exists,
+            # and the comparison it produces is against a model trained under a
+            # partition this run never declared.
+            if model_version_run_id(self.champion_version) != self.run_id:
+                raise ValueError(
+                    f"{self.champion_version} belongs to run "
+                    f"{model_version_run_id(self.champion_version)}, so it cannot be "
+                    f"{self.run_id}'s champion"
+                )
         if self.cycle_cap < MIN_CYCLE_CAP:
             raise ValueError(
                 f"cycle cap must be at least {MIN_CYCLE_CAP}: {self.cycle_cap}. A run that can "
@@ -100,6 +125,12 @@ def to_item(control: RunControl) -> dict[str, Any]:
     The field set is checked against the schema of record on the way out, for
     `registration.to_item`'s reason. `entity` is expected to be *extra* here --
     it is the sort key, and the check is for fields that lost their encoding.
+
+    `champion_version` is written only once there is one, and is named in the
+    check's exemption rather than left to it: an absent attribute is how the
+    claim's `ALL_OLD` says "no champion yet", and a `None` written as a string
+    would be a run whose first challenger is compared against a model called
+    "None".
     """
     item: dict[str, Any] = {
         "run_id": str(control.run_id),
@@ -107,9 +138,12 @@ def to_item(control: RunControl) -> dict[str, Any]:
         "next_cycle": int(control.next_cycle),
         "cycle_cap": int(control.cycle_cap),
     }
+    if control.champion_version is not None:
+        item["champion_version"] = str(control.champion_version)
 
+    unset = set() if control.champion_version is not None else {"champion_version"}
     expected = set(columns(RunControl))
-    missing = sorted(expected - set(item))
+    missing = sorted(expected - set(item) - unset)
     if missing:
         raise ValueError(f"control fields with no encoding here: {missing}")
 
@@ -124,10 +158,12 @@ def from_item(item: dict[str, Any]) -> RunControl:
     `Decimal`, and a `Decimal` cycle compares unequal to the same cycle as an
     `int` everywhere that reads it back.
     """
+    champion = item.get("champion_version")
     return RunControl(
         run_id=parse_run_id(item["run_id"]),
         next_cycle=Cycle(int(item["next_cycle"])),
         cycle_cap=int(item["cycle_cap"]),
+        champion_version=parse_model_version(str(champion)) if champion else None,
     )
 
 

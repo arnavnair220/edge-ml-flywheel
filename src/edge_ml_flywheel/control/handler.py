@@ -235,11 +235,14 @@ def evaluate_request(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, 
     over same-seed differences, so the comparison cannot be divided across jobs
     and the seed list is the argument rather than the Map item.
 
-    `champion` is optional and absent today. Nothing records a champion yet --
-    `Promote` is still a stub -- so every cycle evaluates as its run's baseline,
-    and the quality gate says so rather than comparing against nothing. The
-    argument exists here because the comparison path is built and tested; what is
-    missing is the step that would name a model to compare against.
+    `champion` is optional, and absent exactly once per run. It arrives as the
+    pointer `Promote` wrote on the run's control item at the end of the previous
+    cycle, handed back by the claim that opened this one -- so a run's first
+    cycle passes nothing and is evaluated as its own baseline, and every cycle
+    after it is a paired comparison. Read with `.get` and treated as absent when
+    null for that reason: the state machine passes the key either way, and a
+    `None` reaching `parse_model_version` would be a first cycle that fails
+    instead of a first cycle that has no champion.
 
     No `instance_type`, unlike the other two request steps. The one an execution
     may set is the GPU type training and scoring share, and this job is numpy

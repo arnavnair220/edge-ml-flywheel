@@ -41,7 +41,14 @@ from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from edge_ml_flywheel.control import handler as ctrl
-from edge_ml_flywheel.conventions import PROJECT, Cycle, RunId, Table, table_name
+from edge_ml_flywheel.conventions import (
+    PROJECT,
+    Cycle,
+    RunId,
+    Table,
+    new_model_version,
+    table_name,
+)
 from edge_ml_flywheel.run import control as ctl
 from edge_ml_flywheel.training import launch
 
@@ -60,7 +67,7 @@ ASL = Path(__file__).resolve().parents[1] / "infra" / "cycle.asl.json"
 
 # The steps the diagram draws as stubs. Named here so that implementing one and
 # leaving it a `Pass` is a failing test.
-STUBS = frozenset({"Promote", "Select", "Purchase"})
+STUBS = frozenset({"Select", "Purchase"})
 
 # The execution inputs an execution may leave out, and the handler defaults. They
 # are listed here rather than derived because the point of the test below is that
@@ -124,6 +131,34 @@ class TestControlItem:
         assert read_back.next_cycle == 2
         assert isinstance(read_back.next_cycle, int)
         assert not isinstance(read_back.next_cycle, Decimal)
+
+    def test_a_run_with_no_champion_writes_no_pointer(self) -> None:
+        """An absent attribute is how the claim's `ALL_OLD` says "no champion
+        yet". A `None` written as a string would be a first challenger compared
+        against a model called "None"."""
+        item = ctl.to_item(ctl.RunControl(run_id=RUN, next_cycle=Cycle(0), cycle_cap=8))
+        assert "champion_version" not in item
+
+    def test_the_champion_round_trips(self) -> None:
+        control = ctl.RunControl(
+            run_id=RUN,
+            next_cycle=Cycle(4),
+            cycle_cap=8,
+            champion_version=new_model_version(RUN, Cycle(3)),
+        )
+        assert ctl.from_item(ctl.to_item(control)) == control
+
+    def test_refuses_a_champion_from_another_run(self) -> None:
+        """The one pointer error that cannot be seen by looking at it: the string
+        is well formed and the model exists, and the comparison it produces is
+        against a model trained under a partition this run never declared."""
+        with pytest.raises(ValueError, match="cannot be"):
+            ctl.RunControl(
+                run_id=RUN,
+                next_cycle=Cycle(4),
+                cycle_cap=8,
+                champion_version=new_model_version(OTHER, Cycle(3)),
+            )
 
     def test_refuses_a_cap_of_zero(self) -> None:
         """A run that can claim no cycle trains nothing and reports it as a
@@ -535,6 +570,49 @@ class TestTheDefinition:
         catch = definition["States"]["OpenTheRegistryGroup"]["Catch"]
         assert catch[0]["ErrorEquals"] == ["States.ALL"]
         assert catch[0]["Next"] == "RegisterTheVersion"
+
+    def test_the_champion_arrives_with_the_cycle_it_was_claimed_for(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """`ALL_OLD` already returns the whole item, so the pointer `Promote`
+        wrote at the end of the previous cycle costs no second read. The ternary
+        is what makes a run's first cycle a baseline rather than a failed
+        expression: a JSONata path resolving to nothing fails the state."""
+        champion = definition["States"]["ClaimCycle"]["Assign"]["champion"]
+        assert "$exists(" in champion
+        assert champion.endswith(": null %}")
+
+    def test_the_evaluation_is_handed_the_champion_to_pair_against(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """Without this the gate has nothing to compare against and every cycle
+        of a run is its own baseline."""
+        payload = definition["States"]["EvaluateRequest"]["Arguments"]["Payload"]
+        assert "'champion': $champion" in payload
+
+    def test_promotion_advances_the_pointer_the_claim_reads(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """One item, written here and read at `ClaimCycle`."""
+        promote = definition["States"]["Promote"]
+        assert promote["Type"] == "Task"
+        assert promote["Resource"].endswith("dynamodb:updateItem")
+        assert promote["Arguments"]["UpdateExpression"] == "SET champion_version = :version"
+        assert promote["Arguments"]["Key"]["entity"]["S"] == "run"
+
+    def test_promotion_only_ever_moves_forward(self, definition: dict[str, Any]) -> None:
+        """A version sorts lexicographically by its padded cycle within one run,
+        so a cycle re-run against an older model is refused rather than silently
+        regressing the champion every later comparison is paired against."""
+        condition = definition["States"]["Promote"]["Arguments"]["ConditionExpression"]
+        assert "attribute_not_exists(champion_version)" in condition
+        assert "champion_version < :version" in condition
+
+    def test_only_a_passing_challenger_is_promoted(self, definition: dict[str, Any]) -> None:
+        """The registry recorded the verdict either way; promotion is what a
+        rejected challenger is denied."""
+        assert definition["States"]["Passed"]["Choices"][0]["Next"] == "Promote"
+        assert definition["States"]["Passed"]["Default"] == "Select"
 
     def test_the_claim_is_conditional_on_the_cap(self, definition: dict[str, Any]) -> None:
         """The single-flight lock. Without the condition this is a counter two
