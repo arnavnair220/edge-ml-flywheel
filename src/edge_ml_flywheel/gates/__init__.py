@@ -14,16 +14,19 @@ and a rejection with its reason is the artifact the project is built to produce
 **A gate reports every condition that failed, not the first.** The next attempt
 costs a training run, so short-circuiting turns one diagnosis into two cycles.
 
-`Gate` names four checks and this package implements two. `EDGE` and `CANARY`
-read p95 latency on a Graviton device and two replay hours of device telemetry,
-and nothing produces either yet -- writing them now would mean inventing their
-input shape and testing against the invention. They land with their producers in
-phase 5; `thresholds.Gate` reserves the names in the meantime so the report
-format and the state machine can already be written against them.
+`Gate` names four checks and this package implements three. `EDGE` is complete:
+both its thresholds -- artifact size and quantized accuracy against fp32 -- are
+properties of a file and a number, and speed is reported off the fleet rather
+than gated (design section 4.3), so nothing about it waits on silicon. `CANARY`
+reads two replay hours of device telemetry and has no predicate at all, because
+nothing produces that input yet and one written now would be tested against an
+invented shape. `thresholds.Gate` reserves its name in the meantime so the report
+format and the state machine can already be written against it.
 """
 
 from edge_ml_flywheel.gates.data import data_gate
+from edge_ml_flywheel.gates.edge import edge_gate
 from edge_ml_flywheel.gates.quality import quality_gate
 from edge_ml_flywheel.gates.thresholds import DEFAULT, Gate, Thresholds
 
-__all__ = ["DEFAULT", "Gate", "Thresholds", "data_gate", "quality_gate"]
+__all__ = ["DEFAULT", "Gate", "Thresholds", "data_gate", "edge_gate", "quality_gate"]

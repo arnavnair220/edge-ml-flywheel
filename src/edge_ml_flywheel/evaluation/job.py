@@ -43,6 +43,7 @@ from edge_ml_flywheel.conventions import (
     Cycle,
     ModelVersion,
     PartitionVersion,
+    Precision,
     RunId,
     Seed,
     cohort_labels_prefix,
@@ -81,6 +82,11 @@ CHAMPION_CHANNEL: Final = "champion"
 # One detections channel per seed, since each seed's boxes are a separate prefix.
 # A prefix rather than a suffix so a listing of the input directory groups them.
 DETECTIONS_CHANNEL: Final = "detections-seed"
+
+# The deployed seed's int8 boxes over `eval`, written by the quantized scoring
+# pass. One channel and not one per seed: exactly one artifact ships, so exactly
+# one is quantized and measured.
+INT8_CHANNEL: Final = "detections-int8"
 
 # The two output channels: the cached arrays and the metrics beside them, and the
 # verdict. Two rather than one because they are keyed differently -- the metrics
@@ -128,11 +134,39 @@ class Target:
     partition_version: PartitionVersion
     champion: ModelVersion | None = None
 
+    # The size of the int8 artifact the deployed seed exported, in bytes, read
+    # off the object by the caller. `None` skips the edge gate entirely.
+    #
+    # Passed in rather than measured here because this job holds no model grant
+    # at all -- `infra/evaluation.tf` keeps `models/*` off every statement, which
+    # is what lets the account answer "what could have contaminated the eval" by
+    # naming two identities. A file size is not a reason to widen that, and the
+    # caller building this request already reads the bucket.
+    artifact_bytes: int | None = None
+
     tags: Mapping[str, str] = field(default_factory=dict)
+
+    @property
+    def deployed_seed(self) -> Seed:
+        """The seed whose artifact ships, and so the one the edge gate is about.
+
+        `min` rather than a literal 1, matching `entrypoint.deployed_seed`.
+        """
+        return min(self.seeds)
+
+    @property
+    def gates_edge(self) -> bool:
+        """Whether this job has an int8 pass to judge."""
+        return self.artifact_bytes is not None
 
     def __post_init__(self) -> None:
         if not self.seeds:
             raise ValueError("an evaluation over no seed has nothing to compare")
+        if self.artifact_bytes is not None and self.artifact_bytes < 1:
+            raise ValueError(
+                f"an int8 artifact of {self.artifact_bytes} bytes is not an artifact. Pass None "
+                f"to run the cycle without an edge verdict rather than an empty file's size."
+            )
         if len(set(self.seeds)) != len(self.seeds):
             raise ValueError(f"a seed appears twice in {list(self.seeds)}")
         if self.champion == self.version:
@@ -142,7 +176,12 @@ class Target:
                 f"by construction."
             )
 
-        channels = len(_FIXED_CHANNELS) + len(self.seeds) + (1 if self.champion else 0)
+        channels = (
+            len(_FIXED_CHANNELS)
+            + len(self.seeds)
+            + (1 if self.champion else 0)
+            + (1 if self.gates_edge else 0)
+        )
         if channels > MAX_INPUTS:
             raise ValueError(
                 f"{len(self.seeds)} seeds need {channels} input channels, over the {MAX_INPUTS} a "
@@ -252,6 +291,22 @@ def inputs(target: Target) -> list[dict[str, Any]]:
         for seed in sorted(target.seeds)
     )
 
+    # The deployed seed's int8 boxes, when an artifact was exported to judge.
+    # Same cohort and same seed as one of the channels above, at the other
+    # precision -- which is the distinction `Precision` exists to keep in the key.
+    if target.gates_edge:
+        channels.append(
+            _prefix_input(
+                INT8_CHANNEL,
+                uri(
+                    buckets.artifacts,
+                    detections_prefix(
+                        target.version, target.deployed_seed, Cohort.EVAL, Precision.INT8
+                    ),
+                ),
+            )
+        )
+
     # The champion's whole eval prefix, every seed's cache in one channel. Under
     # the cycle that produced the champion rather than this one, which is
     # `eval_prefix`'s reason for being keyed that way: the eval cohort is frozen,
@@ -340,6 +395,8 @@ def arguments(target: Target) -> list[str]:
     ]
     if target.champion is not None:
         flags.extend(("--champion", target.champion))
+    if target.artifact_bytes is not None:
+        flags.extend(("--artifact_bytes", str(target.artifact_bytes)))
     return flags
 
 

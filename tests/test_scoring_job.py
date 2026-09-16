@@ -24,6 +24,7 @@ from edge_ml_flywheel.conventions import (
     ImageId,
     ModelArtifact,
     PartitionVersion,
+    Precision,
     RunId,
     Seed,
     detections_prefix,
@@ -159,6 +160,68 @@ class TestChannels:
         complete answer, and there is nothing to watch in progress."""
         for entry in a_request()["ProcessingOutputConfig"]["Outputs"]:
             assert entry["S3Output"]["S3UploadMode"] == "EndOfJob"
+
+
+class TestTheInt8Pass:
+    """The second pass a cycle makes over `eval`, with the artifact that ships.
+
+    It differs from the fp32 pass in three things and nothing else: the file it
+    loads, the cohorts it covers and the prefix it writes. Each is checked here,
+    because each of them silently doing the fp32 thing would produce a green edge
+    gate over the wrong model.
+    """
+
+    @staticmethod
+    def int8_request(cycle: int = 1, seed: int = 1) -> dict[str, Any]:
+        return a_request(
+            cycle=cycle,
+            seed=seed,
+            scoring=job.Scoring(precision=Precision.INT8),
+            compute=job.Compute.for_precision(Precision.INT8),
+        )
+
+    def test_it_loads_the_quantized_graph_and_not_the_checkpoint(self) -> None:
+        """A digest of the checkpoint verifies nothing the device does, and a
+        score of the checkpoint measures nothing quantization did."""
+        source = channel(self.int8_request(cycle=3, seed=1), job.MODEL_CHANNEL)
+        assert source is not None
+        assert source["S3Input"]["S3Uri"].endswith(ModelArtifact.ONNX.value)
+
+    def test_it_covers_eval_alone(self) -> None:
+        """The pool is scored to be ranked, and the ranking is the selector's --
+        built from the model the cycle trained, not a quantized copy of it."""
+        request = self.int8_request()
+        assert channel(request, Cohort.EVAL.value) is not None
+        assert channel(request, Cohort.POOL.value) is None
+        assert [entry["OutputName"] for entry in request["ProcessingOutputConfig"]["Outputs"]] == [
+            Cohort.EVAL.value
+        ]
+
+    def test_it_writes_beside_the_fp32_boxes_rather_than_over_them(self) -> None:
+        """Same model, same seed, same cohort. Without the precision segment the
+        int8 boxes would overwrite the ones the paired comparison reads."""
+        version = new_model_version(RUN, Cycle(1))
+        entry = output(self.int8_request(), Cohort.EVAL.value)
+        assert entry is not None
+        assert entry["S3Output"]["S3Uri"].endswith(
+            detections_prefix(version, Seed(1), Cohort.EVAL, Precision.INT8)
+        )
+
+    def test_the_container_is_told_which_build_to_run(self) -> None:
+        assert flag(self.int8_request(), "--precision") == Precision.INT8.value
+        assert flag(a_request(), "--precision") == Precision.FP32.value
+
+    def test_it_runs_on_cpu(self) -> None:
+        """Not a saving: int8 is a CPU format, and ONNX Runtime's CUDA provider
+        falls back to float for most of what static quantization emits -- which
+        would measure a model the device will never run."""
+        compute = job.Compute.for_precision(Precision.INT8)
+
+        assert "g4dn" not in compute.instance_type
+        assert compute.instance_type.startswith("ml.m5")
+
+    def test_the_fp32_pass_keeps_the_gpu(self) -> None:
+        assert job.Compute.for_precision(Precision.FP32) == job.Compute()
 
 
 class TestTheContainerCommand:

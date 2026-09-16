@@ -26,10 +26,13 @@ import boto3
 from edge_ml_flywheel.conventions import (
     PROJECT,
     Cohort,
+    ModelArtifact,
     ModelVersion,
+    Precision,
     Seed,
     detections_prefix,
     eval_matches_key,
+    model_artifact_key,
     model_version_cycle,
     model_version_run_id,
     scoring_manifest_key,
@@ -114,10 +117,46 @@ def request(
         seeds=tuple(sorted(seeds)),
         partition_version=run.partition_version,
         champion=champion,
+        artifact_bytes=int8_artifact_bytes(aws, artifacts, version, min(seeds)),
         tags={"project": PROJECT, "recipe_version": str(run.recipe_version)},
     )
 
     return job.processing_job(target=target, compute=compute, attempt=datetime.now(UTC))
+
+
+def int8_artifact_bytes(
+    aws: boto3.Session, bucket: str, version: ModelVersion, seed: Seed
+) -> int | None:
+    """The size of the deployed seed's int8 artifact, or `None` if there is none.
+
+    Read here because the job cannot: `infra/evaluation.tf` keeps `models/*` off
+    every statement of the evaluation role, which is what lets the account answer
+    "what could have contaminated the eval" with two identities and one answer
+    each. A file size is not a reason to widen that.
+
+    `None` rather than a refusal, and it is the one place this function is
+    permissive. Both halves of the edge measurement are absent together -- no
+    export means no int8 detections either -- so the cycle reports no edge
+    verdict rather than failing, which is what lets a model trained before the
+    export landed still be evaluated. The quality gate is unaffected, and a
+    promotion still needs whatever gates did report.
+    """
+    onnx = model_artifact_key(version, seed, ModelArtifact.ONNX)
+    detections = detections_prefix(version, seed, Cohort.EVAL, Precision.INT8)
+
+    if not base.exists(aws, bucket, onnx):
+        log.info("%s does not exist, so this cycle reports no edge verdict", uri(bucket, onnx))
+        return None
+    if not _any_object(aws, bucket, detections):
+        log.info(
+            "%s holds no detections, so the int8 pass did not run and this cycle reports no "
+            "edge verdict",
+            uri(bucket, detections),
+        )
+        return None
+
+    head = aws.client("s3").head_object(Bucket=bucket, Key=onnx)
+    return int(head["ContentLength"])
 
 
 def _any_object(aws: boto3.Session, bucket: str, prefix: str) -> bool:

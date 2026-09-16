@@ -1658,14 +1658,42 @@ def scoring_manifest_key(run_id: RunId, cycle: Cycle, cohort: Cohort) -> str:
     return f"{cycle_prefix(run_id, cycle)}scoring/images-{_scored(cohort).value}.manifest"
 
 
-def detections_prefix(version: ModelVersion, seed: Seed, cohort: Cohort) -> str:
+class Precision(StrEnum):
+    """Which build of a model produced a set of detections.
+
+    `FP32` is the checkpoint, which is what the paired comparison, the selector
+    and every reported metric are computed from. `INT8` is the quantized ONNX
+    graph the fleet runs, scored once per cycle over `eval` alone so the edge
+    gate can say what quantization cost.
+
+    A dimension of the detections key rather than a flag on a file, because the
+    two are produced by separate jobs and read by separate consumers, and a
+    quantized box sitting in the prefix the selector reads would rank the pool by
+    the wrong model's uncertainty.
+    """
+
+    FP32 = "fp32"
+    INT8 = "int8"
+
+
+def detections_prefix(
+    version: ModelVersion,
+    seed: Seed,
+    cohort: Cohort,
+    precision: Precision = Precision.FP32,
+) -> str:
     """Where one model-seed's boxes for one cohort land.
 
     Keyed by version and seed because detections are a function of the model, and
     by cohort because the two are written by separate output channels of one job
     and read by separate consumers -- which is the `key=value/` rule's "something
     prunes on it", here a job's upload and a reader's prefix rather than a query
-    engine.
+    engine. By precision for the same reason: the int8 pass is a second job over
+    the same cohort, and the two sets of boxes answer different questions.
+
+    `FP32` is the default because it is the pass every cycle runs and the one
+    every existing reader wants. The segment is written for both, so neither is
+    the unmarked case a reader has to know about.
 
     Under the cycle that produced the model, not the cycle being decided, for
     `eval_prefix`'s reason: a champion is re-compared every cycle without being
@@ -1675,11 +1703,17 @@ def detections_prefix(version: ModelVersion, seed: Seed, cohort: Cohort) -> str:
     padded = _padded("seed", seed, SEED_DIGITS)
     return (
         f"{cycle_prefix(*_locate(version))}detections/version={version}/"
-        f"seed={padded}/cohort={_scored(cohort).value}/"
+        f"seed={padded}/cohort={_scored(cohort).value}/precision={precision.value}/"
     )
 
 
-def detections_key(version: ModelVersion, seed: Seed, cohort: Cohort, part: int = 0) -> str:
+def detections_key(
+    version: ModelVersion,
+    seed: Seed,
+    cohort: Cohort,
+    part: int = 0,
+    precision: Precision = Precision.FP32,
+) -> str:
     """One cohort's detections in one parquet.
 
     Parquet rather than the `.npz` the match cache uses, because these have two
@@ -1689,7 +1723,7 @@ def detections_key(version: ModelVersion, seed: Seed, cohort: Cohort, part: int 
     reader and are indexed rather than filtered, which is why they stay numpy.
     """
     name = _padded("part", part, PART_DIGITS)
-    return f"{detections_prefix(version, seed, cohort)}part-{name}.parquet"
+    return f"{detections_prefix(version, seed, cohort, precision)}part-{name}.parquet"
 
 
 def gate_report_prefix(run_id: RunId, cycle: Cycle) -> str:

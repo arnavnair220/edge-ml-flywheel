@@ -149,7 +149,5 @@ one tree.
 
 ## Incomplete
 
-The quantized model's accuracy is not yet measured against fp32. Two of the edge gate's four
-thresholds need no device — artifact size and accuracy within 2% relative — and until the second is
-checked, the export is known to produce a small artifact and not known to preserve the model. That
-measurement is plane 3's, over `eval`.
+Nothing in this plane. What the export costs in accuracy is measured by plane 3's edge gate, over a
+second pass across `eval` with the quantized graph.

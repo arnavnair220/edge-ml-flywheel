@@ -35,7 +35,6 @@ from edge_ml_flywheel.conventions import (
     Cohort,
     Cycle,
     ImageId,
-    ModelArtifact,
     ModelVersion,
     RunId,
     RunRegistration,
@@ -204,8 +203,11 @@ def request(
     artifacts = base.buckets(aws).artifacts
     required = [
         training_code_key(run_id, cycle),
-        model_artifact_key(version, seed, ModelArtifact.TORCH),
-        *(scoring_manifest_key(run_id, cycle, cohort) for cohort in sorted(SCORED_COHORTS)),
+        model_artifact_key(version, seed, job.artifact_for(scoring.precision)),
+        *(
+            scoring_manifest_key(run_id, cycle, cohort)
+            for cohort in sorted(job.cohorts_for(scoring.precision))
+        ),
     ]
     for key in required:
         if not base.exists(aws, artifacts, key):

@@ -31,11 +31,11 @@ from ultralytics import YOLO
 
 from edge_ml_flywheel.conventions import (
     CLASS_SET,
-    SCORED_COHORTS,
     Cohort,
     DetectionRow,
     ImageId,
     ModelArtifact,
+    Precision,
     Seed,
     detections_key,
     parse_image_id,
@@ -46,6 +46,7 @@ from edge_ml_flywheel.scoring.job import (
     INPUT_ROOT,
     MODEL_CHANNEL,
     OUTPUT_ROOT,
+    cohorts_for,
 )
 
 log = logging.getLogger("edge_ml_flywheel.scoring")
@@ -68,6 +69,13 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="score.py")
     parser.add_argument("--version", required=True, help="The model version being scored.")
     parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument(
+        "--precision",
+        type=Precision,
+        choices=list(Precision),
+        default=Precision.FP32,
+        help="Which build of the model to score with.",
+    )
     parser.add_argument("--image_size", type=int, required=True)
     parser.add_argument("--confidence_floor", type=float, required=True)
     parser.add_argument("--max_detections", type=int, required=True)
@@ -78,16 +86,20 @@ def channel(name: str) -> Path:
     return Path(INPUT_ROOT) / name
 
 
-def checkpoint() -> Path:
+def checkpoint(precision: Precision) -> Path:
     """The model this job scores with.
 
-    Named by `ModelArtifact.TORCH` rather than globbed, because the channel is a
-    single-object prefix and a glob that found two files would pick one of them
-    silently.
+    Named rather than globbed, because the channel is a single-object prefix and
+    a glob that found two files would pick one of them silently. Which name is
+    the precision's: the fp32 pass loads the checkpoint, and the int8 pass loads
+    the quantized graph that ships. Ultralytics runs either, and applies NMS
+    itself over the ONNX graph's raw outputs exactly as it does over the
+    checkpoint's -- which is why the export leaves NMS out.
     """
-    path = channel(MODEL_CHANNEL) / ModelArtifact.TORCH.value
+    artifact = ModelArtifact.ONNX if precision is Precision.INT8 else ModelArtifact.TORCH
+    path = channel(MODEL_CHANNEL) / artifact.value
     if not path.is_file():
-        raise SystemExit(f"the {MODEL_CHANNEL} channel carries no {ModelArtifact.TORCH.value}")
+        raise SystemExit(f"the {MODEL_CHANNEL} channel carries no {artifact.value}")
     return path
 
 
@@ -228,8 +240,8 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     args = _parser().parse_args(argv)
 
-    base = checkpoint()
-    log.info("scoring %s seed %d from %s", args.version, args.seed, base)
+    base = checkpoint(args.precision)
+    log.info("scoring %s seed %d at %s from %s", args.version, args.seed, args.precision, base)
 
     model = YOLO(str(base))
     names = _class_names(model)
@@ -237,7 +249,7 @@ def main(argv: list[str] | None = None) -> None:
     # Sorted for `job.inputs`' reason, and it decides something here that it does
     # not there: a job that dies partway leaves the cohorts before the failure
     # written, so the order is the order they are worth having.
-    for cohort in sorted(SCORED_COHORTS):
+    for cohort in sorted(cohorts_for(args.precision)):
         score_cohort(model, cohort, names, args)
 
 
