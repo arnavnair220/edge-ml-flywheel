@@ -104,7 +104,7 @@ The partition and class set come from the run registration.
 
 The archive `prepare` writes carries the cycle's three entry points, `train.py`, `score.py` and
 `evaluate.py`. The scoring and evaluation jobs unpack the same object, so the whole cycle runs from
-one tree under the single `git_commit` the manifest records.
+one tree.
 
 ---
 
