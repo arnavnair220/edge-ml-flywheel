@@ -14,9 +14,14 @@ dropped.
 `register` itself runs against `moto`, with a bucket holding exactly what a real
 cycle would have left behind: a gate report, a digest per seed, and SageMaker's
 own tarball under the job-named directory it invents. The refusals are the point
-of those tests -- a missing verdict and a missing artifact are the two ways a
-cycle arrives here with nothing to register, and both should stop before a
-manifest is written.
+of those tests -- a missing verdict and a missing digest are the two ways a cycle
+arrives here with nothing to register, and both should stop before a manifest is
+written.
+
+The tarball is not one of them. It is SageMaker's copy for hosting, this project
+hosts nothing, and pointing a `ModelDataUrl` at it made registration depend on a
+file no reader wanted -- and one SageMaker itself could not read, since a
+training job encrypts its output under a key whose policy cannot be widened.
 """
 
 import json
@@ -167,13 +172,33 @@ class TestTheRequest:
             manifest=manifest(**overrides),
             buckets=Buckets.for_account(ACCOUNT),
             image="an.ecr.uri/pytorch-training:tag",
-            model_data_url="s3://artifacts/model.tar.gz",
         )
 
     def test_the_group_is_the_run(self) -> None:
         """One ladder per run, because a partition or recipe change forces a new
         run and a re-baselined champion (design section 5)."""
         assert self.request()["ModelPackageGroupName"] == RUN
+
+    def test_it_names_no_model_to_load(self) -> None:
+        """`ModelDataUrl` is for a runtime that loads the model, and nothing here
+        is one: the artifact that ships is the int8 ONNX, pulled by a Greengrass
+        component and checked against its digest on the device. SageMaker also
+        validates that it can read what the URL names, and a training job
+        encrypts its output under `alias/aws/s3` -- an AWS-managed key whose
+        policy cannot be changed to let it.
+
+        What identifies the model is in the metadata: the digest the device
+        verifies, and the manifest naming every artifact.
+        """
+        request = self.request()
+        container = request["InferenceSpecification"]["Containers"][0]
+
+        assert "ModelDataUrl" not in container
+        assert container["Image"]
+
+        metadata = request["CustomerMetadataProperties"]
+        assert metadata["artifact_sha256"]
+        assert metadata["manifest"].endswith("manifest.json")
 
     def test_it_carries_no_tags(self) -> None:
         """SageMaker refuses tags on a package version and says to put them on
@@ -330,8 +355,11 @@ def cycle_output(
     """Everything the cycle's jobs wrote, as they wrote it.
 
     The tarball goes under a job-named directory rather than at a predictable
-    key, because that is what SageMaker does to an `OutputDataConfig` prefix and
-    it is the reason `model_data_url` is a listing.
+    key, because that is what SageMaker does to an `OutputDataConfig` prefix.
+    Nothing reads it any more -- `tarball=False` is the case that says so -- and
+    it is still written here because a real cycle leaves it behind and a fixture
+    that quietly stopped matching the bucket would be a fixture testing a
+    layout that does not exist.
     """
     client = aws.client("s3")
     artifacts = Buckets.for_account(ACCOUNT).artifacts
@@ -360,11 +388,14 @@ def cycle_output(
             ).encode(),
         )
         if tarball:
+            # Spelled out rather than built from a constant, because this is what
+            # SageMaker does to an `OutputDataConfig` prefix and no longer
+            # something this project has an opinion about. Nothing reads it.
             client.put_object(
                 Bucket=artifacts,
                 Key=(
-                    f"{model_seed_prefix(VERSION, seed)}{launch.SAGEMAKER_PREFIX}"
-                    f"{VERSION}-s{seed}-150000/{launch.SAGEMAKER_MODEL}"
+                    f"{model_seed_prefix(VERSION, seed)}_sagemaker/"
+                    f"{VERSION}-s{seed}-150000/output/model.tar.gz"
                 ),
                 Body=b"a tarball",
             )
@@ -466,11 +497,24 @@ class TestRegistering:
         with pytest.raises(SystemExit, match="published no digest"):
             launch.register(account, RUN, VERSION, (Seed(1), Seed(2)))
 
-    def test_refuses_a_model_with_no_tarball_to_point_at(self, account: boto3.Session) -> None:
+    def test_registers_without_sagemakers_own_tarball(self, account: boto3.Session) -> None:
+        """The tarball is SageMaker's copy for hosting, and this project hosts
+        nothing -- what ships is the int8 ONNX, and what identifies it is the
+        digest beside it. Registration used to point a `ModelDataUrl` at the
+        tarball and so depended on it being there; it no longer does, and this
+        says the dependency is gone rather than merely unused.
+
+        SageMaker refused that request anyway: it checks it can read what the
+        URL names, and a training job encrypts its output under `alias/aws/s3`,
+        whose key policy cannot be changed to let it.
+        """
         cycle_output(account, tarball=False)
 
-        with pytest.raises(SystemExit, match="never wrote one"):
-            launch.register(account, RUN, VERSION, (Seed(1),))
+        registered = launch.register(account, RUN, VERSION, (Seed(1),))
+
+        assert registered.version == VERSION
+        containers = registered.request["InferenceSpecification"]["Containers"]
+        assert "ModelDataUrl" not in containers[0]
 
     def test_refuses_a_version_belonging_to_another_run(self, account: boto3.Session) -> None:
         """The execution claimed its cycle under one run and the version was
