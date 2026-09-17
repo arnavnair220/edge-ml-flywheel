@@ -679,6 +679,38 @@ class TestTheDefinition:
         assert states["Ranked"]["Default"] == "PassNotTrusted"
         assert states["PassNotTrusted"]["Type"] == "Fail"
 
+    def test_no_job_is_retried_after_it_has_been_created(self, definition: dict[str, Any]) -> None:
+        """A SageMaker job name is minted once, with the request, by the step
+        before the one that submits it. So a retry of the submitting state sends
+        the same name, and the service answers `ResourceInUse` -- which is not a
+        second attempt at anything. It replaces the real failure with a name
+        clash, and that is how an int8 scoring crash came back from a cycle
+        reported as `SageMaker.ResourceInUseException`.
+
+        What is left is the failures that happen before a job exists, where the
+        name is still free and a second attempt is a real one.
+        """
+        states = definition["States"]
+        submitting = {
+            "TrainSeed": states["Train"]["ItemProcessor"]["States"]["TrainSeed"],
+            "ScoreSeed": states["Score"]["ItemProcessor"]["States"]["ScoreSeed"],
+            "ScoreQuantized": states["ScoreQuantized"],
+            "Evaluate": states["Evaluate"],
+        }
+
+        for name, state in submitting.items():
+            assert state["Resource"].endswith(".sync"), name
+            retried = {error for retrier in state["Retry"] for error in retrier["ErrorEquals"]}
+
+            assert "States.TaskFailed" not in retried, (
+                f"{name} retries a job that was created and failed, which can only collide "
+                f"with its own name and hide what actually went wrong"
+            )
+            assert retried == {
+                "SageMaker.ResourceLimitExceeded",
+                "SageMaker.ThrottlingException",
+            }, name
+
     def test_the_training_job_is_started_by_the_state_machine(
         self, definition: dict[str, Any]
     ) -> None:

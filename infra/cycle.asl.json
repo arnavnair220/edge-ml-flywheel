@@ -105,7 +105,7 @@
           },
 
           "TrainSeed": {
-            "Comment": "`.sync` owns the wait, so nothing in this project polls a training job or stays alive beside one, and an aborted execution stops the job rather than leaving a GPU running. A failed job arrives here as States.TaskFailed and the retry restarts it from the beginning -- there is no CheckpointConfig to resume from, which is what keeps `seed k fixes the run` true. Two attempts rather than many: a job that cannot get an instance twice is a quota problem and not a flake.",
+            "Comment": "`.sync` owns the wait, so nothing in this project polls a training job or stays alive beside one, and an aborted execution stops the job rather than leaving a GPU running. There is no CheckpointConfig to resume from, so a job that runs again runs from the beginning, which is what keeps `seed k fixes the run` true. What is retried is only the failure to get an instance -- see the retrier -- and two attempts rather than many, because a job that cannot get one twice is a quota problem and not a flake.",
             "Type": "Task",
             "Resource": "arn:aws:states:::sagemaker:createTrainingJob.sync",
             "Arguments": "{% $states.input.request %}",
@@ -116,7 +116,11 @@
             },
             "Retry": [
               {
-                "ErrorEquals": ["States.TaskFailed"],
+                "Comment": "Only what fails before a job exists. The request is built once by the step above, job name included, so a retry submits the same name -- and SageMaker refuses a duplicate with ResourceInUse. That is not a second attempt at anything: it replaces the real failure with a name clash, which is how an int8 crash was reported as ResourceInUseException. A job that was created and then failed is a cycle to look at, not to run again.",
+                "ErrorEquals": [
+                  "SageMaker.ResourceLimitExceeded",
+                  "SageMaker.ThrottlingException"
+                ],
                 "IntervalSeconds": 60,
                 "MaxAttempts": 2,
                 "BackoffRate": 2
@@ -211,7 +215,11 @@
             },
             "Retry": [
               {
-                "ErrorEquals": ["States.TaskFailed"],
+                "Comment": "Only what fails before a job exists. The request is built once by the step above, job name included, so a retry submits the same name -- and SageMaker refuses a duplicate with ResourceInUse. That is not a second attempt at anything: it replaces the real failure with a name clash, which is how an int8 crash was reported as ResourceInUseException. A job that was created and then failed is a cycle to look at, not to run again.",
+                "ErrorEquals": [
+                  "SageMaker.ResourceLimitExceeded",
+                  "SageMaker.ThrottlingException"
+                ],
                 "IntervalSeconds": 60,
                 "MaxAttempts": 2,
                 "BackoffRate": 2
@@ -261,7 +269,11 @@
       "Output": {},
       "Retry": [
         {
-          "ErrorEquals": ["States.TaskFailed"],
+          "Comment": "`ScoreSeed`'s retrier, for the same reason: the job name is minted once with the request, so retrying a created job can only collide with itself.",
+          "ErrorEquals": [
+            "SageMaker.ResourceLimitExceeded",
+            "SageMaker.ThrottlingException"
+          ],
           "IntervalSeconds": 60,
           "MaxAttempts": 2,
           "BackoffRate": 2
@@ -296,14 +308,18 @@
     },
 
     "Evaluate": {
-      "Comment": "The job that matches this cycle's detections against the eval cohort's ground truth, caches the per-image match arrays, runs the paired bootstrap and writes the gate report. It is the one principal in the account admitted to `labels/cohort=eval/` -- scoring deliberately holds no label grant, so this is where the two halves of the plane meet. `.sync` owns the wait for `ScoreSeed`'s reasons, and a restart is safe for the same one: the job reads frozen inputs and overwrites its own outputs. A failed gate is a completed job -- the verdict is the product, and it is in the report for `Register` to read -- so a States.TaskFailed here is a job that could not reach a verdict at all.",
+      "Comment": "The job that matches this cycle's detections against the eval cohort's ground truth, caches the per-image match arrays, runs the paired bootstrap and writes the gate report. It is the one principal in the account admitted to `labels/cohort=eval/` -- scoring deliberately holds no label grant, so this is where the two halves of the plane meet. `.sync` owns the wait for `ScoreSeed`'s reasons, and a restart is safe for the same one: the job reads frozen inputs and overwrites its own outputs. A failed gate is a completed job -- the verdict is the product, and it is in the report for `Register` to read -- so a failure here is a job that could not reach a verdict at all, and it ends the cycle rather than being run again.",
       "Type": "Task",
       "Resource": "arn:aws:states:::sagemaker:createProcessingJob.sync",
       "Arguments": "{% $states.input.request %}",
       "Output": {},
       "Retry": [
         {
-          "ErrorEquals": ["States.TaskFailed"],
+          "Comment": "`ScoreSeed`'s retrier, for the same reason: the job name is minted once with the request, so retrying a created job can only collide with itself.",
+          "ErrorEquals": [
+            "SageMaker.ResourceLimitExceeded",
+            "SageMaker.ThrottlingException"
+          ],
           "IntervalSeconds": 60,
           "MaxAttempts": 2,
           "BackoffRate": 2

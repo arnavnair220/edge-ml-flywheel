@@ -169,6 +169,23 @@ class TestChannels:
             assert entry["S3Output"]["S3UploadMode"] == "EndOfJob"
 
 
+class TestTheBatch:
+    def test_the_fp32_pass_batches(self) -> None:
+        """A GPU over thousands of frames, where one image per forward leaves the
+        card idle between them. Nothing the metric can see: detection is per
+        image, so how many share a forward pass changes only the wall clock."""
+        assert job.Scoring().batch > 1
+        assert flag(a_request(), "--batch") == str(job.Scoring().batch)
+
+    def test_the_container_is_never_left_to_choose(self) -> None:
+        """Both passes are told, rather than one being told and the other taking
+        a default. The int8 graph accepts exactly one shape, so a container with
+        an opinion of its own is a container that can be wrong about the artifact
+        that ships."""
+        for request in (a_request(), a_request(scoring=job.Scoring(precision=Precision.INT8))):
+            assert "--batch" in request["AppSpecification"]["ContainerArguments"]
+
+
 class TestTheInt8Pass:
     """The second pass a cycle makes over `eval`, with the artifact that ships.
 
@@ -213,6 +230,19 @@ class TestTheInt8Pass:
         assert entry["S3Output"]["S3Uri"].endswith(
             detections_prefix(version, Seed(1), Cohort.EVAL, Precision.INT8)
         )
+
+    def test_it_scores_one_frame_at_a_time(self) -> None:
+        """The failure this ends, and two reasons pointing the same way.
+
+        `export.to_onnx` passes `dynamic=False` so the quantizer can fold shapes
+        into constants, which fixes the graph's batch axis at 1 -- ONNX Runtime
+        refused a batch of 32 outright, after the job had loaded the model. And
+        the device replays one frame at a time, so a batched pass would measure
+        an execution the fleet never performs, in the one job whose purpose is
+        saying what the artifact that ships costs.
+        """
+        assert job.Scoring(precision=Precision.INT8).batch == 1
+        assert flag(self.int8_request(), "--batch") == "1"
 
     def test_the_container_is_told_which_build_to_run(self) -> None:
         assert flag(self.int8_request(), "--precision") == Precision.INT8.value
