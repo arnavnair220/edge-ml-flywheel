@@ -57,8 +57,21 @@ from edge_ml_flywheel.training import job as training
 # Where Processing puts an input and looks for an output, both fixed by the
 # service's convention rather than by the API. Spelled here because `entrypoint`
 # reads these paths and this module writes the request that fills them.
-INPUT_ROOT: Final = "/opt/ml/processing/input"
-OUTPUT_ROOT: Final = "/opt/ml/processing/output"
+#
+# The three absolute roots are built from one prefix and their own directory
+# names, because `container_entrypoint` needs both halves: the absolute form is
+# what the request and the container agree on, and the relative form is what
+# keeps that command inside the 256 characters SageMaker allows one member of
+# `ContainerEntrypoint`. Deriving both from one pair is what stops a `cd` in the
+# command from drifting away from the paths it makes relative.
+PROCESSING_ROOT: Final = "/opt/ml/processing"
+
+_INPUT_DIR: Final = "input"
+_OUTPUT_DIR: Final = "output"
+_CODE_DIR: Final = "code"
+
+INPUT_ROOT: Final = f"{PROCESSING_ROOT}/{_INPUT_DIR}"
+OUTPUT_ROOT: Final = f"{PROCESSING_ROOT}/{_OUTPUT_DIR}"
 
 # The two channels that are not a cohort. A cohort's channel is named by its own
 # value, so `eval` arrives at `<INPUT_ROOT>/eval` and needs no constant.
@@ -79,7 +92,12 @@ REQUIREMENTS: Final = "requirements.txt"
 # Where the archive is unpacked. Not into the channel directory it arrives in:
 # an input channel is the service's to populate, and unpacking beside the tarball
 # would put a directory tree inside something a reader expects to hold one file.
-UNPACKED: Final = "/opt/ml/processing/code"
+UNPACKED: Final = f"{PROCESSING_ROOT}/{_CODE_DIR}"
+
+# What one member of `ContainerEntrypoint` may be. The API rejects the request
+# rather than the job failing, so the cost of exceeding it is a validation error
+# minutes into a cycle that has already trained a model.
+MAX_ENTRYPOINT_MEMBER: Final = 256
 
 
 def container_entrypoint(entry_point: str = ENTRY_POINT) -> list[str]:
@@ -104,16 +122,30 @@ def container_entrypoint(entry_point: str = ENTRY_POINT) -> list[str]:
     `git_commit`, and they differ in the file at the root that is run and in
     nothing else about how the container starts. A second copy of these four
     lines would be a second place for the unpack path or the `-e` to go missing.
+
+    **It opens with a `cd` because the command has a length limit.** One member
+    of `ContainerEntrypoint` may be 256 characters and the absolute form of this
+    was 265, which the API refuses -- after a cycle has trained a model, since
+    the scoring request is built from what training produced. `/opt/ml/processing`
+    appeared four times and is stated once instead, which is the whole saving.
+    Nothing downstream is relative: the paths the request and the container agree
+    on stay absolute, and `PROCESSING_ROOT` is what both forms are built from.
     """
     script = "; ".join(
         (
             "set -euo pipefail",
-            f"mkdir -p {UNPACKED}",
-            f"tar xzf {INPUT_ROOT}/{CODE_CHANNEL}/{TRAINING_CODE_FILE} -C {UNPACKED}",
-            f"pip install --no-cache-dir --quiet -r {UNPACKED}/{REQUIREMENTS}",
-            f'exec python {UNPACKED}/{entry_point} "$@"',
+            f"cd {PROCESSING_ROOT}",
+            f"mkdir -p {_CODE_DIR}",
+            f"tar xzf {_INPUT_DIR}/{CODE_CHANNEL}/{TRAINING_CODE_FILE} -C {_CODE_DIR}",
+            f"pip install --no-cache-dir --quiet -r {_CODE_DIR}/{REQUIREMENTS}",
+            f'exec python {_CODE_DIR}/{entry_point} "$@"',
         )
     )
+    if len(script) > MAX_ENTRYPOINT_MEMBER:
+        raise ValueError(
+            f"the container command is {len(script)} characters and SageMaker allows "
+            f"{MAX_ENTRYPOINT_MEMBER}, so this request would be refused: {script}"
+        )
     return ["bash", "-c", script, entry_point]
 
 
