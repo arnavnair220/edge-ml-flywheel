@@ -33,6 +33,7 @@ import sys
 import tarfile
 from collections.abc import Iterator
 from decimal import Decimal
+from fnmatch import fnmatch
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -47,9 +48,17 @@ from edge_ml_flywheel.conventions import (
     PROJECT,
     Cycle,
     RunId,
+    Seed,
     Table,
+    base_weights_key,
+    eval_matches_key,
+    gate_report_key,
+    model_manifest_key,
     new_model_version,
+    selection_ranking_key,
     table_name,
+    training_code_key,
+    training_manifest_key,
 )
 from edge_ml_flywheel.oracle import handler as oracle
 from edge_ml_flywheel.run import control as ctl
@@ -67,6 +76,16 @@ ACCOUNT = "123456789012"
 # a fixture, because a test that cannot find it should fail as a missing file and
 # not as an empty parse.
 ASL = Path(__file__).resolve().parents[1] / "infra" / "cycle.asl.json"
+
+# The Terraform the control function's role is declared in. Read as text for
+# `ASL`'s reason: it is the other half of an interface this package has, and the
+# half nothing here would otherwise fail against.
+CYCLE_TF = Path(__file__).resolve().parents[1] / "infra" / "cycle.tf"
+
+# The `s3:prefix` values on the role's listing grant, which is a condition rather
+# than a resource -- so a prefix missing from it is an AccessDenied naming the
+# action and not the prefix, and reads as if no grant existed at all.
+LISTED_PREFIXES = re.compile(r'sid\s*=\s*"ListTheCyclePrefix".*?values\s*=\s*\[(.*?)\]', re.S)
 
 # The steps the diagram draws as stubs. Empty, and kept rather than deleted: the
 # assertion is now that every state of a cycle does something, which is the
@@ -948,3 +967,47 @@ def _expressions(node: Any) -> Iterator[str]:
 def _tar_names(payload: bytes) -> set[str]:
     with tarfile.open(fileobj=BytesIO(payload), mode="r:gz") as tar:
         return set(tar.getnames())
+
+
+class TestWhatTheRoleMayList:
+    """The listing grant against the keys the control plane actually asks about.
+
+    `base.exists` is a `list_objects_v2`, so every "is it there yet" in this
+    plane is a listing rather than a read -- and the grant is an `s3:prefix`
+    condition, which fails closed and reports itself as no grant at all. The
+    first cycle ever to reach a verdict died on exactly that: `register` checked
+    for the gate report it was already permitted to read, the prefix was not
+    listed, and the run failed on the permission with the report sitting in the
+    bucket beside it.
+
+    This is the interface nothing else fails against. The ASL is checked as a
+    graph and the requests are checked as dictionaries; a role is the third
+    thing a cycle needs and it is declared in a language the suite does not run.
+    """
+
+    def listed(self) -> list[str]:
+        match = LISTED_PREFIXES.search(CYCLE_TF.read_text(encoding="utf-8"))
+        assert match is not None, "the listing grant is not where this test looks for it"
+
+        return [line.strip().strip('",') for line in match.group(1).splitlines() if line.strip()]
+
+    def test_every_key_the_plane_checks_is_listable(self) -> None:
+        version = new_model_version(RUN, Cycle(3))
+        keys = {
+            "the gate report `register` reads": gate_report_key(RUN, Cycle(3)),
+            "the manifest `register` writes": model_manifest_key(version),
+            "the training manifest `prepare` refuses to overwrite": training_manifest_key(
+                RUN, Cycle(3)
+            ),
+            "the archive both jobs unpack": training_code_key(RUN, Cycle(3)),
+            "the eval cache a champion is compared from": eval_matches_key(version, Seed(1)),
+            "the ranking `select` writes": selection_ranking_key(RUN, Cycle(3)),
+            "the base weights `ensure_base` decides on": base_weights_key(),
+        }
+
+        patterns = self.listed()
+        for description, key in keys.items():
+            assert any(fnmatch(key, pattern) for pattern in patterns), (
+                f"{description} is not under any listed prefix, so `base.exists` on it is an "
+                f"AccessDenied: {key}"
+            )
