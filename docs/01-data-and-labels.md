@@ -309,10 +309,9 @@ start a run.
 
 One cycle spends its budget in five steps:
 
-1. The cycle's model scores every remaining pool image as a SageMaker Processing job, in the same
-   pass that scores the eval cohort. This is inference over image features only; no label is read.
-   The fleet's own scores over the frames it replayed are reported beside this ranking, never used
-   to rank the purchase.
+1. The device scores a 10,000-frame sample of the remaining pool with the model deployed to it, and
+   writes those detections back to S3. This is inference over image features only; no label is read,
+   and what comes back is predictions rather than frames.
 2. Each image gets a **mean per-object uncertainty** score, rather than an image-level maximum, which
    would be decided by a frame's single worst box.
 3. The top 1,000 of the ranked list are the batch, bought unfiltered.
@@ -320,11 +319,19 @@ One cycle spends its budget in five steps:
 5. The oracle checks the idempotency key, debits the ledger, releases those labels, and appends them
    to the cumulative labeled set.
 
-The model that ranks is the challenger this cycle trained, at the deployed seed, promoted or not. The
-pool manifest a cycle writes is what that model was scored over, so the scores cover the set being
-ranked exactly. A rejected challenger still ranks: the labels stay bought and the champion stays put.
+**The model that ranks is the one the fleet is running.** A challenger reaches the device only by
+promotion, so a cycle that promoted ranks with its challenger and a cycle that rejected one ranks
+with the standing champion. That is not a policy the selector enforces; it is the only model with an
+opportunity to score anything. A rejected challenger still leaves the run better off: the labels its
+champion chose stay bought, and the next challenger has more to learn from.
 
-Ranking runs in the control Lambda. The pass over 62,000 images happened in the scoring job, and what
+The sample is drawn from the remaining pool — the cohort minus everything bought to date — seeded by
+run and cycle, before the deployment that scores it. A cycle therefore ranks the footage the fleet
+drove rather than the whole catalogue, which is both the realistic version and the affordable one:
+10,000 frames is under an hour of ARM inference, and the top 1,000 of a 62,000-frame ranking is
+decided by its tail either way. See [05-fleet-and-deployment.md](05-fleet-and-deployment.md).
+
+Ranking runs in the control Lambda. The pass over the images happened on the device, and what
 remains is a mean per image and a sort.
 
 The budget is a property of the run, not a constant of the system: it is set at registration, and the
@@ -354,11 +361,13 @@ same keys.
 |---|---|
 | Budget per cycle | 1,000 labels, per the run registration |
 | Selected by uncertainty | 1,000, the whole batch |
+| Scored per cycle | 10,000, the sample the device drove through |
 | Cycles per run | 8, planned rather than enforced |
 | Total purchased | 8,000 at eight cycles |
 | Training set | 8,000 at cycle 0, 16,000 after cycle 8 |
 | Pool remaining | 62,000, falling to 54,000 |
-| Selectivity | 1,000 of 62,000, about 1.6 percent |
+| Selectivity | 1,000 of the 10,000 seen, about 10 percent |
+| Pool coverage | 10,000 of 62,000 per cycle, a fresh draw each time |
 
 ### The selector
 
@@ -371,9 +380,14 @@ batch boundary is routine, and the oracle identifies a purchase by a digest over
 IDs. Two attempts proposing different sets debit the ledger twice.
 
 The score is a mean over detections inside a confidence band of 0.05 to 0.95. The upper edge keeps a
-frame of easy objects from outranking a quiet ambiguous one. The lower edge is a floor rather than a
-filter: the scoring job emits every box down to 0.001, so a frame the model found nothing in still
-carries rows, and emptiness does not distinguish it from a frame the model was certain about.
+frame of easy objects from outranking a quiet ambiguous one. The lower edge is the line between "saw
+something" and "saw nothing", and it is what the device writes at: a box below it is not a weak
+opinion to discount but a box the model is not claiming at all, so the pool file starts where the
+band does.
+
+A frame with no in-band detection is therefore absent from that file, and is scored as a blind spot
+rather than dropped — the ranking is driven by the cycle's sample manifest, not by which images the
+detections file happens to mention.
 
 An image with nothing at or above 0.05 scores at the top of the range; an image the model was
 decisive about scores at the bottom. Both leave the mean undefined and they are opposite facts. No
@@ -387,13 +401,14 @@ rather than setting a value. See the planned additions in `00-overview.md`.
 
 ### The ranking file
 
-`selection_ranking_key` holds one row per pool image: `image_id`, `score`, `rank` and `selected`. One
-file rather than a ranking and a batch beside it, since the batch is the top of the ranking by
+`selection_ranking_key` holds one row per scored frame: `image_id`, `score`, `rank` and `selected`.
+One file rather than a ranking and a batch beside it, since the batch is the top of the ranking by
 definition. The oracle reads its image IDs from these rows, so a retry names the same set and replays
 rather than buying a second batch.
 
 It is written under the write-once cycle prefix. The ledger records which images were bought; this
-records what they were ranked against, which is not recoverable afterwards.
+records what they were ranked against, which is the sample the device drew and the only record of
+which 10,000 frames of the pool a cycle saw.
 
 The batch's `weather` and `timeofday` mix is not written. It is a join of this file onto the image
 manifest, which is zstd and unreadable by the control function's pyarrow, so the mix is a query over
@@ -401,8 +416,12 @@ two files already in the bucket. It lands with the composition chart that reads 
 and the batch's predicted classes are logged per cycle.
 
 A short run capped with `max_images` must be registered with a budget it can afford: selection
-refuses a budget larger than the pool it ranked, rather than buying fewer labels than the run
+refuses a budget larger than the sample it ranked, rather than buying fewer labels than the run
 declared. A run reaching the end of its pool is refused the same way.
+
+A partial pass never reaches selection at all, so there is no row count to check here. The device
+resumes the cycle only after its file is durable, which means an incomplete pass leaves the execution
+waiting until it times out rather than handing anything to be ranked.
 
 ### The label wall
 
@@ -438,10 +457,13 @@ oracle can address the split they are drawn from. Zero image-ID overlap between 
 The eval boxes exist a second time under `labels/cohort=eval/`, outside the `raw/labels/` deny.
 `EvalLabelsAreScoringOnly` denies reads on that prefix to every principal but the evaluation job,
 the single ARN on `eval_label_reader_arns`. The scoring job holds no exemption: it runs a model over
-images and writes the detections back, and its own policy denies every label prefix. `cohort=bootstrap/`
-carries no read deny, because training owns those 8,000 labels. Both prefixes are write-denied to
-every principal but the partitioner by `LabelsAreFrozenExceptThePartitioner`, so cycle eight's number
-is comparable to cycle one's.
+images and writes the detections back, and its own policy denies every label prefix. The device is the
+same kind of principal: it reads `train` images, writes predictions, and carries an explicit deny over
+every label prefix. Producing a detection on hardware outside the account's compute does not move the
+wall, because the wall is about labels and a device has no more access to one than a Processing job
+does. `cohort=bootstrap/` carries no read deny, because training owns those 8,000 labels. Both
+prefixes are write-denied to every principal but the partitioner by
+`LabelsAreFrozenExceptThePartitioner`, so cycle eight's number is comparable to cycle one's.
 
 ### Execution environment
 
@@ -450,7 +472,7 @@ an instance.
 
 | Step | Function | What it may read |
 |---|---|---|
-| `select` | `edge-ml-flywheel-control` | Pool detections and the scoring manifest; denied `raw/labels/` |
+| `select` | `edge-ml-flywheel-control` | The device's pool detections and the cycle's replay manifest; denied `raw/labels/` |
 | `purchase` | `edge-ml-flywheel-oracle` | `raw/labels/*/train/*`, the assignments and the ranking; denied `raw/labels/*/val/*` |
 
 The control function runs every Python step of a cycle except the purchase and is denied
@@ -459,8 +481,9 @@ both grants would let the step that writes a training manifest read the 62,000 w
 every gate still passing. They share a deployment package and differ in the handler and the role.
 
 The control function is 2,048 MB with 2 GB of ephemeral storage and a 900-second ceiling, sized for
-the pool detections `select` downloads and sorts. The oracle is 1,024 MB at 600 seconds: a thousand
-sequential `GetObject` calls, one transaction and one upload. Both take pyarrow from the managed
+the detections file `select` downloads and sorts, and for the `fleet_score` and `canary` steps that
+share it. The oracle is 1,024 MB at 600 seconds: a thousand sequential `GetObject` calls, one
+transaction and one upload. Both take pyarrow from the managed
 AWSSDKPandas layer, which is why every file either one reads or writes is snappy rather than zstd.
 
 Neither holds `ListBucket` over `raw/`. Every key the oracle opens is built from an image ID the gate

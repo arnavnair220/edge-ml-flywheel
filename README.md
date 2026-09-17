@@ -23,13 +23,14 @@ denominated in labels, so the pipeline reports accuracy gained per label spent a
 | Model | COCO-pretrained Ultralytics YOLO11n, frozen backbone, ONNX int8 |
 | IaC | Terraform, S3 backend with native S3 locking |
 | CI | GitHub Actions via OIDC, no long-lived keys |
-| Running cost | Approximately $20/month, with the device stopped between cycles |
+| Running cost | Approximately $20/month, with the device stopped between runs |
 
 ## Scope
 
-- The fleet is simulated and is one device: a Greengrass core on a Graviton instance replaying
-  unlabeled pool imagery on real ARM silicon. Latency and quantization numbers are measured, not
-  estimated, but the instance is not thermally constrained the way physical hardware would be.
+- The fleet is simulated and is one device: a Greengrass core on a Graviton instance scoring
+  unlabeled pool imagery on real ARM silicon. Every cycle's ranking comes from that pass, so labels
+  are bought against the deployed int8 model's uncertainty, measured on the hardware running it. The
+  instance is not thermally constrained the way physical hardware would be.
 - No new data is collected or annotated. BDD100K ships its own ground truth, and the pipeline is
   denied read access to it, so a frame can only be labeled by buying it from the oracle against a
   metered budget.
