@@ -175,6 +175,24 @@ class TestTheRequest:
         run and a re-baselined champion (design section 5)."""
         assert self.request()["ModelPackageGroupName"] == RUN
 
+    def test_it_carries_no_tags(self) -> None:
+        """SageMaker refuses tags on a package version and says to put them on
+        the group, which is the one place a per-version fact cannot go -- the
+        group is the run, opened once by whichever cycle reaches it first.
+
+        Nothing was lost by dropping them. They were `project`, `run_id`,
+        `cycle` and `recipe_version`, and the metadata below already carries
+        every per-model one, so the request held two spellings of the same facts
+        and the API rejected the redundant one -- after a cycle had trained,
+        scored twice and evaluated.
+        """
+        request = self.request()
+        assert "Tags" not in request
+
+        metadata = request["CustomerMetadataProperties"]
+        for field in ("run_id", "cycle", "recipe_version"):
+            assert field in metadata
+
     def test_approval_is_the_gates_verdict(self) -> None:
         assert self.request()["ModelApprovalStatus"] == package.APPROVED
         assert self.request(gates=(FAILED,))["ModelApprovalStatus"] == package.REJECTED
