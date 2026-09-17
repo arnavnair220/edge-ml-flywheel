@@ -1,21 +1,18 @@
 """The fleet steps, one subcommand each.
 
-`run.__main__`'s shape for the plane after promotion, and a CLI rather than a
-Step Functions state for a reason that will not survive the fleet growing: a
-canary is asked after the cycle's execution has already ended, because the
-deployment has to reach a device and the device has to finish replaying. Folding
-that into the cycle would mean a state machine that waits on hardware for the
-length of a replay, which is a wait design section 7.1's iteration-latency
-argument is against paying on every cycle.
+`run.__main__`'s shape for the plane after promotion. **The cycle performs all of
+this itself** -- `Deploy`, `FleetScore` and `Canary` are states, and the pool pass
+they drive is what selection ranks -- so these commands are the hand-operated
+copy of the same three calls, for the cases a state machine is the wrong tool
+for: re-running a pass after a device failure, restoring a version once the
+execution that deployed it has ended, and looking at what the fleet is doing.
 
-What that costs is that a rollback is a command someone runs. It is the command
-design section 6 asks for -- one revision naming the previous version -- and the
-plan's requirement is that it has actually been executed rather than that it is
-reachable from a state machine.
+Each one goes through the same functions the control steps do, so an operator and
+the state machine cannot form two different opinions about one rollout.
 
 Four subcommands, in the order a cycle uses them:
 
-    deploy    stage the frames and the code, publish the component, roll it out
+    deploy    stage the code, publish the component, roll it out
     canary    read what the device said and run the gate over it
     rollback  deploy the previous cycle's version again
     status    what the fleet is running, and what it last reported
@@ -32,6 +29,7 @@ from typing import Any
 
 from edge_ml_flywheel.conventions import (
     PROJECT,
+    Cycle,
     ModelVersion,
     RunId,
     Seed,
@@ -40,8 +38,6 @@ from edge_ml_flywheel.conventions import (
     parse_run_id,
 )
 from edge_ml_flywheel.fleet import component, deploy, telemetry
-from edge_ml_flywheel.gates import DEFAULT, canary_gate
-from edge_ml_flywheel.registry import launch as registry
 from edge_ml_flywheel.training import launch as base
 
 log = logging.getLogger("edge_ml_flywheel.fleet")
@@ -87,6 +83,16 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="40-character SHA of the tree the device runs. The code archive is keyed by it.",
     )
+    rolled.add_argument(
+        "--cycle",
+        type=int,
+        default=None,
+        help=(
+            "The cycle doing the deploying, when it is not the model's own. A cycle that "
+            "rejected its challenger redeploys the champion with its own sample, and needs a "
+            "component version of its own to do it. Defaults to the version's cycle."
+        ),
+    )
     rolled.add_argument("--frames", type=int, default=STANDARD.frames)
     rolled.add_argument("--warmup", type=int, default=STANDARD.warmup)
     rolled.add_argument("--image-size", type=int, default=STANDARD.image_size)
@@ -129,9 +135,11 @@ def _deploy(aws: Any, args: argparse.Namespace) -> str:
     """
     run_id: RunId = parse_run_id(args.run_id)
     version: ModelVersion = parse_model_version(args.version)
-    cycle = model_version_cycle(version)
+    cycle = Cycle(args.cycle) if args.cycle is not None else model_version_cycle(version)
 
-    release = component.Release(version=version, seed=Seed(args.seed), git_commit=args.git_commit)
+    release = component.Release(
+        version=version, seed=Seed(args.seed), git_commit=args.git_commit, cycle=cycle
+    )
     replay = component.Replay(
         frames=args.frames,
         warmup=args.warmup,
@@ -139,8 +147,7 @@ def _deploy(aws: Any, args: argparse.Namespace) -> str:
         confidence_floor=args.confidence_floor,
     )
 
-    frames = deploy.sample_frames(aws, run_id, cycle, replay.frames)
-    deploy.stage_frames(aws, run_id, cycle, frames)
+    deploy.sampled_frames(aws, run_id, cycle)
     deploy.stage_code(aws, release.git_commit, deploy.checkout_archive())
     deploy.publish_component(aws, deploy.recipe_for(aws, release, replay))
 
@@ -149,37 +156,25 @@ def _deploy(aws: Any, args: argparse.Namespace) -> str:
 
 
 def _canary(aws: Any, args: argparse.Namespace) -> bool:
-    """Read the replay, run the gate, print the verdict. Return whether it passed.
+    """Read the pass, run the gate, print the verdict. Return whether it passed.
 
-    The expected digest comes out of the model manifest rather than being passed
-    on the command line, which is what makes the check mean anything: a digest an
-    operator typed is a digest that matches whatever they read it from, and the
-    manifest is the copy written where the bytes were produced.
+    `deploy.judge` rather than the gate directly, because the cycle's `Canary`
+    step calls the same function: a verdict an operator reads by hand and a
+    verdict the state machine acts on must be one judgement over one reduction,
+    not two that can disagree about a rollout.
+
+    `ranks` is printed beside `passed` because they can differ, and the
+    difference is the whole point of the pair -- a slow model is rolled back and
+    its detections are still bought from.
     """
     run_id: RunId = parse_run_id(args.run_id)
     version: ModelVersion = parse_model_version(args.version)
+    champion = parse_model_version(args.champion) if args.champion else None
 
-    manifest = registry.read_manifest(aws, base.buckets(aws).artifacts, version)
-    documents = deploy.records(aws, run_id)
-
-    try:
-        report = telemetry.report(documents, version)
-    except telemetry.NoReplayError as missing:
-        raise SystemExit(str(missing)) from None
-
-    champion = None
-    if args.champion:
-        champion = telemetry.report(documents, parse_model_version(args.champion))
-
-    verdict = canary_gate(
-        report=report,
-        expected_sha256=manifest.artifact_sha256[manifest.deployed_seed],
-        champion=champion,
-        thresholds=DEFAULT,
-    )
+    verdict = deploy.judge(aws, run_id, version, champion)
     print(
         json.dumps(
-            {"gate": verdict.gate, "passed": verdict.passed, "reason": verdict.reason}, indent=2
+            {"passed": verdict.passed, "ranks": verdict.ranks, "reason": verdict.reason}, indent=2
         )
     )
     return verdict.passed

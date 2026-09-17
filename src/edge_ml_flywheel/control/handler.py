@@ -1,16 +1,25 @@
 """One Lambda, one entry point, dispatching on a step name.
 
-Seven steps today, because seven of a cycle's states need Python that already
-exists: `prepare` writes the cycle's image manifest and source archive,
-`train_request` builds one seed's `CreateTrainingJob` request, `score_prepare`
-writes the two manifests naming what this cycle scores, `score_request` builds
-one seed's `CreateProcessingJob` request, `evaluate_request` builds the one that
+Ten steps, because ten of a cycle's states need Python that already exists:
+`prepare` writes the cycle's image manifest and source archive, `train_request`
+builds one seed's `CreateTrainingJob` request, `score_prepare` writes the eval
+manifest and draws the sample the fleet will score, `score_request` builds one
+seed's `CreateProcessingJob` request, `evaluate_request` builds the one that
 matches those detections against ground truth, `register` writes the model
-manifest and builds the `CreateModelPackage` that records the verdict, and
-`select` ranks the pool those detections cover and writes what the cycle chose to
-buy. The state machine hands the three request steps to
-`sagemaker:createTrainingJob.sync` and `sagemaker:createProcessingJob.sync`, and
-the registration to the `aws-sdk` integration for `sagemaker:createModelPackage`.
+manifest and builds the `CreateModelPackage` that records the verdict, `deploy`
+publishes the cycle's component version, `fleet_score` deploys it with the
+cycle's task token and leaves the task open, `canary` judges what came back, and
+`select` ranks it and writes what the cycle chose to buy. The state machine hands
+the three request steps to `sagemaker:createTrainingJob.sync` and
+`sagemaker:createProcessingJob.sync`, and the registration to the `aws-sdk`
+integration for `sagemaker:createModelPackage`.
+
+**Three steps act on hardware, and they are the cycle's round trip to the
+fleet.** `deploy` and `fleet_score` put a model and a frame list on a device;
+`canary` reads back what it did with them. They are here rather than in a fleet
+Lambda of their own because a second function would be a second package, log
+group and role for three calls that share this one's session and bucket names --
+`select`, which reads what the device wrote, is already here.
 
 **The purchase is deliberately not here.** It is the eighth step of a cycle and
 it runs in its own function under its own role, because this one is denied
@@ -32,11 +41,10 @@ same-seed differences, so every seed belongs to one job.
 
 **One function rather than one Lambda per step.** The steps share their whole
 context -- a session, the bucket names, the run registration -- and none of them
-is hot, large, or differently privileged. Six functions would be six
-deployment packages, six log groups and six roles for the sake of a dispatch
-that is a dictionary lookup. The step name is in the ASL, so a typo is a failed
-execution naming the step it could not find rather than a call that silently
-does nothing.
+is hot, large, or differently privileged. Ten functions would be ten deployment
+packages, ten log groups and ten roles for the sake of a dispatch that is a
+dictionary lookup. The step name is in the ASL, so a typo is a failed execution
+naming the step it could not find rather than a call that silently does nothing.
 
 **The training request is built here and created there.** A Lambda that started
 the job would have to either wait ninety minutes for it or hand the polling back
@@ -64,6 +72,7 @@ from typing import Any, Final
 import boto3
 
 from edge_ml_flywheel.conventions import (
+    PROJECT,
     Cycle,
     Precision,
     Seed,
@@ -73,6 +82,8 @@ from edge_ml_flywheel.conventions import (
 )
 from edge_ml_flywheel.evaluation import job as evaluation_job
 from edge_ml_flywheel.evaluation import launch as evaluation_launch
+from edge_ml_flywheel.fleet import component
+from edge_ml_flywheel.fleet import deploy as fleet_deploy
 from edge_ml_flywheel.registry import launch as registry_launch
 from edge_ml_flywheel.scoring import job as scoring_job
 from edge_ml_flywheel.scoring import launch as scoring_launch
@@ -95,6 +106,16 @@ LAYER_ROOT: Final = Path("/opt")
 PACKAGE_DIR: Final = "edge_ml_flywheel"
 
 STEP: Final = "step"
+
+# The thing group a deployment targets, spelled as `fleet.__main__` spells it.
+# One group holding one device, so a second device joins the fleet without a
+# deployment step changing.
+THING_GROUP: Final = f"{PROJECT}-devices"
+
+
+def _target(aws: boto3.Session) -> str:
+    """The deployment target, composed rather than looked up."""
+    return component.thing_group_arn(str(aws.region_name), launch.account_id(aws), THING_GROUP)
 
 
 class ControlError(Exception):
@@ -291,8 +312,134 @@ def evaluate_request(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, 
     return {"version": version, "seeds": list(seeds), "request": built}
 
 
+def _deployable(event: Mapping[str, Any], cycle: Cycle) -> str:
+    """The version to put on the device, refusing the one case where there is none.
+
+    A run's first cycle that fails to promote has no champion to fall back on and
+    nothing deployed to score its sample with. The gates make that nearly
+    impossible -- with no champion the quality gate is the collapse check alone --
+    but "nearly" is not a thing to leave to a `None` reaching a parser several
+    frames down, so it is refused here with the reason.
+
+    There is deliberately no cloud fallback. Scoring the pool in the account
+    would produce a ranking from a model the fleet never ran, which is the exact
+    thing this arrangement exists to stop producing.
+    """
+    version = event.get("version")
+    if not version:
+        raise ControlError(
+            f"cycle {cycle} has no model to deploy: its challenger did not pass the gates and the "
+            f"run has no champion yet. A run's first cycle must promote, because the pool is "
+            f"scored on the device and nothing is deployed until one does."
+        )
+    return str(version)
+
+
+def deploy(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
+    """Publish this cycle's component version, over whichever model is champion.
+
+    Runs after `Promote`, so `version` is what the fleet should now be running:
+    the challenger on a cycle that promoted, the standing champion on one that
+    did not. Either way the component version is numbered by *this* cycle,
+    because the recipe names this cycle's sample and a component version is
+    immutable once published.
+
+    Publishing is separate from deploying because only the second can carry a
+    task token. This step makes the thing that will be deployed and checks the
+    device can run it; `fleet_score` is where the deployment is created and the
+    cycle begins waiting.
+    """
+    run_id = parse_run_id(str(event["run_id"]))
+    cycle = Cycle(int(event["cycle"]))
+    seed = Seed(int(event["seed"]))
+    version = parse_model_version(_deployable(event, cycle))
+    run = launch.registration(aws, run_id)
+
+    fleet_deploy.require_device(aws)
+    fleet_deploy.sampled_frames(aws, run_id, cycle)
+    fleet_deploy.stage_code(aws, run.git_commit, fleet_deploy.code_archive(TASK_ROOT / PACKAGE_DIR))
+
+    release = component.Release(version=version, seed=seed, git_commit=run.git_commit, cycle=cycle)
+    recipe = fleet_deploy.recipe_for(aws, release, component.STANDARD)
+    fleet_deploy.publish_component(aws, recipe)
+
+    log.info("published %s for cycle %d over %s", recipe["ComponentVersion"], cycle, version)
+    return {
+        "run_id": run_id,
+        "cycle": cycle,
+        "version": version,
+        "seed": seed,
+        "component_version": recipe["ComponentVersion"],
+    }
+
+
+def fleet_score(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
+    """Deploy the cycle's component with its task token, and leave the task open.
+
+    **This returns while the work is still running, which is the point.** The
+    token reaches the device as a configuration value of the deployment, the
+    device scores the sample and calls `SendTaskSuccess` when its detections are
+    durable, and the state machine waits in between. A Lambda that waited for the
+    pass itself would time out at fifteen minutes against an hour of ARM
+    inference.
+
+    The token is read from the event because `.waitForTaskToken` puts it there.
+    Its absence is a state machine wired without the integration pattern, which
+    is worth refusing loudly: the deployment would go out, the device would score
+    the sample, and nothing would ever resume the cycle.
+    """
+    run_id = parse_run_id(str(event["run_id"]))
+    cycle = Cycle(int(event["cycle"]))
+    version = parse_model_version(_deployable(event, cycle))
+
+    token = str(event.get("task_token", ""))
+    if not token:
+        raise ControlError(
+            "fleet_score was invoked without a task token, so nothing could resume this cycle "
+            "once the device finished. The state resource must end in .waitForTaskToken."
+        )
+
+    deployment = fleet_deploy.redeploy(aws, version, _target(aws), task_token=token)
+    log.info("deployment %s hands cycle %d to the fleet", deployment, cycle)
+    return {"run_id": run_id, "cycle": cycle, "version": version, "deployment": deployment}
+
+
+def canary(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
+    """Judge the pass the device just finished, and roll back a failed rollout.
+
+    Two decisions out of one verdict, and they are not the same decision.
+    `passed` says whether the rollout stands. `ranks` says whether the cycle may
+    buy from what the device wrote -- false only when the digest or the frame
+    count failed, because those are statements about the detections rather than
+    about the speed they were produced at. See `gates.canary`.
+
+    The rollback is performed here rather than left to a later state, so that a
+    device is never left running an artifact this step has already judged. There
+    is nothing to roll back to on a run's first cycle, and nothing that needs it:
+    a first cycle with no champion has no previous version.
+    """
+    run_id = parse_run_id(str(event["run_id"]))
+    version = parse_model_version(str(event["version"]))
+    champion = event.get("champion")
+    previous = parse_model_version(str(champion)) if champion else None
+
+    verdict = fleet_deploy.judge(aws, run_id, version, previous)
+    if not verdict.passed and previous is not None and previous != version:
+        fleet_deploy.redeploy(aws, previous, _target(aws))
+        log.info("rolled %s back to %s", version, previous)
+
+    log.info("canary %s: %s", "passed" if verdict.passed else "failed", verdict.reason)
+    return {
+        "version": version,
+        "passed": verdict.passed,
+        "ranks": verdict.ranks,
+        "reason": verdict.reason,
+    }
+
+
 def select(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
-    """Rank this cycle's pool and write the file the purchase is charged against.
+    """Rank what the fleet reported and write the file the purchase is charged
+    against.
 
     Takes the version and one seed, unlike `evaluate_request` and `register`. A
     cycle ranks once, on one model: the uncertainty score is a statement about
@@ -303,13 +450,19 @@ def select(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
     deployed -- so the model that ranks the pool is the model that ships, and a
     run training more seeds does not buy its labels by a checkpoint it discards.
 
+    `cycle` is passed beside the version because the two can name different
+    cycles: a cycle that rejected its challenger ranks with the champion, whose
+    version was minted earlier. The ranking belongs to the cycle doing the
+    buying.
+
     `replace` is read with a default for `prepare`'s reason, and it is the more
     consequential of the two uses: this file is what the oracle charges against.
     """
     version = parse_model_version(str(event["version"]))
     seed = Seed(int(event["seed"]))
+    cycle = Cycle(int(event["cycle"]))
 
-    ranked = selection_launch.rank(aws, version, seed, bool(event.get("replace", False)))
+    ranked = selection_launch.rank(aws, version, seed, cycle, bool(event.get("replace", False)))
     log.info("%s ranked %d images and chose %d", version, ranked.pool, ranked.batch)
     return {
         "version": ranked.version,
@@ -366,6 +519,9 @@ STEPS: Final[Mapping[str, Callable[[boto3.Session, Mapping[str, Any]], dict[str,
     "score_request": score_request,
     "evaluate_request": evaluate_request,
     "register": register,
+    "deploy": deploy,
+    "fleet_score": fleet_score,
+    "canary": canary,
     "select": select,
 }
 

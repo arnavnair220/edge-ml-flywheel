@@ -37,16 +37,25 @@ first champion, which is a run that cannot start.
 """
 
 from collections.abc import Mapping
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from edge_ml_flywheel.conventions import ClassSet, GateResult
-from edge_ml_flywheel.evaluation.bootstrap import PairedDelta
+
+if TYPE_CHECKING:  # pragma: no cover - a type, and the reason it is only a type
+    # `PairedDelta` is read for its fields and never constructed here, so this
+    # gate needs the name and not the module. The difference matters: importing
+    # it for real reaches `evaluation.match` and so `pycocotools`, a container-
+    # only wheel the control Lambda cannot carry -- and the control Lambda
+    # applies the canary gate, which imports this package's `__init__` and
+    # therefore this file. A gate is a pure verdict over numbers somebody else
+    # computed, and that is exactly what makes this import avoidable.
+    from edge_ml_flywheel.evaluation.bootstrap import PairedDelta
 from edge_ml_flywheel.gates.thresholds import DEFAULT, Gate, Thresholds
 
 _REPORTED: Final = 5
 
 
-def _uplift(delta: PairedDelta, thresholds: Thresholds) -> str | None:
+def _uplift(delta: "PairedDelta", thresholds: Thresholds) -> str | None:
     """The challenger is better by enough to be worth shipping."""
     if delta.observed >= thresholds.min_mean_delta:
         return None
@@ -56,7 +65,7 @@ def _uplift(delta: PairedDelta, thresholds: Thresholds) -> str | None:
     )
 
 
-def _band(delta: PairedDelta) -> str | None:
+def _band(delta: "PairedDelta") -> str | None:
     """The improvement is bigger than resampling the eval set could explain.
 
     Reads `lower` alone, which makes the effective test one-sided at 97.5% --
@@ -106,7 +115,7 @@ def _collapse(per_class: Mapping[str, float], classes: ClassSet) -> str | None:
 
 
 def quality_gate(
-    delta: PairedDelta | None,
+    delta: "PairedDelta | None",
     per_class: Mapping[str, float],
     classes: ClassSet,
     thresholds: Thresholds = DEFAULT,

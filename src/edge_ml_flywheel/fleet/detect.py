@@ -12,18 +12,25 @@ In the cloud that is Ultralytics; on the device this is, and the two have to
 agree closely enough that a confidence reported from a device is comparable to
 the same frame's confidence from the offline pass.
 
-**Only the scores are kept downstream.** The boxes are computed anyway and
-discarded by the caller, because suppression *is* box arithmetic -- there is no
-cheaper way to find out that two predictions are one object. What that means for
-this module is that a coordinate error here surfaces as a detection count rather
-than as a wrong box, which is the harder failure to see and the reason the
-geometry is tested rather than eyeballed.
+**The boxes are kept.** This is the pass the cycle's ranking is computed from, so
+what leaves here is `DetectionRow`s in source-image pixels -- the same seven
+facts the cloud pass writes, in the same units, into the same parquet schema. A
+coordinate error therefore surfaces as a wrong box in a file someone can open,
+which is the failure this module's geometry tests are for.
+
+**Rescaling is this module's job and nothing else's.** The tensor comes back in
+the letterboxed square the network was fed, and `DetectionRow` is specified in
+`NATIVE_IMAGE_SIZE` pixels. `rescale` is the one place that conversion happens on
+the device, mirroring the single rescale the cloud path performs.
 """
 
+from dataclasses import dataclass
 from typing import Final
 
 import numpy as np
 from numpy.typing import NDArray
+
+from edge_ml_flywheel.conventions import CLASS_SET, DetectionRow, ImageId
 
 # Boxes overlapping more than this are the same object. Ultralytics' own default,
 # matched deliberately: the cloud pass and the device pass should differ by the
@@ -44,6 +51,57 @@ _BOX_FIELDS: Final = 4
 # section 4.3 measures and what an edge device does -- so the batch axis is
 # present and is always one.
 _OUTPUT_RANK: Final = 3
+
+
+@dataclass(frozen=True, slots=True)
+class Letterbox:
+    """How one source image was fitted into the network's square, as numbers.
+
+    The padding geometry written down once, because two operations need it and
+    they must not disagree: `replay.letterbox` builds the canvas from it, and
+    `rescale` undoes it. Derived rather than passed, so a device cannot rescale
+    by a factor other than the one it padded with.
+
+    `width` and `height` are the pasted image's size in network pixels, and they
+    are rounded -- so the honest inverse divides by `width / source_width` rather
+    than by the unrounded `scale` that produced them. At 416 px the two differ by
+    a fraction of a pixel, which is smaller than anything the metric can see, but
+    the rounded form is the one that actually happened.
+    """
+
+    source_width: int
+    source_height: int
+    size: int
+
+    def __post_init__(self) -> None:
+        if self.source_width < 1 or self.source_height < 1:
+            raise ValueError(
+                f"an image of {self.source_width}x{self.source_height} px is not an image"
+            )
+        if self.size < 1:
+            raise ValueError(f"an input of {self.size} px is not a square to fit into")
+
+    @property
+    def scale(self) -> float:
+        """The fit, before rounding. What the resize is computed from."""
+        return min(self.size / self.source_width, self.size / self.source_height)
+
+    @property
+    def width(self) -> int:
+        return max(1, round(self.source_width * self.scale))
+
+    @property
+    def height(self) -> int:
+        return max(1, round(self.source_height * self.scale))
+
+    @property
+    def pad_x(self) -> int:
+        """Where the pasted image starts, which is where a box's origin is."""
+        return (self.size - self.width) // 2
+
+    @property
+    def pad_y(self) -> int:
+        return (self.size - self.height) // 2
 
 
 def decode(
@@ -181,22 +239,100 @@ def _intersections(box: NDArray[np.float32], others: NDArray[np.float32]) -> NDA
     return np.asarray(width * height, dtype=np.float32)
 
 
-def scores_of(
-    output: NDArray[np.float32],
-    confidence_floor: float,
-    iou_threshold: float = IOU_THRESHOLD,
-    max_detections: int = MAX_DETECTIONS,
-) -> tuple[float, ...]:
-    """One frame's surviving confidences, which is all the telemetry carries.
+def rescale(boxes: NDArray[np.float32], fit: Letterbox) -> NDArray[np.float32]:
+    """Boxes from the padded square back into source-image pixels.
 
-    The whole decode-and-suppress path behind one call, because the device wants
-    exactly this and nothing else, and because a caller assembling the two steps
-    itself is a caller that can pass the boxes of one frame with the scores of
-    another.
+    The inverse of the paste `replay.letterbox` performs: subtract where the
+    image was placed, then divide by how much it was shrunk. Both axes are
+    divided by their own factor rather than by one shared `scale`, because the
+    pasted size is rounded independently on each.
 
-    Descending, so a record is readable without being sorted and two frames'
-    records compare without either being rearranged first.
+    Clipped to the source frame. A prediction can extend into the grey padding --
+    the model has no idea the padding is not road -- and a corner outside the
+    image is a coordinate no ground truth can ever sit at. Clipping is what makes
+    the geometry comparable to the cloud pass, which clips for the same reason.
     """
+    if boxes.size == 0:
+        return boxes.reshape(0, 4)
+
+    scale_x = fit.width / fit.source_width
+    scale_y = fit.height / fit.source_height
+
+    moved = boxes.astype(np.float32).copy()
+    moved[:, [0, 2]] = (moved[:, [0, 2]] - fit.pad_x) / scale_x
+    moved[:, [1, 3]] = (moved[:, [1, 3]] - fit.pad_y) / scale_y
+
+    moved[:, [0, 2]] = moved[:, [0, 2]].clip(0.0, fit.source_width)
+    moved[:, [1, 3]] = moved[:, [1, 3]].clip(0.0, fit.source_height)
+    return moved
+
+
+def detections_of(
+    output: NDArray[np.float32],
+    image_id: ImageId,
+    fit: Letterbox,
+    confidence_floor: float,
+) -> tuple[DetectionRow, ...]:
+    """One frame's predictions, as the rows a detections file holds.
+
+    The whole device-side path behind one call -- decode, suppress, rescale,
+    name -- because the caller wants exactly this and because a caller assembling
+    the steps itself is a caller that can pass the boxes of one frame with the
+    scores of another.
+
+    The suppression settings are this module's constants rather than arguments.
+    They exist to agree with the cloud pass, so a caller free to vary them is a
+    caller who can produce a ranking from a different suppression than the one
+    every other cycle used; a test exercising the thresholds calls `suppress`.
+
+    Descending by confidence, so a file is readable without being sorted and two
+    frames' rows compare without either being rearranged first.
+
+    **A frame with no surviving prediction returns no rows, and that is not the
+    same as the frame being absent.** `selection.score` reads emptiness as a
+    blind spot, which is the top of its ranking rather than the bottom, so the
+    frame's presence is carried by the sample manifest and the telemetry row
+    rather than by a placeholder box here.
+
+    Boxes that clip away to nothing are dropped. A prediction lying entirely in
+    the padding has no source-image area, and `DetectionRow` refuses corners that
+    enclose none -- correctly, since a box of zero area is not something a metric
+    can match against.
+    """
+    # The head's width against the class set, checked before a name is looked up
+    # by position. A graph exported for a different vocabulary would otherwise
+    # write plausible rows under the wrong categories, which is a ranking nobody
+    # can tell is wrong from the file.
+    predicted = output.shape[1] - _BOX_FIELDS
+    if predicted != len(CLASS_SET.names):
+        raise ValueError(
+            f"a head predicting {predicted} classes is not this project's {len(CLASS_SET.names)}: "
+            f"{list(CLASS_SET.names)}"
+        )
+
     boxes, scores, classes = decode(output, confidence_floor)
-    kept = suppress(boxes, scores, classes, iou_threshold, max_detections)
-    return tuple(sorted((float(score) for score in scores[kept]), reverse=True))
+    kept = suppress(boxes, scores, classes)
+    if kept.size == 0:
+        return ()
+
+    order = kept[scores[kept].argsort()[::-1]]
+    corners = rescale(boxes[order], fit)
+
+    rows: list[DetectionRow] = []
+    for (x1, y1, x2, y2), score, category in zip(
+        corners, scores[order], classes[order], strict=True
+    ):
+        if x2 <= x1 or y2 <= y1:
+            continue
+        rows.append(
+            DetectionRow(
+                image_id=image_id,
+                category=CLASS_SET.names[int(category)],
+                x1=float(x1),
+                y1=float(y1),
+                x2=float(x2),
+                y2=float(y2),
+                score=float(score),
+            )
+        )
+    return tuple(rows)

@@ -18,7 +18,6 @@ import pytest
 
 from edge_ml_flywheel.conventions import (
     MAX_DETS,
-    SCORED_COHORTS,
     Buckets,
     Cohort,
     Cycle,
@@ -114,16 +113,23 @@ class TestTheLabelWall:
 
 
 class TestChannels:
-    def test_each_cohort_arrives_as_its_own_manifest(self) -> None:
-        """Two documents rather than one, because a manifest names keys below one
-        prefix and `eval` draws from `val` while `pool` draws from `train`."""
-        for cohort in SCORED_COHORTS:
+    def test_the_cohort_arrives_as_a_manifest(self) -> None:
+        """`eval` and nothing beside it. The pool is scored on the device by the
+        artifact deployed to it, so this job has one cohort and the manifest that
+        names it."""
+        for cohort in job.COHORTS:
             source = channel(a_request(cycle=2), cohort.value)
             assert source is not None, cohort
             s3 = source["S3Input"]
 
             assert s3["S3DataType"] == "ManifestFile"
             assert s3["S3Uri"].endswith(scoring_manifest_key(RUN, Cycle(2), cohort))
+
+    def test_the_pool_is_not_a_channel_of_this_job(self) -> None:
+        """The ranking comes back from the fleet. A pool channel here would be a
+        second, contradictory answer to which model ranked the pool."""
+        assert channel(a_request(cycle=2), Cohort.POOL.value) is None
+        assert output(a_request(cycle=2, seed=1), Cohort.POOL.value) is None
 
     def test_the_model_channel_names_the_checkpoint_and_not_the_seed_prefix(self) -> None:
         """The seed prefix also holds `_sagemaker/`, whose tarball is a second
@@ -148,9 +154,9 @@ class TestChannels:
         for entry in a_request()["ProcessingInputs"]:
             assert entry["S3Input"]["S3InputMode"] == "File"
 
-    def test_each_cohort_writes_to_its_own_prefix(self) -> None:
+    def test_the_cohort_writes_to_its_own_prefix(self) -> None:
         version = new_model_version(RUN, Cycle(1))
-        for cohort in SCORED_COHORTS:
+        for cohort in job.COHORTS:
             entry = output(a_request(cycle=1, seed=1), cohort.value)
             assert entry is not None, cohort
             assert entry["S3Output"]["S3Uri"].endswith(detections_prefix(version, Seed(1), cohort))
@@ -345,3 +351,50 @@ class TestTheImagesToScore:
 
     def test_an_ordinary_ledger_passes(self) -> None:
         sets.check_purchases(self._cohorts(), [an_image_id(0), an_image_id(1)])
+
+
+class TestTheSampleTheFleetScores:
+    """`scoring.cohorts.to_sample`: which of the pool one cycle puts on a device.
+
+    The draw that replaced the cloud's pass over the whole remaining pool. It is
+    the cycle's entire ranking universe rather than a sample of a larger pass, so
+    what these pin down is that it is reproducible, sorted, and refuses rather
+    than short-changes a run whose pool has run out.
+    """
+
+    REMAINING = tuple(an_image_id(index) for index in range(20))
+
+    def test_the_same_run_and_cycle_draw_the_same_frames(self) -> None:
+        """A redeploy after a rollback scores an identical draw, which is what
+        makes the second attempt comparable to the first."""
+        first = sets.to_sample(self.REMAINING, RUN, Cycle(3), 5)
+        again = sets.to_sample(self.REMAINING, RUN, Cycle(3), 5)
+
+        assert first == again
+
+    def test_a_later_cycle_draws_different_frames(self) -> None:
+        """The pool shrinks and the draw moves, so a run sees more of the
+        catalogue than one cycle's worth over its eight cycles."""
+        third = sets.to_sample(self.REMAINING, RUN, Cycle(3), 5)
+        fourth = sets.to_sample(self.REMAINING, RUN, Cycle(4), 5)
+
+        assert third != fourth
+
+    def test_the_draw_is_a_subset_of_what_is_left_and_is_sorted(self) -> None:
+        """Sorted for `to_score`'s reason: the manifest, the detections and a
+        re-run all follow one ordering."""
+        drawn = sets.to_sample(self.REMAINING, RUN, Cycle(1), 5)
+
+        assert len(drawn) == len(set(drawn)) == 5
+        assert set(drawn) <= set(self.REMAINING)
+        assert list(drawn) == sorted(drawn)
+
+    def test_a_pool_too_small_for_the_sample_is_refused(self) -> None:
+        """The end of the run rather than a short pass. Scoring what is left
+        would quietly change the selectivity every later cycle is read against."""
+        with pytest.raises(ValueError, match="fewer than the"):
+            sets.to_sample(self.REMAINING[:3], RUN, Cycle(1), 5)
+
+    def test_a_sample_of_nothing_is_not_a_sample(self) -> None:
+        with pytest.raises(ValueError, match="is not a sample"):
+            sets.to_sample(self.REMAINING, RUN, Cycle(1), 0)

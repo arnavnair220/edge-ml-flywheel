@@ -18,6 +18,7 @@ import pytest
 
 from edge_ml_flywheel.conventions import ModelVersion, ReplayReport
 from edge_ml_flywheel.gates import Gate, Thresholds, canary_gate
+from edge_ml_flywheel.gates.canary import detections_stand
 
 VERSION = ModelVersion("20260812t143355z-v0-skeleton-c003")
 CHAMPION_VERSION = ModelVersion("20260812t143355z-v0-skeleton-c002")
@@ -162,3 +163,39 @@ class TestTheThreshold:
 
     def test_the_default_is_the_design_s_ten_percent(self) -> None:
         assert Thresholds().max_throughput_drop == 0.10
+
+
+class TestWhetherTheDetectionsMayBeBoughtFrom:
+    """`detections_stand`: the second question one device pass has to answer.
+
+    The canary gate decides what the fleet keeps running. This decides what the
+    cycle may spend its label budget on, and the two are not the same judgement
+    over the same evidence -- which is the whole reason it is a second function.
+    """
+
+    def test_a_clean_pass_may_be_ranked(self) -> None:
+        assert detections_stand(a_report(), DIGEST) is True
+
+    def test_a_slow_model_still_wrote_a_good_ranking(self) -> None:
+        """Throughput is a property of the rollout, not of the detections. A
+        model that ran correctly and slowly produced exactly the boxes a fast one
+        would have, so the rollout rolls back and the purchase stands."""
+        crawling = a_report(latencies_ms=(1000.0, 1000.0, 1000.0, 1000.0))
+
+        assert canary_gate(crawling, DIGEST, a_champion(40.0)).passed is False
+        assert detections_stand(crawling, DIGEST) is True
+
+    def test_the_wrong_bytes_produced_a_ranking_nobody_may_buy_from(self) -> None:
+        """A digest mismatch means the file was written by a model no gate ever
+        saw. Ranking it would spend a thousand labels on a fiction."""
+        assert detections_stand(a_report(), OTHER_DIGEST) is False
+
+    def test_a_short_pass_may_not_be_ranked(self) -> None:
+        """The summary claims more frames than arrived, so what the device did
+        with the rest is unknown."""
+        assert detections_stand(a_report(replayed=9), DIGEST) is False
+
+    def test_a_component_that_restarted_may_not_be_ranked(self) -> None:
+        """Two starts mean two passes landing in one prefix, so every number
+        below is an average over runs of the component."""
+        assert detections_stand(a_report(starts=2), DIGEST) is False

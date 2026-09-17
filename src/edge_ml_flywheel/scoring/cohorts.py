@@ -1,4 +1,4 @@
-"""Which images a cycle scores, per cohort.
+"""Which images a cycle scores, per cohort, and which of the pool the fleet sees.
 
 Two sets, and only one of them moves. `eval` is the frozen 5,000 and is the same
 list in cycle eight as in cycle one, which is the property the whole comparison
@@ -7,6 +7,12 @@ it shrinks by a budget every cycle -- and the difference is why the manifests ar
 written under the write-once cycle prefix rather than derived on demand: "which
 61,000 images was cycle two's ranking over" is not recoverable afterwards without
 replaying every purchase in order.
+
+**The pool is sampled, not scored whole.** `to_score` gives what is left of it
+and `to_sample` draws `POOL_SAMPLE` frames out of that, because the pass over
+them happens on one ARM device rather than on a GPU. The sample is the cycle's
+whole ranking universe: an image outside the draw is not ranked low, it simply
+waits for a later cycle's draw.
 
 **Pure, and the assignments come from the partition.** `oracle.cohorts.Cohorts`
 is the same index the purchase gate reads, loaded from `assignments/` rather than
@@ -21,11 +27,20 @@ which is a statement about what trained, not about what is scored -- and it is
 `ModelManifest.cohorts_trained_on` that refuses it.
 """
 
+import hashlib
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
+from random import Random
 from typing import Final
 
-from edge_ml_flywheel.conventions import SCORED_COHORTS, Cohort, ImageId
+from edge_ml_flywheel.conventions import (
+    CYCLE_DIGITS,
+    SCORED_COHORTS,
+    Cohort,
+    Cycle,
+    ImageId,
+    RunId,
+)
 from edge_ml_flywheel.oracle.cohorts import Cohorts
 
 log = logging.getLogger(__name__)
@@ -73,6 +88,56 @@ def to_score(cohorts: Cohorts, cohort: Cohort, purchased: Iterable[ImageId]) -> 
         len(drawn) - len(remaining),
     )
     return remaining
+
+
+def to_sample(
+    remaining: Sequence[ImageId], run_id: RunId, cycle: Cycle, frames: int
+) -> tuple[ImageId, ...]:
+    """The pool frames this cycle puts in front of the fleet.
+
+    **Random, not the top of anything.** There is no ranking to take the top of:
+    this draw is what produces one, because the device's pass over it is the only
+    pass anything makes over the pool. A biased draw would be a selector whose
+    input was chosen by a different rule than the one it applies.
+
+    **Out of what the run has not bought**, which is what `remaining` already is.
+    A bought image has labels and is in the training set, so scoring it would
+    rank a frame no cycle can sell.
+
+    **Seeded by the run and the cycle**, so a redeploy of one cycle scores the
+    identical frames. Anything else would make two attempts at one deployment
+    incomparable, and the second attempt is usually the one made after a
+    rollback.
+
+    Sorted on the way out, like `to_score`, so the manifest, the detections and a
+    re-run all follow one ordering.
+    """
+    if frames < 1:
+        raise ValueError(f"a sample of {frames} frames is not a sample")
+    if len(remaining) < frames:
+        raise ValueError(
+            f"cycle {cycle} has {len(remaining):,} unbought pool images, fewer than the "
+            f"{frames:,} the fleet is asked to score. The pool is spent, which ends the run "
+            f"rather than the cycle"
+        )
+
+    drawn = tuple(sorted(Random(_draw_seed(run_id, cycle)).sample(list(remaining), frames)))
+    log.info("sampled %d of %d unbought pool images for cycle %d", frames, len(remaining), cycle)
+    return drawn
+
+
+def _draw_seed(run_id: RunId, cycle: Cycle) -> int:
+    """A draw seed that is a function of the run and the cycle and nothing else.
+
+    A digest rather than `hash()`, which is salted per process: the "same frames
+    every time" property would otherwise hold within one invocation and nowhere
+    else, which is exactly the case a redeploy after a rollback is not.
+
+    The cycle is padded into the string for `purchase_event`'s reason -- it is
+    text here, so cycle 10 and cycle 1 followed by a zero must not be one seed.
+    """
+    stamp = f"{run_id}-c{cycle:0{CYCLE_DIGITS}d}"
+    return int(hashlib.sha256(stamp.encode()).hexdigest()[:16], 16)
 
 
 def check_purchases(cohorts: Cohorts, purchased: Iterable[ImageId]) -> None:
