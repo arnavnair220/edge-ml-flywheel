@@ -31,18 +31,24 @@ device, its identity, the rule that lands telemetry -- and owns no component at
 all.
 """
 
+import json
 from dataclasses import dataclass
 from typing import Any, Final
 
 from edge_ml_flywheel.conventions import (
     COMPONENT_PUBLISHER,
+    POOL_SAMPLE,
     REPLAY_CODE_FILE,
     REPLAY_MANIFEST_FILE,
     Buckets,
+    Cohort,
+    Cycle,
     ModelArtifact,
     ModelVersion,
+    Precision,
     Seed,
     component_address,
+    detections_key,
     model_artifact_key,
     model_version_cycle,
     model_version_run_id,
@@ -52,6 +58,7 @@ from edge_ml_flywheel.conventions import (
     telemetry_topic_prefix,
     uri,
 )
+from edge_ml_flywheel.selection.score import BAND_LOW
 
 # The only recipe format Greengrass v2 publishes, and a required field.
 RECIPE_FORMAT: Final = "2020-01-25"
@@ -95,11 +102,17 @@ class Release:
     Seed 1 ships by convention, and a convention spelled at the call site is one
     a caller can be wrong about loudly -- the manifest records which seed it was,
     and a release naming a different one produces a digest the canary rejects.
+
+    `cycle` is the cycle doing the deploying, and it is the model's own on every
+    cycle that promoted. It differs on one that did not: the champion stays, the
+    frames do not, so the release is last cycle's model with this cycle's sample
+    and a component version of its own. Absent, the two are one number.
     """
 
     version: ModelVersion
     seed: Seed
     git_commit: str
+    cycle: Cycle | None = None
 
     def __post_init__(self) -> None:
         parse_model_version(self.version)
@@ -108,32 +121,47 @@ class Release:
         # here as well so a release that cannot be staged is refused before
         # anything has been uploaded under it.
         replay_code_key(self.git_commit)
+        if self.cycle is not None and self.cycle < model_version_cycle(self.version):
+            raise ValueError(
+                f"cycle {self.cycle} cannot deploy {self.version}, which was trained in cycle "
+                f"{model_version_cycle(self.version)}. A deploying cycle is at or after the one "
+                f"that produced the model"
+            )
+
+    @property
+    def deploying(self) -> Cycle:
+        """The cycle whose component version and sample this release carries."""
+        return self.cycle if self.cycle is not None else model_version_cycle(self.version)
 
 
 @dataclass(frozen=True, slots=True)
 class Replay:
-    """How a device is asked to replay, and how much of the pool it is given.
+    """How a device is asked to score, and how much of the pool it is given.
 
-    Design section 4.3's measurement, as an object rather than four arguments:
-    500 frames after 50 warmup at batch size 1, which is what the p95 and the
-    cold start in the writeup are measured over.
+    One object rather than four arguments, because they are one decision. A pass
+    over `POOL_SAMPLE` frames warming on 50 of them is a different measurement
+    from a pass over 60 warming on 50, and settings that travelled separately
+    would let a caller assemble the second while believing it had asked for the
+    first.
 
-    `frames` is read by the sampler and the other three by the device, and they
-    are one object anyway, because they are one decision. A replay of 500 frames
-    warming on 50 of them is a different measurement from a replay of 60 warming
-    on 50, and settings that travelled separately would let a caller assemble the
-    second while believing it had asked for the first.
+    `frames` is the cycle's whole ranking universe and not a measurement sample.
+    Design section 4.3 wanted 500 frames for a p95; this pass is also what
+    selection ranks, so the number is `POOL_SAMPLE` and the latency percentile
+    comes out of a far larger set than it was specified over.
 
-    `image_size` and `confidence_floor` have to match the cloud pass or the
-    device's confidences are not comparable to it, which is the comparison the
-    realism check rests on. They are defaults here for `gates.thresholds`'
-    reason: a run that changed them would be measuring something else.
+    `image_size` has to match what the model was exported against. The floor is
+    `BAND_LOW` rather than the cloud pass's 0.001: this file is ranked, never
+    integrated, and `selection.score` discards everything below the band before
+    it scores anything -- so the tail costs a tenfold larger file on a device
+    with two cores and changes no ranking. Both are defaults here for
+    `gates.thresholds`' reason: a run that changed them would be measuring
+    something else.
     """
 
-    frames: int = 500
+    frames: int = POOL_SAMPLE
     warmup: int = 50
     image_size: int = 416
-    confidence_floor: float = 0.001
+    confidence_floor: float = BAND_LOW
 
     def __post_init__(self) -> None:
         if self.warmup < 0:
@@ -184,6 +212,10 @@ def run_script() -> str:
             "--topic {configuration:/topic}",
             "--endpoint {configuration:/iotEndpoint}",
             "--bucket {configuration:/dataBucket}",
+            "--detections_bucket {configuration:/detectionsBucket}",
+            "--detections_key {configuration:/detectionsKey}",
+            "--task_token {configuration:/taskToken}",
+            "--cycle {configuration:/cycle}",
             "--warmup {configuration:/warmup}",
             "--image_size {configuration:/imageSize}",
             "--confidence_floor {configuration:/confidenceFloor}",
@@ -209,9 +241,9 @@ def recipe(
     component declares; everything else it needs is in the interpreter the
     instance built at boot.
     """
-    name, semver = component_address(release.version)
+    cycle = release.deploying
+    name, semver = component_address(release.version, cycle)
     run_id = model_version_run_id(release.version)
-    cycle = model_version_cycle(release.version)
     model = model_artifact_key(release.version, release.seed, ModelArtifact.ONNX)
 
     return {
@@ -219,17 +251,35 @@ def recipe(
         "ComponentName": name,
         "ComponentVersion": semver,
         "ComponentDescription": (
-            f"Replays cycle {cycle}'s pool sample through {release.version} and publishes "
-            f"what it saw."
+            f"Scores cycle {cycle}'s pool sample with {release.version} and reports what it saw."
         ),
         "ComponentPublisher": COMPONENT_PUBLISHER,
         "ComponentConfiguration": {
             "DefaultConfiguration": {
                 "runId": str(run_id),
                 "version": str(release.version),
+                # The deploying cycle, which the device keys its start counter
+                # by. Not derivable on the device from the model version: a
+                # rejected cycle redeploys the champion, so one version can be
+                # three cycles' deployments.
+                "cycle": cycle,
                 "topic": f"{telemetry_topic_prefix(run_id)}{THING_NAME}",
                 "iotEndpoint": iot_endpoint,
                 "dataBucket": buckets.data,
+                "detectionsBucket": buckets.artifacts,
+                "detectionsKey": detections_key(
+                    release.version,
+                    release.seed,
+                    Cohort.POOL,
+                    precision=Precision.INT8,
+                    cycle=cycle,
+                ),
+                # Empty by default and filled by the deployment, because a task
+                # token does not exist when a component version is published and
+                # a component version is immutable once it does. A pass with no
+                # token still writes its file; what it does not do is resume an
+                # execution.
+                "taskToken": "",
                 "warmup": replay.warmup,
                 "imageSize": replay.image_size,
                 "confidenceFloor": replay.confidence_floor,
@@ -271,8 +321,23 @@ def deployment(
     version: ModelVersion,
     target_arn: str,
     name: str | None = None,
+    task_token: str = "",
+    cycle: Cycle | None = None,
 ) -> dict[str, Any]:
     """The `CreateDeployment` request that puts one component version on the fleet.
+
+    **The task token rides here and not in the recipe.** A component version is
+    published before the cycle reaches the state that issues a token, and it is
+    immutable once published, so the token arrives as a configuration update on
+    the deployment -- which is created after the token exists and is the only
+    part of this pair that can carry a value that late. An empty token deploys
+    the component with the default, which is a pass nobody is waiting on.
+
+    **The model version rides here too, always.** A component version names the
+    cycle that deployed it rather than the cycle that trained the model, so the
+    number in `0.<cycle>.0` no longer answers "what is this device running". The
+    merge makes the deployment say so itself, which is what keeps it the single
+    record of intent rather than a pointer something else has to interpret.
 
     **A deployment is the record of intent, and there is no second copy.** The
     design left open whether `fleet_config` or the Greengrass deployment holds
@@ -292,11 +357,22 @@ def deployment(
     automatic half. The canary gate is the half that judges a deployment which
     installed perfectly well and is slower, or loaded the wrong file.
     """
-    component, semver = component_address(version)
+    component, semver = component_address(version, cycle)
+    merge: dict[str, str] = {"version": str(version)}
+    if task_token:
+        merge["taskToken"] = task_token
+
+    update: dict[str, dict[str, Any]] = {
+        component: {
+            "componentVersion": semver,
+            "configurationUpdate": {"merge": json.dumps(merge)},
+        }
+    }
+
     return {
         "targetArn": target_arn,
         "deploymentName": name or f"{component}-{semver}",
-        "components": {component: {"componentVersion": semver}},
+        "components": update,
         "deploymentPolicies": {
             "failureHandlingPolicy": "ROLLBACK",
             # The component is a batch job rather than a service with clients, so

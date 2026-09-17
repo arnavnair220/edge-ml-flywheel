@@ -17,12 +17,17 @@ decision is reproducible from a saved cycle and testable without a model.
 | `data` | In the evaluation job | The purchase and the partition | The challenger is not registered |
 | `quality` | In the evaluation job | A `PairedDelta` and per-class AP | The challenger is not promoted |
 | `edge` | In the evaluation job | Artifact size and the two mAP scores | The challenger is not promoted |
-| `canary` | After deployment | A `ReplayReport` from the device | The rollout is rolled back |
+| `canary` | After the device's pass | A `ReplayReport` from the device | The rollout is rolled back |
 
 The first three are computed from a cycle's own artifacts and decide whether the challenger is
-registered and promoted. `canary` is computed from what a device reported after the promoted artifact
-reached it, so it is asked afterwards and decides whether the rollout stands. Its input is a
-reduction of telemetry rather than an AWS call, so it stays a pure function like the rest.
+registered and promoted. `canary` is computed from what a device reported after the deployed artifact
+scored the cycle's pool sample, so it is asked once that pass returns and decides whether the rollout
+stands. Its input is a reduction of telemetry rather than an AWS call, so it stays a pure function
+like the rest.
+
+All four are inside the cycle. The canary is asked last because it needs an artifact that has reached
+a device, not because it is optional — the cycle is already waiting on that device for the ranking it
+buys from. See [control.md](control.md).
 
 ---
 
@@ -158,16 +163,22 @@ cannot be made until the model has already been deployed.
 
 ## Canary
 
-Three conditions over one device's replay, all operational rather than statistical.
+Three conditions over one device's pass, all operational rather than statistical.
 
 | Condition | Rule |
 |---|---|
 | Digest | The device loaded the artifact the manifest names |
-| Completion | The component started once and the replay finished |
+| Completion | The component started once and the pass finished |
 | Throughput | Frame rate is within `max_throughput_drop` of the champion's |
 
 A detector is deterministic, so there is no run-to-run spread on one device and any "within N
 standard deviations" test over it is vacuous (design §4.5). What can genuinely fail is the plumbing.
+
+**Two of the three also decide whether the cycle may buy.** Digest and completion are statements
+about the detections the selector is about to rank — the wrong bytes ran, or the file is short — so
+a failure of either rolls the rollout back *and* refuses the purchase. Throughput is a statement about
+the rollout alone: the model ran correctly and slowly, and a slow ranking is still a ranking. This is
+the only place a gate verdict reaches the label budget.
 
 The digest is the check the other two are worthless without. Greengrass verifies its own copy against
 its own recipe on download, which is a closed loop that cannot catch a recipe built over the wrong

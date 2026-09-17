@@ -18,9 +18,10 @@ the pool. The boxes in them are decoded on the way past and thrown away, which i
 stops at the labels a run already owns.
 """
 
+import json
 import logging
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,8 +31,8 @@ import boto3
 
 from edge_ml_flywheel.conventions import (
     COHORT_SPLIT,
+    POOL_SAMPLE,
     PROJECT,
-    SCORED_COHORTS,
     Cohort,
     Cycle,
     ImageId,
@@ -44,6 +45,7 @@ from edge_ml_flywheel.conventions import (
     model_version_cycle,
     model_version_run_id,
     purchases_run_prefix,
+    replay_manifest_key,
     scoring_manifest_key,
     training_code_key,
     uri,
@@ -132,23 +134,34 @@ def prepare(
     cycle: Cycle,
     preparation: Preparation,
 ) -> Mapping[Cohort, int]:
-    """Write this cycle's scoring manifests and return how many images each names.
+    """Write what this cycle scores, in the two forms its two machines read.
 
-    Both cohorts at once, and once per cycle for `training.launch.prepare`'s
-    reason. The refusal to overwrite comes first, before anything is downloaded,
-    so a cycle that has already been prepared costs a listing rather than a copy
-    of the assignments.
+    `eval` becomes a SageMaker `ManifestFile` at `scoring_manifest_key`, which is
+    an input channel of the processing job. The pool becomes a JSON array of
+    image IDs at `replay_manifest_key`, which is a Greengrass artifact the device
+    resolves through `raw_image_key` itself. Two documents rather than one
+    because two different things read them, and neither wants the other's
+    envelope.
+
+    Both are written here, before either machine runs, for
+    `training.launch.prepare`'s reason: what a cycle scores is decided once and
+    recorded before anything scores it. The pool draw in particular has to happen
+    now rather than at deployment, because the deployment is what the device's
+    sample is shipped with.
+
+    The refusal to overwrite comes first, before anything is downloaded, so a
+    cycle that has already been prepared costs a listing rather than a copy of
+    the assignments.
     """
     run = base.registration(aws, run_id)
     artifacts = base.buckets(aws).artifacts
 
     if not preparation.replace:
-        for cohort in sorted(SCORED_COHORTS):
-            key = scoring_manifest_key(run_id, cycle, cohort)
+        for key in (scoring_manifest_key(run_id, cycle, Cohort.EVAL), sample_key(run_id, cycle)):
             if base.exists(aws, artifacts, key):
                 raise SystemExit(
                     f"{uri(artifacts, key)} already exists, and it is the record of what this "
-                    f"cycle scored. Pass --replace only if no seed has scored against it."
+                    f"cycle scored. Pass --replace only if nothing has scored against it."
                 )
 
     # The scratch directory belongs to this function rather than to its caller,
@@ -161,19 +174,68 @@ def prepare(
         spent = purchased(aws, run, work)
         sets.check_purchases(index, spent)
 
-        named: dict[Cohort, int] = {}
-        for cohort in sorted(SCORED_COHORTS):
-            image_ids = images.capped(sets.to_score(index, cohort, spent), preparation.max_images)
-            local = work / f"{cohort.value}.manifest"
-            named[cohort] = images.write(
-                local, base.buckets(aws).data, image_ids, COHORT_SPLIT[cohort]
+        evaluated = images.capped(sets.to_score(index, Cohort.EVAL, spent), preparation.max_images)
+        local = work / f"{Cohort.EVAL.value}.manifest"
+        named = {
+            Cohort.EVAL: images.write(
+                local, base.buckets(aws).data, evaluated, COHORT_SPLIT[Cohort.EVAL]
             )
+        }
+        key = scoring_manifest_key(run_id, cycle, Cohort.EVAL)
+        aws.client("s3").upload_file(str(local), artifacts, key)
+        log.info("wrote %s", uri(artifacts, key))
 
-            key = scoring_manifest_key(run_id, cycle, cohort)
-            aws.client("s3").upload_file(str(local), artifacts, key)
-            log.info("wrote %s", uri(artifacts, key))
+        named[Cohort.POOL] = write_sample(
+            aws,
+            run_id,
+            cycle,
+            sets.to_sample(
+                sets.to_score(index, Cohort.POOL, spent),
+                run_id,
+                cycle,
+                _frames(preparation.max_images),
+            ),
+        )
 
     return named
+
+
+def _frames(max_images: int) -> int:
+    """How many pool frames the device is given, under a skeleton run's cap.
+
+    `max_images` is the lever that makes a test run cost cents, and it has to
+    reach the fleet sample as well as the eval manifest -- a cycle capped at 40
+    images that still asked a device for ten thousand frames would spend an hour
+    proving the cap does not work.
+    """
+    return min(POOL_SAMPLE, max_images) if max_images else POOL_SAMPLE
+
+
+def sample_key(run_id: RunId, cycle: Cycle) -> str:
+    """Where the device's frame list lives, named once for three readers."""
+    return replay_manifest_key(run_id, cycle)
+
+
+def write_sample(
+    aws: boto3.Session, run_id: RunId, cycle: Cycle, image_ids: Sequence[ImageId]
+) -> int:
+    """Write the sampled frame list where the component recipe names it.
+
+    Under the cycle's write-once prefix because it is the record design section
+    7.2 asks for: the per-cycle list that ties a telemetry latency, a ranking row
+    and a purchase back to one frame, and the thing that makes the device's
+    predictions regenerable offline from retained images.
+    """
+    key = sample_key(run_id, cycle)
+    artifacts = base.buckets(aws).artifacts
+    aws.client("s3").put_object(
+        Bucket=artifacts,
+        Key=key,
+        Body=json.dumps(sorted(str(image_id) for image_id in image_ids)).encode(),
+        ContentType="application/json",
+    )
+    log.info("wrote %d sampled frames to %s", len(image_ids), uri(artifacts, key))
+    return len(image_ids)
 
 
 def request(
@@ -204,10 +266,7 @@ def request(
     required = [
         training_code_key(run_id, cycle),
         model_artifact_key(version, seed, job.artifact_for(scoring.precision)),
-        *(
-            scoring_manifest_key(run_id, cycle, cohort)
-            for cohort in sorted(job.cohorts_for(scoring.precision))
-        ),
+        *(scoring_manifest_key(run_id, cycle, cohort) for cohort in sorted(job.COHORTS)),
     ]
     for key in required:
         if not base.exists(aws, artifacts, key):

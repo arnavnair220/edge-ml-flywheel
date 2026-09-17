@@ -303,6 +303,7 @@ data "aws_iam_policy_document" "control" {
         "run_id=*/cycle=*/detections/*",
         "run_id=*/cycle=*/selection/*",
         "run_id=*/cycle=*/eval/*",
+        "run_id=*/cycle=*/fleet/*",
         "base/*",
       ]
     }
@@ -317,6 +318,77 @@ data "aws_iam_policy_document" "control" {
     effect    = "Allow"
     actions   = ["dynamodb:GetItem"]
     resources = [aws_dynamodb_table.runs.arn]
+  }
+
+  # The fleet round trip: `deploy` publishes the cycle's component version,
+  # `fleet_score` deploys it with the task token, and `canary` reads back what
+  # the device did with it and rolls a failed rollout back.
+  #
+  # `CreateComponentVersion` is not resource-scoped because the component being
+  # created does not exist to be named yet -- which is the API's shape, not a
+  # widening. The deployment calls are the ones that carry a target, and it is
+  # the thing group below rather than the account's.
+  statement {
+    sid    = "PublishTheCycleComponent"
+    effect = "Allow"
+
+    actions = [
+      "greengrass:CreateComponentVersion",
+      "greengrass:ListDeployments",
+      "greengrass:GetDeployment",
+    ]
+
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "DeployToTheFleet"
+    effect    = "Allow"
+    actions   = ["greengrass:CreateDeployment"]
+    resources = ["arn:aws:iot:${var.aws_region}:${var.account_id}:thinggroup/${var.project}-devices"]
+  }
+
+  # `deploy` refuses a cycle whose device is stopped rather than deploying into
+  # a two-hour wait that can only time out. A describe and nothing else: this
+  # role cannot start the instance, which is deliberate -- a stopped device is an
+  # operator's decision about cost, and a control plane that silently started one
+  # would spend money nobody asked it to.
+  statement {
+    sid       = "SeeWhetherTheDeviceIsRunning"
+    effect    = "Allow"
+    actions   = ["ec2:DescribeInstances"]
+    resources = ["*"]
+  }
+
+  # The device's own report, which is what the canary gate is computed from.
+  # Read-only over the one prefix the IoT rule writes: the verdict is evidence
+  # about a rollout, and a plane that could rewrite the evidence could pass a
+  # gate after the fact.
+  statement {
+    sid       = "ReadWhatTheDeviceReported"
+    effect    = "Allow"
+    actions   = ["s3:GetObject", "s3:ListBucket"]
+    resources = [local.bucket_arns["telemetry"], "${local.bucket_arns["telemetry"]}/fleet/*"]
+  }
+
+  # The package the component runs, addressed by commit. Two cycles built from
+  # one tree write identical bytes to one key, so this is a put with no delete
+  # against an object that is content-addressed by construction.
+  statement {
+    sid       = "StageTheDeviceCode"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${local.bucket_arns["artifacts"]}/fleet/code/*"]
+  }
+
+  # The sample the recipe names as an artifact. Written by `score_prepare` and
+  # read back by `deploy`, which refuses a deployment whose frames were never
+  # drawn rather than letting a device start and find none.
+  statement {
+    sid       = "WriteAndReadTheFleetSample"
+    effect    = "Allow"
+    actions   = ["s3:PutObject", "s3:GetObject"]
+    resources = ["${local.bucket_arns["artifacts"]}/run_id=*/cycle=*/fleet/*"]
   }
 
   statement {

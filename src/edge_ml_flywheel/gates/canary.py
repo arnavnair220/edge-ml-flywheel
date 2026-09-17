@@ -156,3 +156,28 @@ def canary_gate(
             f"{report.throughput_fps:.1f} frames/s{against}"
         ),
     )
+
+
+def detections_stand(report: ReplayReport, expected_sha256: str) -> bool:
+    """Whether what the device wrote may be ranked, and a batch bought from it.
+
+    **A different question from whether the rollout stands**, over two of the
+    same three checks. `canary_gate` decides what the fleet keeps running;
+    this decides what the cycle is allowed to spend its budget on, and the two
+    are not the same judgement over the same evidence.
+
+    The digest and the completion check are statements about the detections. The
+    wrong bytes produced them, or the pass did not finish -- either way the file
+    is not a ranking of this cycle's sample by the model the gates were reported
+    over, and buying a thousand labels from it spends real budget on a fiction.
+
+    Throughput is not. A model that ran correctly and slowly wrote exactly the
+    detections a fast one would have; the rollout is rolled back for being slow
+    and the ranking is untouched by it. That asymmetry is the whole reason this
+    is a second function rather than a field on the verdict.
+
+    The thresholds are not an argument, because neither check has one. Both are
+    equalities -- the digest matches or it does not, the frames arrived or they
+    did not -- which is what makes them safe to read this way.
+    """
+    return _digest(report, expected_sha256) is None and _completed(report) is None

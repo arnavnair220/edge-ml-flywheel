@@ -11,11 +11,13 @@ and the failure when one is accidentally interpolated is a component pointed at 
 path that does not exist. So the tests read them the way Greengrass does.
 """
 
+import json
 from typing import Any
 
 import pytest
 
 from edge_ml_flywheel.conventions import (
+    POOL_SAMPLE,
     Buckets,
     Cycle,
     ModelVersion,
@@ -26,6 +28,7 @@ from edge_ml_flywheel.conventions import (
     replay_manifest_key,
 )
 from edge_ml_flywheel.fleet import component
+from edge_ml_flywheel.selection.score import BAND_LOW
 
 RUN = RunId("20260812t143355z-v0-skeleton")
 VERSION = ModelVersion("20260812t143355z-v0-skeleton-c003")
@@ -64,11 +67,21 @@ class TestTheRelease:
 
 
 class TestTheReplaySettings:
-    def test_the_design_s_numbers_are_the_default(self) -> None:
-        """500 frames after 50 warmup, at the size the model was exported at."""
-        assert component.STANDARD.frames == 500
+    def test_the_sample_is_the_cycle_s_whole_ranking_universe(self) -> None:
+        """`POOL_SAMPLE` frames after 50 warmup, at the size the model was
+        exported at. Not design section 4.3's 500: this pass is what selection
+        ranks, so the p95 falls out of a set far larger than it was specified
+        over rather than the set being sized for the p95."""
+        assert component.STANDARD.frames == POOL_SAMPLE
         assert component.STANDARD.warmup == 50
         assert component.STANDARD.image_size == 416
+
+    def test_the_floor_is_the_band_the_selector_reads(self) -> None:
+        """Not the cloud pass's 0.001. Nothing integrates the pool, and
+        `image_score` discards everything below the band before it scores
+        anything, so the tail is a tenfold larger file and an identical
+        ranking."""
+        assert component.STANDARD.confidence_floor == BAND_LOW
 
     def test_measured_is_what_the_summary_will_claim(self) -> None:
         assert component.Replay(frames=500, warmup=50).measured == 450
@@ -191,7 +204,10 @@ class TestTheDeployment:
 
         assert request["targetArn"] == target
         assert request["components"] == {
-            "edge-ml-flywheel.20260812t143355z-v0-skeleton": {"componentVersion": "0.3.0"}
+            "edge-ml-flywheel.20260812t143355z-v0-skeleton": {
+                "componentVersion": "0.3.0",
+                "configurationUpdate": {"merge": json.dumps({"version": VERSION})},
+            }
         }
 
     def test_a_failed_install_rolls_the_device_back_by_itself(self) -> None:
@@ -211,8 +227,45 @@ class TestTheDeployment:
         back = component.deployment(new_model_version(RUN, Cycle(2)), target)
 
         assert set(forward) == set(back)
-        assert forward["components"][name] == {"componentVersion": "0.3.0"}
-        assert back["components"][name] == {"componentVersion": "0.2.0"}
+        assert forward["components"][name]["componentVersion"] == "0.3.0"
+        assert back["components"][name]["componentVersion"] == "0.2.0"
+
+    def test_a_cycle_that_rejected_deploys_the_champion_under_its_own_number(self) -> None:
+        """A component version names the cycle that deployed it, not the cycle
+        that trained the model: the recipe carries this cycle's sample, and a
+        component version is immutable once published. The deployment says which
+        model it is, because the number no longer can."""
+        target = "arn:aws:iot:us-east-1:123456789012:thinggroup/x"
+        name = "edge-ml-flywheel.20260812t143355z-v0-skeleton"
+
+        request = component.deployment(VERSION, target, cycle=Cycle(5))
+        entry = request["components"][name]
+
+        assert entry["componentVersion"] == "0.5.0"
+        assert json.loads(entry["configurationUpdate"]["merge"])["version"] == VERSION
+
+    def test_the_task_token_rides_the_deployment(self) -> None:
+        """A token does not exist when a component version is published and a
+        component version is immutable once it does, so the deployment is the
+        only half of the pair that can carry one."""
+        target = "arn:aws:iot:us-east-1:123456789012:thinggroup/x"
+        name = "edge-ml-flywheel.20260812t143355z-v0-skeleton"
+
+        request = component.deployment(VERSION, target, task_token="opaque")
+        merged = json.loads(request["components"][name]["configurationUpdate"]["merge"])
+
+        assert merged["taskToken"] == "opaque"
+
+    def test_a_rollback_hands_nobody_a_token(self) -> None:
+        """Nothing is waiting on a rollback. The cycle that was waiting is the
+        one that failed."""
+        target = "arn:aws:iot:us-east-1:123456789012:thinggroup/x"
+        name = "edge-ml-flywheel.20260812t143355z-v0-skeleton"
+
+        request = component.deployment(VERSION, target)
+        merged = json.loads(request["components"][name]["configurationUpdate"]["merge"])
+
+        assert "taskToken" not in merged
 
     def test_the_deployment_name_carries_the_version_it_puts_out(self) -> None:
         request = component.deployment(VERSION, "arn:aws:iot:us-east-1:123456789012:thinggroup/x")

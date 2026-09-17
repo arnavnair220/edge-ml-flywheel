@@ -43,10 +43,10 @@ from edge_ml_flywheel.conventions import (
 )
 from edge_ml_flywheel.scoring import detections
 from edge_ml_flywheel.scoring.job import (
+    COHORTS,
     INPUT_ROOT,
     MODEL_CHANNEL,
     OUTPUT_ROOT,
-    cohorts_for,
 )
 
 log = logging.getLogger("edge_ml_flywheel.scoring")
@@ -248,8 +248,10 @@ def main(argv: list[str] | None = None) -> None:
 
     # Sorted for `job.inputs`' reason, and it decides something here that it does
     # not there: a job that dies partway leaves the cohorts before the failure
-    # written, so the order is the order they are worth having.
-    for cohort in sorted(cohorts_for(args.precision)):
+    # written, so the order is the order they are worth having. One cohort makes
+    # that moot today and the loop stays, because what this walks is whatever
+    # channels the request gave it.
+    for cohort in sorted(COHORTS):
         score_cohort(model, cohort, names, args)
 
 

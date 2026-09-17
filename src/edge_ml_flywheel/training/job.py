@@ -19,12 +19,24 @@ test over this function rather than described in a comment somewhere.
 `VpcConfig` is absent, so the job runs on SageMaker's own network and reaches S3
 without a NAT gateway.
 
-`max_images` is absent, and it is a parameter of the *cycle* rather than of the
-job: the images a job trains on are exactly the ones named in
-`training_manifest_key`, and that document doubles as the record of what the
-challenger was trained on. Shrinking the training set inside the container would
-make the record and the run disagree, so a short skeleton run is a short
-manifest -- see `training.images`.
+**`max_images` is carried, and the manifest is still the record.** The images a
+job trains on are exactly the ones named in `training_manifest_key`, and that
+document doubles as the record of what the challenger was trained on. The cap
+travels with the job anyway, because the two sides of a training set arrive
+differently: `images` is a manifest naming a subset object by object, while the
+labels are whole prefixes that are appended to and never rewritten (see
+`input_channels`). A cap can be expressed on the manifest and *cannot* be
+expressed on a prefix, so capping only the manifest delivered 300 images beside
+8,000 labels and `dataset.write` refused the pair -- which is why the lever that
+was supposed to make a skeleton run cost cents had never once worked.
+
+So the container applies the same cap to the labels it collected. That is not
+the container shrinking the training set below its own record: `training.images.capped`
+sorts and takes the first *n*, so both sides resolve the identical images from
+the identical labeled set, and what the container trains on is exactly what the
+manifest names. A divergence between the two -- a purchase landing between
+`prepare` and the job, say -- stays a loud failure in `dataset.write` rather
+than a quietly smaller training set.
 """
 
 from collections.abc import Mapping
@@ -181,11 +193,19 @@ class Recipe:
     # challenger and that order is a function of how many workers drew it.
     workers: int = 4
 
+    # 0 for every labeled image, which is every real cycle. It sits on the recipe
+    # because the container needs it to cap the labels to the same images the
+    # manifest names, not because a skeleton run is a recipe anyone compares
+    # against: a capped run is a smoke test, and the manifest beside it says so.
+    max_images: int = 0
+
     def __post_init__(self) -> None:
         if self.epochs <= 0:
             raise ValueError(f"epochs must be positive: {self.epochs}")
         if self.image_size <= 0 or self.image_size % 32:
             raise ValueError(f"image size must be a positive multiple of 32: {self.image_size}")
+        if self.max_images < 0:
+            raise ValueError(f"max images cannot be negative: {self.max_images}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,6 +365,7 @@ def hyperparameters(target: Target, recipe: Recipe) -> dict[str, str]:
         "batch": str(recipe.batch),
         "freeze": str(recipe.freeze),
         "workers": str(recipe.workers),
+        "max_images": str(recipe.max_images),
         "artifacts_bucket": target.buckets.artifacts,
     }
 

@@ -12,6 +12,7 @@ registration out of DynamoDB, and a fake would be a fake written to hand back
 whatever the assertion wanted.
 """
 
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,15 +30,15 @@ from edge_ml_flywheel.conventions import (
     DetectionRow,
     ImageId,
     PartitionVersion,
+    Precision,
     RecipeVersion,
     RunId,
     RunRegistration,
     Seed,
-    Split,
     Table,
     detections_key,
     new_model_version,
-    scoring_manifest_key,
+    replay_manifest_key,
     selection_ranking_key,
     table_name,
 )
@@ -46,7 +47,6 @@ from edge_ml_flywheel.scoring import detections
 from edge_ml_flywheel.selection import launch as selecting
 from edge_ml_flywheel.selection import ranking
 from edge_ml_flywheel.selection.score import BLIND_SPOT, DECISIVE
-from edge_ml_flywheel.training import images
 
 RUN = RunId("20260812t143355z-v1-uncertainty")
 CYCLE = Cycle(1)
@@ -114,19 +114,28 @@ def _register(aws: boto3.Session, **overrides: Any) -> None:
 
 
 def _manifest(aws: boto3.Session, image_ids: tuple[ImageId, ...], tmp_path: Path) -> None:
-    """The record of what this cycle scored, which is what selection ranks."""
-    local = tmp_path / "pool.manifest"
-    images.write(local, BUCKETS.data, image_ids, Split.TRAIN)
-    aws.client("s3").upload_file(
-        str(local), BUCKETS.artifacts, scoring_manifest_key(RUN, CYCLE, Cohort.POOL)
+    """The sample this cycle put in front of the fleet, which is what it ranks.
+
+    A JSON array rather than a SageMaker `ManifestFile`: the device reads it and
+    resolves each ID itself, so the envelope a Processing channel wants would be
+    one the component has to strip.
+    """
+    del tmp_path
+    aws.client("s3").put_object(
+        Bucket=BUCKETS.artifacts,
+        Key=replay_manifest_key(RUN, CYCLE),
+        Body=json.dumps(sorted(str(image_id) for image_id in image_ids)).encode(),
     )
 
 
 def _detections(aws: boto3.Session, rows: list[DetectionRow], tmp_path: Path) -> None:
+    """What the device wrote back, at the key and precision it writes it under."""
     local = tmp_path / "detections.parquet"
     detections.write(rows, local)
     aws.client("s3").upload_file(
-        str(local), BUCKETS.artifacts, detections_key(VERSION, SEED, Cohort.POOL)
+        str(local),
+        BUCKETS.artifacts,
+        detections_key(VERSION, SEED, Cohort.POOL, precision=Precision.INT8, cycle=CYCLE),
     )
 
 
@@ -247,16 +256,19 @@ class TestWhatTheModelNeverSaw:
 
 
 class TestRefusals:
-    def test_a_cycle_that_never_scored_is_refused(self, aws: boto3.Session, tmp_path: Path) -> None:
-        with pytest.raises(SystemExit, match="which images this cycle ranked"):
+    def test_a_cycle_that_never_drew_a_sample_is_refused(
+        self, aws: boto3.Session, tmp_path: Path
+    ) -> None:
+        del tmp_path
+        with pytest.raises(SystemExit, match="in front of the fleet"):
             selecting.rank(aws, VERSION, SEED)
 
-    def test_a_seed_with_no_detections_is_refused(self, aws: boto3.Session, tmp_path: Path) -> None:
-        """Naming the seed, because "the scoring job did not run" and "selection
+    def test_a_seed_no_device_scored_is_refused(self, aws: boto3.Session, tmp_path: Path) -> None:
+        """Naming the seed, because "the fleet pass did not run" and "selection
         is broken" are different problems with the same symptom."""
         _manifest(aws, POOL, tmp_path)
 
-        with pytest.raises(SystemExit, match="never scored over the pool"):
+        with pytest.raises(SystemExit, match="no device has scored"):
             selecting.rank(aws, VERSION, SEED)
 
     def test_ranking_twice_is_refused(self, aws: boto3.Session, tmp_path: Path) -> None:

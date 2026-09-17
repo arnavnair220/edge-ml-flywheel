@@ -27,7 +27,18 @@ pillow==11.3.0
 # onnxruntime hands back. The major tracks the project lockfile's.
 numpy==2.5.2
 
-# Fetches the frames from the data bucket and publishes to IoT Core. Greengrass
-# sets the container-credentials variables for a component, so this picks up the
-# token exchange role with no configuration.
+# Fetches the frames from the data bucket, writes the detections parquet to the
+# artifacts bucket, and publishes to IoT Core. Greengrass sets the
+# container-credentials variables for a component, so this picks up the token
+# exchange role with no configuration.
 boto3==1.42.0
+
+# Writes the cycle's detections in the schema every other reader already opens.
+# The device reuses `scoring.detections`, so the file a device produces and the
+# file a Processing job produces are one codec and one schema rather than two
+# kept in step by hand.
+#
+# Streamed a row group at a time, which is what makes this affordable on two
+# cores and two gigabytes: a pass over `POOL_SAMPLE` frames never exists in
+# memory as a list of boxes.
+pyarrow==25.0.1

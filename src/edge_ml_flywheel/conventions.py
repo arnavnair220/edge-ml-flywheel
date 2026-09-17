@@ -1690,15 +1690,21 @@ def scoring_manifest_key(run_id: RunId, cycle: Cycle, cohort: Cohort) -> str:
 class Precision(StrEnum):
     """Which build of a model produced a set of detections.
 
-    `FP32` is the checkpoint, which is what the paired comparison, the selector
-    and every reported metric are computed from. `INT8` is the quantized ONNX
-    graph the fleet runs, scored once per cycle over `eval` alone so the edge
-    gate can say what quantization cost.
+    `FP32` is the checkpoint, and every metric the project reports is computed
+    from it: the paired comparison, the per-class AP, the band. `INT8` is the
+    quantized ONNX graph the fleet runs.
+
+    Which of the two is the right answer depends on the cohort, and the split is
+    not a compromise. For `eval` the fp32 pass is the measurement and the int8
+    pass is a second opinion over the same images, run once per cycle so the edge
+    gate can say what quantization cost. For `pool` there is only int8, because
+    the only model that scores the pool is the one deployed to a device -- so the
+    selector ranks by the uncertainty of the graph actually driving, not of a
+    checkpoint that never left the account.
 
     A dimension of the detections key rather than a flag on a file, because the
-    two are produced by separate jobs and read by separate consumers, and a
-    quantized box sitting in the prefix the selector reads would rank the pool by
-    the wrong model's uncertainty.
+    two are produced by different machines, at different points in a cycle, and
+    are read by consumers who must not be able to confuse them.
     """
 
     FP32 = "fp32"
@@ -1710,6 +1716,7 @@ def detections_prefix(
     seed: Seed,
     cohort: Cohort,
     precision: Precision = Precision.FP32,
+    cycle: Cycle | None = None,
 ) -> str:
     """Where one model-seed's boxes for one cohort land.
 
@@ -1724,14 +1731,28 @@ def detections_prefix(
     every existing reader wants. The segment is written for both, so neither is
     the unmarked case a reader has to know about.
 
-    Under the cycle that produced the model, not the cycle being decided, for
-    `eval_prefix`'s reason: a champion is re-compared every cycle without being
-    re-scored, and keying this by the deciding cycle would write a fresh copy of
-    an unchanged answer every time.
+    Under the cycle that produced the model by default, not the cycle being
+    decided, for `eval_prefix`'s reason: a champion is re-compared every cycle
+    without being re-scored, and keying `eval` by the deciding cycle would write
+    a fresh copy of an unchanged answer every time.
+
+    **`cycle` is how the pool escapes that default, and it has to.** An `eval`
+    pass is a function of the model alone, because the cohort is frozen for the
+    life of the run. A pool pass is not: each cycle draws its own `POOL_SAMPLE`
+    frames, so one champion deployed across three cycles scores three different
+    sets of images and produces three different files. Keyed by the model's own
+    cycle they would be one key written three times, and the second write would
+    destroy the ranking the first purchase was charged against.
+
+    So the fleet passes the deploying cycle and `eval` passes nothing, which puts
+    every cycle's pool detections under the cycle that ranked from them and keeps
+    every model's eval detections under the cycle that trained it.
     """
     padded = _padded("seed", seed, SEED_DIGITS)
+    run_id, trained = _locate(version)
     return (
-        f"{cycle_prefix(*_locate(version))}detections/version={version}/"
+        f"{cycle_prefix(run_id, cycle if cycle is not None else trained)}"
+        f"detections/version={version}/"
         f"seed={padded}/cohort={_scored(cohort).value}/precision={precision.value}/"
     )
 
@@ -1740,8 +1761,8 @@ def detections_key(
     version: ModelVersion,
     seed: Seed,
     cohort: Cohort,
-    part: int = 0,
     precision: Precision = Precision.FP32,
+    cycle: Cycle | None = None,
 ) -> str:
     """One cohort's detections in one parquet.
 
@@ -1750,9 +1771,15 @@ def detections_key(
     selection takes a confidence band out of it, and a columnar file answers the
     second without decompressing the first. The match arrays have exactly one
     reader and are indexed rather than filtered, which is why they stay numpy.
+
+    **Part zero, and no argument for another.** Both writers produce one file per
+    pass -- the job streams row groups into a single parquet, and the device
+    holds one row group at a time and uploads once at the end. A reader walks
+    `detections_prefix` rather than naming parts, so a second part would be found
+    without this having to be able to name it.
     """
-    name = _padded("part", part, PART_DIGITS)
-    return f"{detections_prefix(version, seed, cohort, precision)}part-{name}.parquet"
+    name = _padded("part", 0, PART_DIGITS)
+    return f"{detections_prefix(version, seed, cohort, precision, cycle)}part-{name}.parquet"
 
 
 def gate_report_prefix(run_id: RunId, cycle: Cycle) -> str:
@@ -1914,6 +1941,27 @@ def training_code_key(run_id: RunId, cycle: Cycle) -> str:
 
 # --- Artifacts bucket: the fleet's own objects --------------------------------
 
+# How many pool frames one cycle puts in front of the fleet, and so how many
+# rows the ranking a cycle buys from is drawn over.
+#
+# **This is the whole ranking universe of a cycle, not a sample of a larger
+# pass.** Nothing else scores the pool: the frames named here are the frames the
+# device ran, and the frames the device ran are the frames selection sorts. An
+# image not in this draw is not ranked low, it is simply not considered until a
+# later cycle's draw reaches it.
+#
+# Ten thousand of a 62,000-image pool, which is a tenth of the catalogue for a
+# purchase of a thousand. The number is bounded from below by the budget -- a
+# sample smaller than the batch would make the selector an identity function --
+# and from above by the device, at two ARM cores and one frame at a time. It sits
+# where it does because that is roughly an hour of inference, and an hour is what
+# a cycle can wait for without the loop becoming a thing nobody runs.
+#
+# A constant rather than a field on a run, for `gates.thresholds`' reason: a run
+# that changed it would be measuring a different selector. Raise it here once
+# several cycles have reported what the hardware actually costs.
+POOL_SAMPLE: Final = 10_000
+
 # The file name `replay_manifest_key` ends in, named because two readers address
 # it and only one of them builds the key. `TRAINING_CODE_FILE`'s situation
 # exactly: Greengrass names a downloaded artifact after the last component of its
@@ -1923,24 +1971,32 @@ REPLAY_MANIFEST_FILE: Final = "replay.json"
 
 
 def replay_manifest_key(run_id: RunId, cycle: Cycle) -> str:
-    """The pool frames one cycle put in front of the fleet.
+    """The pool frames one cycle puts in front of the fleet.
 
-    `scoring_manifest_key`'s argument for the third set of images a cycle shows a
+    `scoring_manifest_key`'s argument for the other set of images a cycle shows a
     model, and the one design section 7.2 requires by name: the sample is drawn
-    per cycle because the pool shrinks as the run proceeds, and it is the small
-    per-cycle list of image IDs that later ties a telemetry record back to a
-    scoring decision. Without it a confidence reported from a device is a number
-    about a frame nobody can identify.
+    per cycle because the pool shrinks as the run proceeds, and it is the list of
+    image IDs that ties every later number -- a telemetry latency, a ranking row,
+    a purchase -- back to one frame. Without it a confidence reported from a
+    device is a number about a frame nobody can identify.
 
-    Drawn out of `selection_ranking_key`'s rows rather than recomputed from the
-    partition and the ledger, so the frames the fleet replays are by construction
-    frames the cycle also ranked -- which is what the realism check compares and
-    what makes the telemetry regenerable offline from retained images.
+    **Drawn from the remaining pool, not from a ranking.** The partition's `pool`
+    minus everything the ledger says was bought, sampled at `POOL_SAMPLE` and
+    seeded by run and cycle. It cannot be drawn from `selection_ranking_key`,
+    because that file is downstream of this one now: the device scores these
+    frames and selection ranks what comes back. Seeded so that a redeploy after a
+    rollback scores an identical draw and the second pass is comparable to the
+    first.
 
     A JSON array of image IDs rather than a manifest of S3 keys: it is read by
     the device, which resolves each ID through `raw_image_key` under its own
     grant, and by a later join against the ranking. Neither wants SageMaker's
     `ManifestFile` envelope.
+
+    The task token the device resumes the cycle with is deliberately *not* here.
+    It is a configuration value of the deployment, which is created after this
+    file is written and after the component version naming it has been published.
+    An artifact cannot carry a value that does not exist when it is uploaded.
     """
     return f"{cycle_prefix(run_id, cycle)}fleet/{REPLAY_MANIFEST_FILE}"
 
@@ -2070,15 +2126,26 @@ def parse_component_version(value: str) -> Cycle:
     return Cycle(int(match["cycle"]))
 
 
-def component_address(version: ModelVersion) -> tuple[str, str]:
+def component_address(version: ModelVersion, cycle: Cycle | None = None) -> tuple[str, str]:
     """The component name and version one model is deployed as.
 
     Both halves from the one string, never passed beside it -- `model_prefix`'s
     rule, and the reason this exists rather than two calls at every site: a
     caller holding a model version has no business splitting it itself.
+
+    **`cycle` is the cycle doing the deploying, which is not always the model's
+    own.** A cycle that rejected its challenger deploys the standing champion,
+    and it still needs a component version of its own: the recipe names that
+    cycle's `replay_manifest_key`, so the frames differ even when the model does
+    not, and a component version is immutable once published. Passing the
+    deploying cycle is therefore how a run reaches cycle five deploying a model
+    trained in cycle three without colliding with cycle three's component.
+
+    Omitted, it is the model's own cycle -- which is every promoting cycle, and
+    the case where the two are the same number.
     """
-    run_id, cycle = _locate(version)
-    return model_component(run_id), component_version(cycle)
+    run_id, trained = _locate(version)
+    return model_component(run_id), component_version(cycle if cycle is not None else trained)
 
 
 # --- Telemetry bucket ---------------------------------------------------------
@@ -2178,28 +2245,31 @@ class TelemetryKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class FrameRow:
-    """One replayed frame, as an entry inside a `TelemetryKind.FRAMES` record.
+    """One scored frame, as an entry inside a `TelemetryKind.FRAMES` record.
 
-    Three facts and deliberately not the boxes. `inference_ms` is the measurement
-    design section 4.3 asks for and the only one that must come off the device --
-    p95 is computed from these, and mean hides the stalls that matter. `scores`
-    is the confidence of each detection, which is what a later distribution
-    comparison reads; the coordinates are omitted because nothing downstream of
-    the fleet matches a device's boxes against ground truth, and the offline pass
-    already wrote every box this model draws.
+    Two facts, and the predictions are not among them. `inference_ms` is the
+    measurement design section 4.3 asks for and the only one that must come off
+    the device -- p95 is computed from these, and a mean hides the stalls that
+    matter. `image_id` is what ties the record to the frame, which is
+    `replay_manifest_key`'s whole purpose.
 
-    `image_id` is what ties the record to the ranking that chose the frame, which
-    is `replay_manifest_key`'s whole purpose.
+    **The boxes and confidences travel by S3, not by this record.** They are what
+    the cycle's purchase is ranked from, and MQTT delivery is lossy enough that
+    the telemetry format admits it -- a summary claiming `POOL_SAMPLE` frames
+    beside batches carrying fewer is a recognized outcome here. A ranking
+    computed over whichever messages survived is not a ranking, so the device
+    writes one parquet at `detections_key` and this record stays the operational
+    half. Publishing the confidences as well would be a larger message repeating
+    what the durable file already says.
 
-    A frame the model found nothing in carries an empty `scores` and is not an
-    absent row. It is a real observation -- the champion's blind spots are what
-    `selection.score` ranks highest -- and dropping it would make a replay's
-    frame count disagree with its summary for a reason nothing recorded.
+    A frame the model found nothing in is still a row. It is a real observation --
+    the champion's blind spots are what `selection.score` ranks highest -- and
+    dropping it would make a pass's frame count disagree with its summary for a
+    reason nothing recorded.
     """
 
     image_id: ImageId
     inference_ms: float
-    scores: tuple[float, ...]
 
     def __post_init__(self) -> None:
         parse_image_id(self.image_id)
@@ -2207,21 +2277,24 @@ class FrameRow:
             raise ValueError(
                 f"a frame that took {self.inference_ms} ms is not a frame that was inferred"
             )
-        outside = [score for score in self.scores if not 0.0 <= score <= 1.0]
-        if outside:
-            raise ValueError(f"a confidence outside [0, 1] is not a confidence: {outside[:5]}")
 
 
 @dataclass(frozen=True, slots=True)
 class ReplayReport:
-    """One device's whole replay of one model version, frames and summary joined.
+    """One device's whole pass over one cycle's sample, frames and summary joined.
 
     What the canary gate reads. It is a reduction of the objects under
     `telemetry_prefix` rather than a document anything writes, which is why the
     two counts are separate fields: `replayed` is what the device said it put
-    through the model and `latencies_ms` is what actually arrived. A replay whose
-    summary claims 500 frames and whose batches carry 300 is a replay that lost
-    messages, and a report that stored one number could not say so.
+    through the model and `latencies_ms` is what actually arrived. A pass whose
+    summary claims `POOL_SAMPLE` frames and whose batches carry nine thousand is
+    a pass that lost messages, and a report that stored one number could not say
+    so.
+
+    Lost telemetry is a canary failure and not a ranking failure. The predictions
+    went to S3 by another route, so a short telemetry run says the device's
+    connection dropped messages, not that the cycle scored fewer frames --
+    `selection` checks the parquet's own row count against the sample for that.
 
     `artifact_sha256` is the digest the device computed over the file it loaded,
     not the one Greengrass verified on download. The service checks its own copy

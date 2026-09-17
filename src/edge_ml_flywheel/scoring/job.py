@@ -7,17 +7,17 @@ state machine and a CLI read one definition rather than two.
 **A Processing job rather than a Batch Transform.** Both would produce the same
 detections, and the difference is what each costs to own. A transform needs a
 SageMaker `Model` resource, an inference handler answering a request-response
-contract, and it writes one output object per input object -- which at 67,000
-images is 67,000 objects and a compaction step to turn them into the one parquet
-each consumer reads. A Processing job loads the model once, walks the channel,
-and writes the file. The service is not what makes this the evaluation plane; the
-detections are, and both services emit the same ones.
+contract, and it writes one output object per input object -- 5,000 objects and a
+compaction step to turn them into the one parquet each consumer reads. A
+Processing job loads the model once, walks the channel, and writes the file. The
+service is not what makes this the evaluation plane; the detections are, and both
+services emit the same ones.
 
-**One job per seed, both cohorts inside it.** `eval` and the remaining pool are
-two input channels and two output channels of a single job, because the expensive
-parts -- acquiring a GPU, loading the checkpoint -- are paid per job and not per
-cohort. Two jobs would pay them twice to keep two lists apart that the container
-keeps apart anyway.
+**One job per seed, one cohort inside it.** This job covers `eval`: the 5,000
+frozen images every reported metric is computed over. The pool is scored on the
+device by the model deployed to it, which is what makes the selector's
+uncertainty the fleet's uncertainty rather than a cloud checkpoint's. See
+`fleet.replay` and `COHORTS` below.
 
 **Three things this request deliberately does not carry**, all for
 `training.job`'s reasons. No `VpcConfig`, so the job reaches S3 over SageMaker's
@@ -35,7 +35,6 @@ from typing import Any, Final
 
 from edge_ml_flywheel.conventions import (
     MAX_DETS,
-    SCORED_COHORTS,
     TRAINING_CODE_FILE,
     Buckets,
     Cohort,
@@ -128,19 +127,18 @@ def artifact_for(precision: Precision) -> ModelArtifact:
     return ModelArtifact.ONNX if precision is Precision.INT8 else ModelArtifact.TORCH
 
 
-def cohorts_for(precision: Precision) -> frozenset[Cohort]:
-    """Which cohorts one pass covers.
-
-    The int8 pass takes `eval` alone. The pool is scored to be ranked, and the
-    ranking is the selector's -- built from the model the cycle trained, not from
-    a quantized copy of it. Scoring 62,000 frames a second time would spend an
-    hour producing boxes nothing reads.
-
-    A function rather than only a property on `Target`, because the container
-    reads it too: a job that scored a cohort it was given no output channel for
-    would do the work and then drop it.
-    """
-    return frozenset({Cohort.EVAL}) if precision is Precision.INT8 else SCORED_COHORTS
+# Which cohorts this job covers, at either precision: `eval`, and nothing else.
+#
+# **The pool is not scored in the cloud at all.** It is scored on the device, by
+# the int8 artifact actually deployed, as the cycle's fleet round trip -- so the
+# ranking is the uncertainty of the model driving rather than of a checkpoint
+# that never left the account. This job produces the ruler; the fleet produces
+# the catalogue. See `fleet.replay`.
+#
+# A constant rather than the function of `Precision` this was, because the answer
+# stopped depending on the argument. `SCORED_COHORTS` still holds both, since a
+# pool detections key is still a key something writes -- just not this job.
+COHORTS: Final = frozenset({Cohort.EVAL})
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,9 +321,7 @@ def inputs(target: Target, scoring: Scoring) -> list[dict[str, Any]]:
             ),
         ),
     ]
-    channels.extend(
-        _manifest_input(target, cohort) for cohort in sorted(cohorts_for(scoring.precision))
-    )
+    channels.extend(_manifest_input(target, cohort) for cohort in sorted(COHORTS))
     return channels
 
 
@@ -348,7 +344,7 @@ def outputs(target: Target, scoring: Scoring) -> list[dict[str, Any]]:
                 "S3UploadMode": "EndOfJob",
             },
         }
-        for cohort in sorted(cohorts_for(scoring.precision))
+        for cohort in sorted(COHORTS)
     ]
 
 

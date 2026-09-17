@@ -73,6 +73,20 @@ locals {
   # from, and a device has no business reaching one.
   fleet_image_objects = "${local.bucket_arns["data"]}/${local.raw_train_images_prefix}*"
 
+  # `detections_key(version, seed, POOL, INT8, cycle)`. The one prefix a device
+  # writes, and the only write grant it holds over any bucket.
+  #
+  # Narrowed to `cohort=pool/precision=int8/`, which is exactly what a device
+  # produces. The fp32 detections are the cloud pass's -- every metric the
+  # project reports is computed from them -- and `cohort=eval` is the frozen
+  # ruler; a device that could overwrite either could move a number no gate
+  # would notice had moved.
+  #
+  # Writing predictions opens no path to ground truth: a box and a confidence
+  # are functions of an image and a model, so the label wall above is untouched
+  # by this statement.
+  fleet_detections_objects = "${local.bucket_arns["artifacts"]}/run_id=*/cycle=*/detections/version=*/seed=*/cohort=pool/precision=int8/*"
+
   # `telemetry_prefix`, one level wider. The IoT rule writes here; nothing on the
   # device does, which is the point of routing through IoT Core at all.
   fleet_telemetry_objects = "${local.bucket_arns["telemetry"]}/fleet/*"
@@ -389,11 +403,49 @@ data "aws_iam_policy_document" "fleet" {
     ]
   }
 
+  # The cycle's ranking, as the device produced it. This is the one write a
+  # device performs, and it is what makes the selector's uncertainty the fleet's
+  # own: the pool is scored here, by the int8 artifact deployed, and the
+  # detections come back as a file rather than as telemetry because a ranking
+  # computed from whichever MQTT messages survived is not a ranking.
+  #
+  # `PutObject` alone. No delete, no overwrite of anything but its own key, and
+  # no read -- a device has no reason to open a detections file, including the
+  # one it wrote.
+  statement {
+    sid       = "WriteTheDetectionsItProduced"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = [local.fleet_detections_objects]
+  }
+
   statement {
     sid       = "ResolveBucketRegion"
     effect    = "Allow"
     actions   = ["s3:GetBucketLocation"]
     resources = [local.bucket_arns["data"], local.bucket_arns["artifacts"]]
+  }
+
+  # How the cycle finds out the pass is done. The execution is blocked in
+  # `FleetScore` on a task token this device was handed in its configuration,
+  # and these two calls are the only way to return it.
+  #
+  # Unscoped by resource, and that is the API rather than an omission: a task
+  # token is itself the capability, so the grant is "may resume an execution it
+  # was given a token for" and the only execution it ever holds a token for is
+  # the one that deployed it. There is no `states:StartExecution`, no
+  # `StopExecution` and no read -- a device can finish the cycle waiting on it
+  # and can do nothing else to a state machine.
+  statement {
+    sid    = "ResumeTheCycleWaitingOnIt"
+    effect = "Allow"
+
+    actions = [
+      "states:SendTaskSuccess",
+      "states:SendTaskFailure",
+    ]
+
+    resources = ["*"]
   }
 
   # What a replay actually reports. Scoped to this project's topic root and to

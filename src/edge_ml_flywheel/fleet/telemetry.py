@@ -103,11 +103,7 @@ def frames_document(source: Source, seq: int, frames: Sequence[FrameRow]) -> dic
         **_envelope(TelemetryKind.FRAMES, source),
         "seq": seq,
         "frames": [
-            {
-                "image_id": str(frame.image_id),
-                "inference_ms": frame.inference_ms,
-                "scores": list(frame.scores),
-            }
+            {"image_id": str(frame.image_id), "inference_ms": frame.inference_ms}
             for frame in frames
         ],
     }
@@ -141,7 +137,6 @@ def _frames(document: Mapping[str, Any]) -> list[FrameRow]:
         FrameRow(
             image_id=parse_image_id(str(frame["image_id"])),
             inference_ms=float(frame["inference_ms"]),
-            scores=tuple(float(score) for score in frame["scores"]),
         )
         for frame in document["frames"]
     ]

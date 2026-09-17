@@ -1,27 +1,30 @@
-"""The caller's side of selection: score the pool, rank it, write what was chosen.
+"""The caller's side of selection: rank what the fleet reported, write what was
+chosen.
 
-`scoring.launch`'s shape for the step that consumes what that job produced, and
-it reuses `training.launch`'s account helpers rather than restating them -- the
+`scoring.launch`'s shape for the step that consumes what a pass produced, and it
+reuses `training.launch`'s account helpers rather than restating them -- the
 session, the bucket names, the run registration and the S3 primitives are the
 same facts about the same account.
 
-**There is no job here.** Selection is arithmetic over a file the scoring job
-already wrote, so this runs in the control Lambda rather than on an instance: the
-expensive pass over 62,000 images happened upstream, and what is left is a mean
-per image and a sort.
+**There is no job here.** Selection is arithmetic over a file that already
+exists, so this runs in the control Lambda rather than on an instance: the pass
+over the sample happened on the device, and what is left is a mean per image and
+a sort.
 
-**Nothing here reads a label.** The detections are predictions, the manifest is a
+**Nothing here reads a label.** The detections are predictions, the sample is a
 list of image IDs, and the ranking is a function of the two. That is what keeps
 selection inside the label wall by construction -- the control plane is denied
 `raw/labels/` outright, and this step has no reason to want it.
 
-**The model that ranks is the one this cycle just scored.** Not the champion: the
-pool manifest this cycle wrote is exactly what that model was run over, so the
-scores cover the set being ranked with nothing to reconcile. A rejected
-challenger still ranks, which is the rule the rest of the cycle already follows
--- the labels stay bought and the champion stays put.
+**The model that ranks is the one the fleet is running.** Not by policy: the
+detections come from a device, and the only model a device has is the deployed
+champion. A cycle that promoted ranks with its challenger because that
+challenger was deployed a state earlier; a cycle that rejected one ranks with the
+champion still installed. Either way the labels stay bought and the ranking is a
+statement about a model that really ran on real hardware.
 """
 
+import json
 import logging
 import tempfile
 from collections import Counter
@@ -36,12 +39,14 @@ from edge_ml_flywheel.conventions import (
     Cycle,
     ImageId,
     ModelVersion,
+    Precision,
     RunId,
     Seed,
     detections_prefix,
     model_version_cycle,
     model_version_run_id,
-    scoring_manifest_key,
+    parse_image_id,
+    replay_manifest_key,
     selection_ranking_key,
     uri,
 )
@@ -49,7 +54,6 @@ from edge_ml_flywheel.scoring import detections
 from edge_ml_flywheel.selection import ranking
 from edge_ml_flywheel.selection.score import BAND_LOW, Predictions, score_pool
 from edge_ml_flywheel.selection.select import by_uncertainty, select
-from edge_ml_flywheel.training import images
 from edge_ml_flywheel.training import launch as base
 
 log = logging.getLogger(__name__)
@@ -80,9 +84,18 @@ def rank(
     aws: boto3.Session,
     version: ModelVersion,
     seed: Seed,
+    cycle: Cycle | None = None,
     replace: bool = False,
 ) -> Ranked:
-    """Rank this cycle's pool and write the file the purchase is charged against.
+    """Rank this cycle's sample and write the file the purchase is charged against.
+
+    **`version` is the model that scored, `cycle` is the cycle being decided, and
+    they are not always the same cycle.** A cycle that promoted ranks with its
+    own challenger and the two agree. A cycle that rejected one ranks with the
+    champion still deployed, which was trained earlier -- so the detections are
+    keyed by that older version under *this* cycle's prefix, and the ranking is
+    written under this cycle. Omitting `cycle` means the model's own, which is
+    the promoting case.
 
     The order is the order the failures are worth having in. The refusal to
     overwrite comes first, before anything is downloaded, so a cycle that has
@@ -103,7 +116,8 @@ def rank(
     batch the record no longer names.
     """
     run_id = model_version_run_id(version)
-    cycle = model_version_cycle(version)
+    if cycle is None:
+        cycle = model_version_cycle(version)
     run = base.registration(aws, run_id)
 
     artifacts = base.buckets(aws).artifacts
@@ -117,7 +131,7 @@ def rank(
     with tempfile.TemporaryDirectory() as scratch:
         work = Path(scratch)
         pool = _ranked_pool(aws, artifacts, run_id, cycle, work)
-        predictions = _predictions(aws, artifacts, version, seed, work)
+        predictions = _predictions(aws, version, seed, cycle, work)
 
         scores = score_pool(pool, predictions)
         order = by_uncertainty(pool, scores, len(pool))
@@ -134,43 +148,63 @@ def rank(
 def _ranked_pool(
     aws: boto3.Session, artifacts: str, run_id: RunId, cycle: Cycle, work: Path
 ) -> tuple[ImageId, ...]:
-    """The images this cycle ranks, read off the manifest that was scored.
+    """The images this cycle ranks: the sample the device was given.
 
-    The manifest rather than the detections, for `training.images.manifest_ids`'
-    reason: a model that found nothing in a frame contributes no row, so the
-    detections name the images with boxes and the manifest names the images that
-    were put in front of the model. The difference is every blind spot, which is
-    the top of the ranking.
+    The sample rather than the detections, and the difference is every blind
+    spot. A frame the model found nothing in contributes no row to the parquet,
+    so the detections name the images with boxes while this names the images that
+    were put in front of the model -- and the frames in the gap are the ones
+    `score_pool` ranks at the top.
+
+    A JSON array rather than a SageMaker `ManifestFile`, because the reader that
+    matters is the device: it resolves each ID through `raw_image_key` under its
+    own grant, and the envelope a Processing channel wants would be an envelope
+    the component has to strip.
     """
-    key = scoring_manifest_key(run_id, cycle, Cohort.POOL)
+    key = replay_manifest_key(run_id, cycle)
     if not base.exists(aws, artifacts, key):
         raise SystemExit(
             f"{uri(artifacts, key)} does not exist, so nothing says which images this cycle "
-            f"ranked. Run score prepare for this cycle."
+            f"put in front of the fleet. Run score prepare for this cycle."
         )
 
     local = work / Path(key).name
     aws.client("s3").download_file(artifacts, key, str(local))
-    return images.manifest_ids(local)
+    document = json.loads(local.read_text())
+    if not isinstance(document, list) or not document:
+        raise SystemExit(f"{uri(artifacts, key)} is not a non-empty list of image IDs")
+    return tuple(parse_image_id(str(value)) for value in document)
 
 
 def _predictions(
-    aws: boto3.Session, artifacts: str, version: ModelVersion, seed: Seed, work: Path
+    aws: boto3.Session,
+    version: ModelVersion,
+    seed: Seed,
+    cycle: Cycle,
+    work: Path,
 ) -> Predictions:
-    """What the model saw in the pool, above the floor the ranking reads.
+    """What the fleet saw in the sample, above the floor the ranking reads.
 
-    `BAND_LOW` is passed as a floor rather than applied afterwards, because the
-    file is millions of rows at the scoring job's 0.001 confidence floor and none
-    below 0.05 change a score. See `scoring.detections.read`.
+    `precision=INT8`, and that is the whole point of the arrangement: the only
+    model that scores the pool is the quantized graph deployed to a device, so
+    the uncertainty a label is bought on is the uncertainty of the model actually
+    driving. The fp32 prefix holds `eval` alone.
+
+    `BAND_LOW` is still passed as a floor even though the device already writes
+    at it. Applying it here costs nothing on a file that has none below the line,
+    and it keeps this reader correct against a file written by something that did
+    emit the tail -- a re-run of the old cloud pass, or a device on an older
+    component version. See `scoring.detections.read`.
     """
-    prefix = detections_prefix(version, seed, Cohort.POOL)
+    artifacts = base.buckets(aws).artifacts
+    prefix = detections_prefix(version, seed, Cohort.POOL, Precision.INT8, cycle)
     root = work / "detections"
 
     found = base.download_prefix(aws, artifacts, prefix, root)
     if not found:
         raise SystemExit(
-            f"{uri(artifacts, prefix)} holds no detections, so seed {seed} of {version} was never "
-            f"scored over the pool. Run the scoring job for this seed."
+            f"{uri(artifacts, prefix)} holds no detections, so no device has scored this cycle's "
+            f"sample with seed {seed} of {version}. The fleet pass runs after promotion."
         )
 
     of_image = detections.grouped(root, BAND_LOW)

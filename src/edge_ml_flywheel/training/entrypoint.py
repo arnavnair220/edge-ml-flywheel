@@ -50,7 +50,7 @@ from edge_ml_flywheel.conventions import (
     sha256sums_document,
     uri,
 )
-from edge_ml_flywheel.training import dataset, export, labels
+from edge_ml_flywheel.training import dataset, export, images, labels
 from edge_ml_flywheel.training.job import (
     BASE_CHANNEL,
     BOOTSTRAP_CHANNEL,
@@ -95,6 +95,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch", type=int, required=True)
     parser.add_argument("--freeze", type=int, required=True)
     parser.add_argument("--workers", type=int, required=True)
+    # Required like the rest, rather than defaulted to 0. Every request carries
+    # it, and a default here would silently train on every label the run has
+    # bought if the hyperparameter were ever dropped -- which is the failure this
+    # argument exists to end, not one to leave a quiet path back to.
+    parser.add_argument("--max_images", type=int, required=True)
     parser.add_argument("--artifacts_bucket", required=True)
     return parser
 
@@ -154,15 +159,28 @@ def digest(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def build_dataset() -> Path:
-    """Channels in, a YOLO dataset directory out."""
+def build_dataset(max_images: int = 0) -> Path:
+    """Channels in, a YOLO dataset directory out.
+
+    `max_images` caps the labels to the same images the manifest names, and the
+    arithmetic is `images.capped_labels` rather than anything written here: the
+    labels arrive on whole prefixes that no cap can be expressed on, so the
+    number has to be re-derived where they are read, and this module cannot be
+    imported without a GPU stack. Nothing here decides *which* images -- it
+    re-derives what the manifest already says, and `dataset.write` still refuses
+    the pair if the two ever disagree.
+    """
     started = time.monotonic()
-    labeled = labels.collect([channel(BOOTSTRAP_CHANNEL), channel(PURCHASES_CHANNEL)])
+    collected = labels.collect([channel(BOOTSTRAP_CHANNEL), channel(PURCHASES_CHANNEL)])
     log.info(
         "labeled set: %d images and %d boxes before the class filter",
-        len(labeled),
-        labels.box_count(labeled),
+        len(collected),
+        labels.box_count(collected),
     )
+
+    labeled = images.capped_labels(collected, max_images)
+    if len(labeled) != len(collected):
+        log.info("capped the labels to %d images, matching the manifest", len(labeled))
 
     root = WORK / "dataset"
     dataset.write(root, channel(IMAGES_CHANNEL), labeled, CLASS_SET)
@@ -280,7 +298,7 @@ def main(argv: list[str] | None = None) -> None:
     seed_everything(Seed(args.seed))
     inventory([IMAGES_CHANNEL, BOOTSTRAP_CHANNEL, PURCHASES_CHANNEL, BASE_CHANNEL])
 
-    root = build_dataset()
+    root = build_dataset(args.max_images)
 
     base = next(iter(sorted(channel(BASE_CHANNEL).glob("*.pt"))), None)
     if base is None:

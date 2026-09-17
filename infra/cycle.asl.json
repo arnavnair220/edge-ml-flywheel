@@ -85,7 +85,7 @@
             "Resource": "arn:aws:states:::lambda:invoke",
             "Arguments": {
               "FunctionName": "${control_function_arn}",
-              "Payload": "{% {'step': 'train_request', 'run_id': $states.context.Execution.Input.run_id, 'cycle': $cycle, 'seed': $states.input.seed, 'epochs': $states.context.Execution.Input.epochs, 'instance_type': $states.context.Execution.Input.instance_type} %}"
+              "Payload": "{% {'step': 'train_request', 'run_id': $states.context.Execution.Input.run_id, 'cycle': $cycle, 'seed': $states.input.seed, 'epochs': $states.context.Execution.Input.epochs, 'max_images': $states.context.Execution.Input.max_images, 'instance_type': $states.context.Execution.Input.instance_type} %}"
             },
             "Output": "{% $states.result.Payload %}",
             "Retry": [
@@ -380,7 +380,7 @@
     },
 
     "Passed": {
-      "Comment": "The short-circuit. A failed gate leaves the champion in place and the labels stay bought, so a rejected cycle carries on to selection rather than ending -- there is no state in which a rejection costs the run its purchase.",
+      "Comment": "The short-circuit, and it is narrower than it sounds. A failed gate leaves the champion in place and the labels stay bought, so a rejected cycle carries on through the fleet round trip to selection rather than ending -- there is no state in which a gate verdict costs the run its purchase. What it skips is the pointer flip: the champion that stays is the model that then scores this cycle's pool sample.",
       "Type": "Choice",
       "Choices": [
         {
@@ -388,11 +388,11 @@
           "Next": "Promote"
         }
       ],
-      "Default": "Select"
+      "Default": "Deploy"
     },
 
     "Promote": {
-      "Comment": "The champion pointer flip, and the state that makes the next cycle a comparison rather than another baseline. One conditional update on the item the cycle was claimed from, so the pointer arrives back at ClaimCycle with the cycle number. Only reached when the gates passed -- the registry already recorded the verdict either way, and promotion is what a rejected challenger is denied. The condition only ever moves forward: a version sorts lexicographically by its padded cycle within one run, so a cycle re-run against an older model is refused here rather than silently regressing the champion every later comparison is paired against. What this does NOT do is deploy: the fleet_config device items take a desired_version when the fleet plane writes one, and the registry's own candidate-to-archived states land with it.",
+      "Comment": "The champion pointer flip, and the state that makes the next cycle a comparison rather than another baseline. One conditional update on the item the cycle was claimed from, so the pointer arrives back at ClaimCycle with the cycle number. Only reached when the gates passed -- the registry already recorded the verdict either way, and promotion is what a rejected challenger is denied. The condition only ever moves forward: a version sorts lexicographically by its padded cycle within one run, so a cycle re-run against an older model is refused here rather than silently regressing the champion every later comparison is paired against. Deployment is the state after this one rather than part of it, because a rejected cycle deploys too -- the champion, carrying this cycle's sample.",
       "Type": "Task",
       "Resource": "arn:aws:states:::dynamodb:updateItem",
       "Arguments": {
@@ -418,16 +418,102 @@
           "BackoffRate": 2
         }
       ],
-      "Next": "Select"
+      "Next": "Deploy"
     },
 
-    "Select": {
-      "Comment": "Ranks the remaining pool by mean per-object uncertainty over the detections `Score` wrote, and files the ranking with this cycle's batch flagged on it. One seed rather than every seed the cycle scored, unlike `EvaluateRequest`: an uncertainty score is a statement about what one detector found in one frame, so a mean over seeds would rank the pool by a model that does not exist. It is `$seeds_scored[0]`, which is the lowest seed and the one `Register` calls deployed -- so the model that spends the budget is the model that ships. No SageMaker call and no job: the expensive pass over 62,000 images already happened, and what is left is a mean per image and a sort. `replace` is carried for `Prepare`'s reason, and it is the more consequential use of that flag -- the file this writes is what the oracle charges against.",
+    "Deploy": {
+      "Comment": "Publishes this cycle's component version over whatever model is now champion: the challenger on a cycle that promoted, the standing champion on one that did not. `$passed ? $registered : $champion` is that choice, and it is made here rather than by two states because the work either way is identical. The component version is numbered by THIS cycle and not by the cycle that trained the model -- the recipe names this cycle's replay manifest, and a component version is immutable once published, so a champion redeployed three cycles running needs three of them. Publishing is separate from deploying because only a deployment can carry a task token.",
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Arguments": {
         "FunctionName": "${control_function_arn}",
-        "Payload": "{% {'step': 'select', 'version': $seeds_scored[0].version, 'seed': $seeds_scored[0].seed, 'replace': $states.context.Execution.Input.replace} %}"
+        "Payload": "{% {'step': 'deploy', 'run_id': $states.context.Execution.Input.run_id, 'cycle': $cycle, 'version': $passed ? $registered : $champion, 'seed': $seeds_scored[0].seed} %}"
+      },
+      "Output": {},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "FleetScore"
+    },
+
+    "FleetScore": {
+      "Comment": "The cycle's pass over the unlabeled pool, which happens on the device and not in this account's compute. The token goes out as a configuration value of the deployment, the device scores `POOL_SAMPLE` frames with the int8 artifact it is running, writes the detections to S3 and calls SendTaskSuccess; this state waits in between. That wait is the cost the design accepted for a ranking produced by the model actually driving. Two hours and no retry: the timeout is the only thing between a device that cannot report and an execution waiting forever, and a retry would re-deploy onto the same hardware that just failed to answer. A device that fails loudly calls SendTaskFailure instead and the execution stops in seconds rather than in hours.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "TimeoutSeconds": 7200,
+      "Arguments": {
+        "FunctionName": "${control_function_arn}",
+        "Payload": "{% {'step': 'fleet_score', 'run_id': $states.context.Execution.Input.run_id, 'cycle': $cycle, 'version': $passed ? $registered : $champion, 'task_token': $states.context.Task.Token} %}"
+      },
+      "Output": {},
+      "Next": "Canary"
+    },
+
+    "Canary": {
+      "Comment": "The fourth gate, and the one that could not be asked until now because it needs an artifact that has reached a device. It is a state rather than a command run afterwards for one reason only: the execution is already waiting on that device for the ranking it is about to buy from, so folding the verdict in costs nothing it was not already paying. Two decisions come out of one verdict -- `passed` says whether the rollout stands, `ranks` says whether the detections may be bought from -- and the rollback of a failed rollout happens inside the step, so a device is never left running an artifact the cycle has already judged.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${control_function_arn}",
+        "Payload": "{% {'step': 'canary', 'run_id': $states.context.Execution.Input.run_id, 'version': $passed ? $registered : $champion, 'champion': $champion} %}"
+      },
+      "Assign": {
+        "ranks": "{% $states.result.Payload.ranks %}",
+        "canary_reason": "{% $states.result.Payload.reason %}"
+      },
+      "Output": {},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Ranked"
+    },
+
+    "Ranked": {
+      "Comment": "The one branch that can end a cycle having bought nothing, and it is not a gate verdict. A canary that failed on throughput still ranks: the model ran correctly and slowly, the rollout is already rolled back, and slow detections are still detections. A canary that failed on the digest or on a short pass does not, because a ranking computed from unidentified bytes is not a ranking and buying a thousand labels off it spends real budget on a fiction. That is a fault to stop for rather than a cycle to continue past, so the run ends here with the verdict's own reason.",
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $ranks %}",
+          "Next": "Select"
+        }
+      ],
+      "Default": "PassNotTrusted"
+    },
+
+    "PassNotTrusted": {
+      "Comment": "The device produced detections the cycle may not spend against. Nothing is bought, the rollout has already been rolled back by the canary step, and the run stops for someone to look at the device -- which is the correct response to bytes that do not hash to what the gates were reported over.",
+      "Type": "Fail",
+      "Error": "PassNotTrusted",
+      "Cause": "{% $canary_reason %}"
+    },
+
+    "Select": {
+      "Comment": "Ranks this cycle's sample by mean per-object uncertainty over the detections the device wrote, and files the ranking with the batch flagged on it. One seed rather than every seed the cycle scored, unlike `EvaluateRequest`: an uncertainty score is a statement about what one detector found in one frame, so a mean over seeds would rank the pool by a model that does not exist. It is `$seeds_scored[0]`, the lowest seed and the one `Register` calls deployed -- so the model that spends the budget is the model that ships. `cycle` travels beside the version because the two can name different cycles: a rejected cycle ranks with the champion, whose version was minted earlier, and the ranking belongs to the cycle doing the buying. No job here: the pass happened on the device, and what is left is a mean per image and a sort. `replace` is carried for `Prepare`'s reason, and it is the more consequential use of that flag -- the file this writes is what the oracle charges against.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${control_function_arn}",
+        "Payload": "{% {'step': 'select', 'version': $passed ? $registered : $champion, 'seed': $seeds_scored[0].seed, 'cycle': $cycle, 'replace': $states.context.Execution.Input.replace} %}"
       },
       "Output": {},
       "Retry": [

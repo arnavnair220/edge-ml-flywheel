@@ -1303,18 +1303,17 @@ class TestTheComponentAddress:
 
 
 class TestFrameRow:
-    def test_a_frame_the_model_found_nothing_in_is_a_real_row(self) -> None:
-        """The champion's blind spots are what the selector ranks highest, so an
-        empty frame is an observation rather than a row to drop."""
-        assert FrameRow(image_id=IMAGE, inference_ms=41.0, scores=()).scores == ()
+    def test_a_frame_carries_its_latency_and_its_identity(self) -> None:
+        """Two facts and not the predictions. The boxes are in the parquet the
+        device writes to S3, because the ranking is bought from them and MQTT
+        drops messages; this record is the operational half."""
+        row = FrameRow(image_id=IMAGE, inference_ms=41.0)
+
+        assert (row.image_id, row.inference_ms) == (IMAGE, 41.0)
 
     def test_a_frame_that_took_no_time_was_not_inferred(self) -> None:
         with pytest.raises(ValueError, match="not a frame that was inferred"):
-            FrameRow(image_id=IMAGE, inference_ms=0.0, scores=())
-
-    def test_a_confidence_outside_zero_to_one_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="not a confidence"):
-            FrameRow(image_id=IMAGE, inference_ms=41.0, scores=(0.5, 1.4))
+            FrameRow(image_id=IMAGE, inference_ms=0.0)
 
 
 def a_report(**overrides: Any) -> ReplayReport:

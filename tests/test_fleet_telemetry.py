@@ -35,8 +35,8 @@ SOURCE = telemetry.Source(run_id=RUN, version=VERSION, thing="device-1")
 IMAGES = (ImageId("0000f77c-6257be58"), ImageId("0000f77c-62c2a288"))
 
 
-def a_frame(image_id: ImageId, ms: float, *scores: float) -> FrameRow:
-    return FrameRow(image_id=image_id, inference_ms=ms, scores=tuple(scores))
+def a_frame(image_id: ImageId, ms: float) -> FrameRow:
+    return FrameRow(image_id=image_id, inference_ms=ms)
 
 
 def a_summary(source: telemetry.Source = SOURCE, **overrides: Any) -> dict[str, Any]:
@@ -52,7 +52,7 @@ def a_summary(source: telemetry.Source = SOURCE, **overrides: Any) -> dict[str, 
 
 def a_replay(source: telemetry.Source = SOURCE, **overrides: Any) -> list[dict[str, Any]]:
     """A whole replay: one batch of two frames, and the summary that closes it."""
-    frames = [a_frame(IMAGES[0], 20.0, 0.9), a_frame(IMAGES[1], 30.0)]
+    frames = [a_frame(IMAGES[0], 20.0), a_frame(IMAGES[1], 30.0)]
     return [
         telemetry.frames_document(source, 0, frames),
         a_summary(source, **overrides),

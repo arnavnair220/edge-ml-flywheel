@@ -226,3 +226,50 @@ class TestTheImageManifest:
         cap nobody chose silently shrinking a real run."""
         image_ids = [an_image_id(index) for index in range(4)]
         assert images.capped(image_ids, 0) == tuple(sorted(image_ids))
+
+
+class TestBothSidesOfTheCap:
+    """The manifest and the labels have to name one set, and only the manifest
+    could be capped where the cycle is prepared.
+
+    The labels arrive on whole prefixes -- the bootstrap file and every purchase,
+    appended to and never rewritten -- so the container re-derives the same cap
+    rather than being handed a second document to keep in step. Every skeleton
+    run before this went out as a few hundred images beside every label the run
+    had bought, and was refused below after the instance had been paid for.
+    """
+
+    def a_labeled_set(self, count: int) -> dict[ImageId, list[Box]]:
+        return {an_image_id(index): [a_box()] for index in range(count)}
+
+    def test_the_labels_kept_are_the_images_the_manifest_names(self) -> None:
+        labeled = self.a_labeled_set(10)
+
+        named = images.capped(tuple(labeled), 3)
+        kept = images.capped_labels(labeled, 3)
+
+        assert tuple(sorted(kept)) == named
+
+    def test_a_capped_pair_is_accepted(self, tmp_path: Path) -> None:
+        """The whole point: 300 images and 300 labels rather than 300 and 8,000."""
+        labeled = self.a_labeled_set(10)
+        named = images.capped(tuple(labeled), 3)
+
+        stats = dataset.write(
+            tmp_path / "dataset",
+            an_image_dir(tmp_path, list(named)),
+            images.capped_labels(labeled, 3),
+            NINE,
+        )
+
+        assert stats.images == 3
+
+    def test_zero_leaves_every_label_alone(self) -> None:
+        """A real cycle passes 0, and it must not pay a copy of the labeled set
+        for a branch it never takes."""
+        labeled = self.a_labeled_set(4)
+        assert images.capped_labels(labeled, 0) is labeled
+
+    def test_a_cap_above_the_labeled_set_is_not_a_cap(self) -> None:
+        labeled = self.a_labeled_set(4)
+        assert images.capped_labels(labeled, 99) is labeled

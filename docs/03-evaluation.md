@@ -1,13 +1,18 @@
 # Stage 3 — Evaluation
 
-Runs the model over the images, matches the detections against the eval cohort's ground truth,
-applies three of the four gates, and caches the per-image match arrays every later statistic reads.
-See the [architecture overview](00-overview.md) for the stage's position in the loop.
+Runs the model over the eval cohort, matches the detections against its ground truth, applies three
+of the four gates, and caches the per-image match arrays every later statistic reads. See the
+[architecture overview](00-overview.md) for the stage's position in the loop.
 
 Two SageMaker Processing jobs per cycle. **Scoring** produces detections, once per seed, and holds no
 label grant. **Matching** compares them against ground truth, once per cycle, and is the single
 principal admitted to `labels/cohort=eval/`. The split is what lets the scoring role be denied every
 label prefix outright rather than trusted to stay away from one.
+
+**This stage covers `eval` and nothing else.** The pool is scored on the device, by the deployed
+model, as part of the fleet round trip: this pass measures a model, that one ranks a sample. What the
+two share is a detections schema and a reader, not a job. See
+[05-fleet-and-deployment.md](05-fleet-and-deployment.md).
 
 ---
 
@@ -18,15 +23,14 @@ label prefix outright rather than trusted to stay away from one.
 | Container | `pytorch-training:2.9.0-gpu-py312-cu130-ubuntu22.04-sagemaker` |
 | Instance | `ml.g4dn.xlarge`, on demand — `ml.m5.xlarge` for the int8 pass |
 | Entry point | `container/score.py`, which calls `scoring.entrypoint` |
-| Max runtime | 3 hours, 1 hour for the int8 pass |
+| Max runtime | 1 hour |
 
 A Processing job rather than a Batch Transform. Both produce the same detections; a transform needs a
-`Model` resource, an inference handler and one output object per input object — 67,000 objects and a
+`Model` resource, an inference handler and one output object per input object — 5,000 objects and a
 compaction step. A Processing job loads the model once, walks the channel and writes the file.
 
-One job per seed with both cohorts inside it. `eval` and the remaining pool are two input channels
-and two output channels of a single job, because acquiring a GPU and loading the checkpoint are paid
-per job rather than per cohort.
+One job per seed, one cohort inside it. `eval` is 5,000 images, so the pass is minutes of GPU and an
+hour is a generous ceiling.
 
 | Knob | Value |
 |---|---|
@@ -38,17 +42,30 @@ per job rather than per cohort.
 `confidence_floor` is COCO's convention and far below anything a person would call a detection. AP is
 the area under a curve swept by lowering a threshold, so the low-confidence tail is most of what the
 metric integrates; raising this floor would truncate the curve and quietly lower every number the
-project reports. Selection wants the opposite and gets it by filtering at `BAND_LOW`, which is what
-lets one file serve both readers.
+project reports.
+
+**The device's floor is `BAND_LOW`, not this one, and the ranking is unchanged by the difference.**
+The tail exists here because AP integrates it. Nothing integrates the pool: `image_score` keeps only
+detections at or above `BAND_LOW`, and decides blind-spot against decisive on that filtered list, so
+a row at 0.02 contributes to no score either way. Suppression is greedy and highest-first, so a box
+below the band can be suppressed but can never suppress one above it — the surviving in-band rows are
+the same set at either floor. What the device gains by not writing the tail is a file an order of
+magnitude smaller and a bounded working set on a two-core instance.
+
+A frame with no in-band detection is therefore absent from the device's file rather than present with
+weak rows, and it still scores as a blind spot: `score_pool` is driven by the sample manifest, not by
+the file's keys, so a frame nobody detected anything in is scored rather than dropped.
 
 The int8 pass runs on CPU, and not as a saving: int8 is a CPU format. ONNX Runtime's CUDA provider
 has no kernel for most of what `quantize_static` emits and falls back to float, which would measure a
-model the device will never run. It covers `eval` alone.
+model the device will never run. It covers `eval`, and it is what the edge gate compares against the
+fp32 pass to say what quantization cost.
 
-Detections land at `detections_prefix(version, seed, cohort)`. The job carries no `VpcConfig`, no
-label channel of any kind, and no `max_images` — the images scored are exactly those named in
-`scoring_manifest_key`, and that document is the record of what was ranked. See
-[infra/scoring.tf](../infra/scoring.tf).
+Detections land at `detections_prefix(version, seed, cohort)` with `cohort=eval`. The device writes
+the pool's detections to the same family of keys under `precision=int8`, so the two passes share a
+schema and a reader and differ only in which machine produced them. The job carries no `VpcConfig`,
+no label channel of any kind, and no `max_images` — the images scored are exactly those named in
+`scoring_manifest_key`. See [infra/scoring.tf](../infra/scoring.tf).
 
 ---
 

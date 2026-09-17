@@ -16,21 +16,19 @@ rollback takes is the path every cycle has already exercised. A dedicated
 rollback would be code first run on the day it is needed.
 """
 
-import hashlib
 import io
 import json
 import logging
 import zipfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from random import Random
 from typing import Any, Final
 
 import boto3
-import pyarrow.parquet as pq
 
 from edge_ml_flywheel.conventions import (
-    CYCLE_DIGITS,
+    PROJECT,
     Buckets,
     Cycle,
     ImageId,
@@ -40,19 +38,24 @@ from edge_ml_flywheel.conventions import (
     model_component,
     model_version_cycle,
     model_version_run_id,
-    new_model_version,
-    parse_component_version,
     parse_image_id,
+    parse_model_version,
     replay_code_key,
     replay_manifest_key,
-    selection_ranking_key,
     telemetry_run_prefix,
     uri,
 )
-from edge_ml_flywheel.fleet import component
+from edge_ml_flywheel.fleet import component, telemetry
+from edge_ml_flywheel.gates.canary import canary_gate, detections_stand
+from edge_ml_flywheel.registry import launch as registry
 from edge_ml_flywheel.training import launch as base
 
 log = logging.getLogger(__name__)
+
+# The instance Terraform tags as the fleet's one device, spelled here for
+# `__main__.THING_GROUP`'s reason: the name is a fact about the account that a
+# second tool would otherwise have to be run to discover.
+DEVICE_NAME: Final = f"{PROJECT}-device-1"
 
 # Fixed timestamp in every zip entry, for `training.launch.archive`'s reason: a
 # ZIP entry carries its own modification time, so two archives of one tree would
@@ -137,107 +140,35 @@ def stage_code(aws: boto3.Session, git_commit: str, code: bytes) -> str:
     return key
 
 
-def sample_frames(
-    aws: boto3.Session, run_id: RunId, cycle: Cycle, frames: int
-) -> tuple[ImageId, ...]:
-    """The pool frames this cycle's device replays, drawn out of its own ranking.
+def sampled_frames(aws: boto3.Session, run_id: RunId, cycle: Cycle) -> tuple[ImageId, ...]:
+    """The pool frames this cycle's device scores, read off what the cycle drew.
 
-    **Random, not the top of the ranking.** The fleet is the footage a device
-    drives through, and the selector is what acts on it (design section 7.2).
-    Replaying the most uncertain frames would make every confidence the device
-    reports come from the low-confidence tail, so the distribution a later check
-    compares would be a property of the draw rather than of the model.
+    **The draw is not made here.** `scoring.launch.prepare` makes it, early in
+    the cycle and before any model exists, because the sample is what the device
+    is shipped and because a draw made at deployment time could not be recorded
+    under the write-once cycle prefix the rest of the cycle was prepared under.
+    What this does is read it back and refuse a deployment whose sample is
+    missing.
 
-    **Out of the rows this cycle did not buy.** The ranking file marks its own
-    batch, and those images have labels by the time the model is deployed -- so
-    they are not the unlabeled pool any more, and including them would put frames
-    in the device's stream that the next cycle's selector can no longer sell.
-
-    **Seeded by the run and the cycle**, so a redeploy of one cycle replays the
-    identical frames. Anything else would make two attempts at one deployment
-    incomparable, and the second attempt is usually the one made after a
-    rollback.
-    """
-    ranked = _unbought(aws, run_id, cycle)
-    if len(ranked) < frames:
-        raise SystemExit(
-            f"cycle {cycle} left {len(ranked)} unbought pool images, fewer than the {frames} "
-            f"frames asked for. The pool is spent, which is the end of the run rather than a "
-            f"deployment"
-        )
-
-    drawn = tuple(sorted(Random(_draw_seed(run_id, cycle)).sample(ranked, frames)))
-    log.info("sampled %d of %d unbought pool frames for cycle %d", frames, len(ranked), cycle)
-    return drawn
-
-
-def _draw_seed(run_id: RunId, cycle: Cycle) -> int:
-    """A draw seed that is a function of the run and the cycle and nothing else.
-
-    A digest rather than `hash()`, which is salted per process: the "same frames
-    every time" property would otherwise hold within one invocation and nowhere
-    else, which is exactly the case a redeploy after a rollback is not.
-
-    The cycle is padded into the string for `purchase_event`'s reason -- it is
-    text here, so cycle 10 and cycle 1 followed by a zero must not be one seed.
-    """
-    stamp = f"{run_id}-c{cycle:0{CYCLE_DIGITS}d}"
-    return int(hashlib.sha256(stamp.encode()).hexdigest()[:16], 16)
-
-
-def _unbought(aws: boto3.Session, run_id: RunId, cycle: Cycle) -> list[ImageId]:
-    """Image IDs from the cycle's ranking that its purchase left behind.
-
-    The refusal below is a real ordering, not a defensive check. `Select` runs
-    after `Promote` in the cycle state machine, so there is a window -- seconds
-    wide, and wide enough to hit by hand -- where a version is promoted and its
-    ranking has not been written. Deploying inside it would otherwise fail as a
-    missing S3 key, which reads as a broken pipeline rather than as a deployment
-    made slightly too early.
-    """
-    key = selection_ranking_key(run_id, cycle)
-    artifacts = base.buckets(aws).artifacts
-    if not base.exists(aws, artifacts, key):
-        raise SystemExit(
-            f"{uri(artifacts, key)} does not exist, so cycle {cycle} has not yet ranked its pool. "
-            f"Selection runs after promotion, so a model can be promoted a moment before the "
-            f"frames its device would replay have been chosen. Wait for the cycle to reach "
-            f"Purchase and deploy again."
-        )
-
-    body = aws.client("s3").get_object(Bucket=artifacts, Key=key)["Body"].read()
-    table = pq.read_table(io.BytesIO(body), columns=["image_id", "selected"])
-    return [
-        parse_image_id(image_id)
-        for image_id, selected in zip(
-            table.column("image_id").to_pylist(),
-            table.column("selected").to_pylist(),
-            strict=True,
-        )
-        if not selected
-    ]
-
-
-def stage_frames(
-    aws: boto3.Session, run_id: RunId, cycle: Cycle, image_ids: Sequence[ImageId]
-) -> str:
-    """Write the sampled frame list where the recipe names it as an artifact.
-
-    Under the cycle's write-once prefix because it is the record design section
-    7.2 asks for: the small per-cycle list that ties a telemetry record back to a
-    scoring decision, and the thing that makes the device's confidences
-    regenerable offline from retained images.
+    The refusal is a real ordering rather than a defensive check. A deployment
+    made before `ScorePrepare` has run would otherwise fail on the device, an
+    hour later, as a component that started and found no frames.
     """
     key = replay_manifest_key(run_id, cycle)
     artifacts = base.buckets(aws).artifacts
-    aws.client("s3").put_object(
-        Bucket=artifacts,
-        Key=key,
-        Body=json.dumps(sorted(str(image_id) for image_id in image_ids)).encode(),
-        ContentType="application/json",
-    )
-    log.info("staged %d frames to %s", len(image_ids), uri(artifacts, key))
-    return key
+    if not base.exists(aws, artifacts, key):
+        raise SystemExit(
+            f"{uri(artifacts, key)} does not exist, so cycle {cycle} has not drawn the frames its "
+            f"device would score. Score prepare writes it; run it before deploying."
+        )
+
+    document = json.loads(aws.client("s3").get_object(Bucket=artifacts, Key=key)["Body"].read())
+    if not isinstance(document, list) or not document:
+        raise SystemExit(f"{uri(artifacts, key)} is not a non-empty list of image IDs")
+
+    drawn = tuple(parse_image_id(str(value)) for value in document)
+    log.info("cycle %d put %d pool frames in front of the fleet", cycle, len(drawn))
+    return drawn
 
 
 # ---------------------------------------------------------------------------
@@ -276,15 +207,23 @@ def publish_component(aws: boto3.Session, recipe: dict[str, Any]) -> str:
     return arn
 
 
-def redeploy(aws: boto3.Session, version: ModelVersion, target_arn: str) -> str:
+def redeploy(
+    aws: boto3.Session, version: ModelVersion, target_arn: str, task_token: str = ""
+) -> str:
     """Deploy one component version to the fleet, and return the deployment ID.
 
     The whole of both directions. Called with this cycle's version it is a
     rollout; called with the previous one it is the rollback, and the two are the
     same call because they are the same act -- a revision naming a version
     (design section 6).
+
+    `task_token` is what makes a rollout also the start of the cycle's pool pass:
+    the device reads it out of its configuration and resumes the waiting
+    execution when its detections are durable. A rollback passes none, because
+    nothing is waiting on a rollback -- the cycle that was waiting is the one
+    that failed.
     """
-    request = component.deployment(version, target_arn)
+    request = component.deployment(version, target_arn, task_token=task_token)
     response = aws.client("greengrassv2").create_deployment(**request)
     deployment_id = str(response["deploymentId"])
     log.info("deployment %s puts %s on %s", deployment_id, version, target_arn)
@@ -298,6 +237,13 @@ def deployed(aws: boto3.Session, run_id: RunId, target_arn: str) -> ModelVersion
     deployment the record of intent rather than one of two records that can
     disagree. `None` means this run has deployed nothing yet, which is a run's
     first cycle and nothing else.
+
+    **Out of the configuration, not out of the component version.** A component
+    version is numbered by the cycle that deployed it, and a cycle that rejected
+    its challenger deploys the standing champion -- so `0.5.0` can perfectly well
+    carry a model trained in cycle three, and deriving the model from the number
+    would report a version that was never on the device. `component.deployment`
+    merges the model version into every deployment for exactly this read.
 
     Only the effective deployment is asked for. A target's history holds every
     revision, and the one before the current is not the one to roll back *to* --
@@ -316,7 +262,13 @@ def deployed(aws: boto3.Session, run_id: RunId, target_arn: str) -> ModelVersion
         log.info("the effective deployment carries no %s", name)
         return None
 
-    return new_model_version(run_id, parse_component_version(entry["componentVersion"]))
+    merged = entry.get("configurationUpdate", {}).get("merge")
+    if not merged:
+        raise SystemExit(
+            f"the effective deployment of {name} names no model version. Every deployment this "
+            f"project makes merges one; this one was made by something else."
+        )
+    return parse_model_version(str(json.loads(merged)["version"]))
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +309,100 @@ def records(aws: boto3.Session, run_id: RunId) -> list[dict[str, Any]]:
                 ) from None
 
     log.info("%d telemetry records under %s", len(found), uri(telemetry_bucket, prefix))
+    return found
+
+
+@dataclass(frozen=True, slots=True)
+class Verdict:
+    """What one device pass decided, for the two decisions that read it.
+
+    `passed` is the canary gate: whether the rollout stands. `ranks` is whether
+    the detections may be bought from, which fails only when the digest or the
+    completion check did. A slow model wrote a perfectly good ranking, so the two
+    fields disagree exactly in that case -- see `gates.canary.detections_stand`.
+
+    `reason` is the gate's, unedited, because a verdict without its reason is
+    what this project exists not to record.
+    """
+
+    version: ModelVersion
+    passed: bool
+    ranks: bool
+    reason: str
+
+
+def judge(
+    aws: boto3.Session,
+    run_id: RunId,
+    version: ModelVersion,
+    champion: ModelVersion | None = None,
+) -> Verdict:
+    """Reduce the telemetry, apply the canary gate, and say what may be bought.
+
+    The expected digest comes out of the model manifest rather than from a
+    caller, which is what makes the check mean anything: a digest passed in is a
+    digest that matches whatever the caller read it from, and the manifest is the
+    copy written where the bytes were produced.
+
+    The champion's report is read from the telemetry of the cycle it was deployed
+    in rather than measured again, for `gates.canary`'s reason. A champion that
+    is also this version -- a cycle that rejected its challenger and redeployed
+    the incumbent -- compares against itself, so it is dropped here rather than
+    producing a throughput check whose answer is always zero drift.
+    """
+    manifest = registry.read_manifest(aws, base.buckets(aws).artifacts, version)
+    documents = records(aws, run_id)
+
+    try:
+        report = telemetry.report(documents, version)
+    except telemetry.NoReplayError as missing:
+        raise SystemExit(str(missing)) from None
+
+    against = None
+    if champion is not None and champion != version:
+        against = telemetry.report(documents, champion)
+
+    expected = manifest.artifact_sha256[manifest.deployed_seed]
+    verdict = canary_gate(report=report, expected_sha256=expected, champion=against)
+    return Verdict(
+        version=version,
+        passed=verdict.passed,
+        ranks=detections_stand(report, expected),
+        reason=verdict.reason,
+    )
+
+
+def require_device(aws: boto3.Session) -> str:
+    """Refuse a deployment the device cannot act on, and name it if it can.
+
+    The instance is stopped between runs to stay under the budget alarm, and a
+    cycle now blocks on it: a deployment to a stopped device is a Greengrass
+    deployment that sits `IN_PROGRESS` until the cycle's two-hour wait expires.
+    Two hours later the operator learns something an API call answers now.
+
+    Found by tag rather than by an ID in configuration, for
+    `component.thing_group_arn`'s reason -- a `terraform output` would be the same
+    string behind a second tool that has to be run in the right directory.
+    """
+    instances = aws.client("ec2").describe_instances(
+        Filters=[
+            {"Name": "tag:Name", "Values": [DEVICE_NAME]},
+            {"Name": "instance-state-name", "Values": ["running"]},
+        ]
+    )
+    running = [
+        instance
+        for reservation in instances.get("Reservations", ())
+        for instance in reservation.get("Instances", ())
+    ]
+    if not running:
+        raise SystemExit(
+            f"no running instance tagged {DEVICE_NAME}. The cycle's pool pass happens on the "
+            f"device, so a stopped device is a cycle that cannot proceed. Start it and run again."
+        )
+
+    found = str(running[0]["InstanceId"])
+    log.info("%s is running as %s", DEVICE_NAME, found)
     return found
 
 

@@ -363,6 +363,28 @@ class TestTheHandler:
 
         assert all(step in str(refusal.value) for step in ctrl.STEPS)
 
+    def test_a_first_cycle_with_nothing_to_deploy_is_refused_by_name(self) -> None:
+        """The pool is scored on the device, so a run whose first cycle failed
+        its gates has no model anywhere to rank with. There is no cloud fallback
+        on purpose -- one would produce a ranking from a model the fleet never
+        ran -- so this is a refusal with the reason rather than a stack trace."""
+        with pytest.raises(ctrl.ControlError, match="must promote"):
+            ctrl.handler({"step": "deploy", "run_id": RUN, "cycle": 1, "seed": 1, "version": None})
+
+    def test_the_pool_pass_without_a_token_is_refused(self) -> None:
+        """A state machine wired without `.waitForTaskToken` would deploy, the
+        device would score the sample, and nothing would ever resume the cycle.
+        Better to refuse before the deployment goes out."""
+        event = {
+            "step": "fleet_score",
+            "run_id": RUN,
+            "cycle": 1,
+            "version": new_model_version(RUN, Cycle(1)),
+        }
+
+        with pytest.raises(ctrl.ControlError, match="waitForTaskToken"):
+            ctrl.handler(event)
+
     def test_the_step_names_are_the_ones_the_asl_passes(self) -> None:
         """The two files are an interface, and this is the half that can drift
         without either one failing to parse.
@@ -622,9 +644,40 @@ class TestTheDefinition:
 
     def test_a_rejected_cycle_still_reaches_the_purchase(self, definition: dict[str, Any]) -> None:
         """A failed gate leaves the champion in place and the labels stay bought,
-        so there is no path on which a rejection costs the run its purchase."""
-        assert definition["States"]["Passed"]["Default"] == "Select"
-        assert definition["States"]["Promote"]["Next"] == "Select"
+        so there is no path on which a gate verdict costs the run its purchase.
+        Both branches meet again at the fleet round trip, which is what produces
+        the ranking either of them buys from."""
+        states = definition["States"]
+
+        assert states["Passed"]["Default"] == "Deploy"
+        assert states["Promote"]["Next"] == "Deploy"
+        assert states["Deploy"]["Next"] == "FleetScore"
+        assert states["FleetScore"]["Next"] == "Canary"
+        assert states["Canary"]["Next"] == "Ranked"
+        assert states["Ranked"]["Choices"][0]["Next"] == "Select"
+
+    def test_the_pool_pass_waits_for_the_device_and_is_not_retried(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """The token is the completion signal: a device that cannot report is
+        caught by the timeout, and a retry would re-deploy onto the same hardware
+        that just failed to answer."""
+        state = definition["States"]["FleetScore"]
+
+        assert state["Resource"].endswith("lambda:invoke.waitForTaskToken")
+        assert state["TimeoutSeconds"] == 7200
+        assert "Retry" not in state
+
+    def test_untrustworthy_detections_end_the_run_rather_than_buying(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """A ranking computed from bytes that do not hash to what the gates were
+        reported over is not a ranking. This is the one path on which a cycle
+        buys nothing, and it is a device fault rather than a gate verdict."""
+        states = definition["States"]
+
+        assert states["Ranked"]["Default"] == "PassNotTrusted"
+        assert states["PassNotTrusted"]["Type"] == "Fail"
 
     def test_the_training_job_is_started_by_the_state_machine(
         self, definition: dict[str, Any]
@@ -660,6 +713,25 @@ class TestTheDefinition:
         a way to run the addition on a GPU."""
         payload = definition["States"]["EvaluateRequest"]["Arguments"]["Payload"]
         assert "instance_type" not in payload
+
+    def test_the_cap_reaches_the_training_job_and_not_only_the_manifest(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """The bug that stopped every skeleton run there has ever been.
+
+        `Prepare` caps the image manifest; the labels arrive on whole prefixes
+        that no cap can be expressed on, so the container has to apply the same
+        number itself. Until it was passed here, a capped cycle delivered a few
+        hundred images beside every label the run had bought, and the training
+        job refused the pair -- correctly, and after paying for the instance.
+        """
+        prepare = definition["States"]["Prepare"]["Arguments"]["Payload"]
+        training = definition["States"]["Train"]["ItemProcessor"]["States"]["TrainingRequest"][
+            "Arguments"
+        ]["Payload"]
+
+        assert "Execution.Input.max_images" in prepare
+        assert "Execution.Input.max_images" in training
 
     def test_an_optional_input_is_only_read_where_absence_is_allowed(
         self, definition: dict[str, Any]
@@ -760,7 +832,7 @@ class TestTheDefinition:
         """The registry recorded the verdict either way; promotion is what a
         rejected challenger is denied."""
         assert definition["States"]["Passed"]["Choices"][0]["Next"] == "Promote"
-        assert definition["States"]["Passed"]["Default"] == "Select"
+        assert definition["States"]["Passed"]["Default"] == "Deploy"
 
     def test_the_claim_is_conditional_on_the_cap(self, definition: dict[str, Any]) -> None:
         """The single-flight lock. Without the condition this is a counter two

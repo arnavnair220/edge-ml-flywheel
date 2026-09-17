@@ -5,6 +5,11 @@ budget on the top of that ranking, retrains, proves itself against fixed gates, 
 fleet one device at a time — or rolls back. Each turn is measured in *model improvement per label
 spent*.
 
+**The ranking is produced where a fleet would produce it.** Unlabeled frames are scored on the device
+by the model deployed to it, and what returns is predictions and latencies rather than footage. The
+cloud trains and judges; the fleet drives and reports; labels are bought from what the fleet was
+least sure about.
+
 The system is decomposed into **five stages** a cycle passes through, and **three cross-cutting
 concerns** that are not stages: control sequences the stages, gates are the contract they apply, and
 reporting reads what they emit.
@@ -24,8 +29,14 @@ available; **labels are withheld**. The pool is simultaneously the footage the s
 drives through and the catalogue selection buys from, so an image's uncertainty score and its
 purchase price refer to the same frame.
 
-**Cycle** — one full turn of the loop: score the pool, buy one budgeted batch of labels, train,
-evaluate, gate, promote or reject, deploy.
+**Sample** — the 10,000 pool frames one cycle puts in front of the fleet, drawn at random from what
+the purchases have left and seeded by run and cycle. A cycle ranks and buys from the footage the
+device actually drove, not from the whole catalogue, so the sample is what `selection_ranking_key`
+covers and what a later join reads.
+
+**Cycle** — one full turn of the loop: train, evaluate, gate, promote or reject, deploy, let the
+fleet score a sample of the pool, and buy one budgeted batch of labels out of what it was least sure
+about.
 
 **Run** — a complete sequence of cycles under a single `run_id`. Starting over means starting a
 new run, isolated at the storage layer so it cannot see the previous run's spent budget or
@@ -39,9 +50,10 @@ recorded in its registration. The training set is the cumulative union of everyt
 date, so a cycle that fails to promote still keeps its labels and the next challenger simply has
 more to learn from.
 
-**Selector** — the rule the pool is ranked by: mean per-object uncertainty from the champion's
-scoring pass. Fixed for the project rather than configured per run, so it is neither a field on a
-registration nor an argument anyone passes.
+**Selector** — the rule the sample is ranked by: mean per-object uncertainty from the deployed
+model's pass over it. Fixed for the project rather than configured per run, so it is neither a field
+on a registration nor an argument anyone passes. The model is the deployed one by construction
+rather than by choice: the pass happens on the device, and the device runs the champion.
 
 ### Models
 
@@ -93,6 +105,7 @@ flowchart TB
 
     subgraph DATA["Stage 1 — Data and label supply"]
         PART["partitioner<br/>bootstrap / pool / eval / reserve"]
+        SAMPLE["sample<br/>10,000 unbought pool frames<br/>seeded by run and cycle"]
         SEL["selection<br/>mean per-object uncertainty<br/>batch condition mix recorded"]
         ORACLE["oracle<br/>budget ledger, idempotent, audited"]
         POOL[("cumulative labeled set")]
@@ -104,7 +117,7 @@ flowchart TB
     end
 
     subgraph EVAL["Stage 3 — Evaluation"]
-        SCORE["processing job over eval and pool<br/>score once, cache per-image match arrays"]
+        SCORE["processing job over eval<br/>score once, cache per-image match arrays"]
         BOOT["paired bootstrap on the overall metric<br/>per-slice scores reported"]
     end
 
@@ -118,7 +131,8 @@ flowchart TB
 
     subgraph EDGE["Stage 5 — Fleet and deployment"]
         CFG["Greengrass deployment<br/>one component version, the record of intent"]
-        AGENT["IoT Greengrass on a Graviton device<br/>verify digest · replay the pool sample · roll back"]
+        AGENT["IoT Greengrass on a Graviton device<br/>verify digest · score the pool sample · roll back"]
+        DET["pool detections to S3<br/>int8, the model the fleet runs"]
         TEL["telemetry: IoT Core to S3, by rule"]
     end
 
@@ -126,7 +140,7 @@ flowchart TB
         DASH["queries over the telemetry<br/>six charts as static images"]
     end
 
-    PART --> SEL
+    PART --> SAMPLE
     SEL --> ORACLE
     ORACLE --> POOL
     POOL --> SEEDS
@@ -139,7 +153,11 @@ flowchart TB
     G -->|"reject, with reason"| DASH
     SM --> CFG
     CFG --> AGENT
-    AGENT -->|"per-detection confidence"| TEL
+    SAMPLE --> AGENT
+    AGENT -->|"boxes and confidences"| DET
+    AGENT -->|"latency, digest, starts"| TEL
+    DET --> SEL
+    TEL --> G
     TEL --> DASH
 
     SFN -.-> DATA
@@ -147,6 +165,8 @@ flowchart TB
     SFN -.-> EVAL
     SFN -.-> GATE
     SFN -.-> REG
+    SFN -.-> EDGE
+    AGENT -.->|"task token"| SFN
 ```
 
 Solid arrows are data and artifacts. Dotted arrows are control.
@@ -160,11 +180,11 @@ its own document.
 
 | # | Stage | What it does in a cycle | Invariant it owns |
 |---|---|---|---|
-| 1 | **Data and label supply** | Partitions the dataset once, ranks the remaining pool by mean per-object uncertainty from the cycle's offline scoring pass, buys the top of that ranking, records the ranking beside what it bought, and sells labels against a hard budget | Labels can only be obtained by paying the oracle, and `eval` is not purchasable at any price |
+| 1 | **Data and label supply** | Partitions the dataset once, draws the cycle's sample out of the remaining pool, ranks what the fleet reported back by mean per-object uncertainty, buys the top of that ranking, records the ranking beside what it bought, and sells labels against a hard budget | Labels can only be obtained by paying the oracle, and `eval` is not purchasable at any price |
 | 2 | **Training** | Fine-tunes YOLO11n on the cumulative labeled set at one fixed seed, from the COCO base every time, and exports an int8 ONNX artifact | Seed *k* is fixed and recorded; seed 1 is the artifact that ships, never the best-scoring seed |
-| 3 | **Evaluation** | Scores each model once over `eval` and the pool, persists per-image match arrays, then answers every later question from that cache — paired deltas, confidence bands, per-slice metrics | Bootstrap the *paired* delta on a shared eval resample, never each model independently |
+| 3 | **Evaluation** | Scores each model once over `eval`, persists per-image match arrays, then answers every later question from that cache — paired deltas, confidence bands, per-slice metrics | Bootstrap the *paired* delta on a shared eval resample, never each model independently |
 | 4 | **Registry and promotion** | Advances a version through an explicit state machine and records every rejection with its reason | No manifest, no promotion; every champion seed artifact is retained, not just the deployed one |
-| 5 | **Fleet and deployment** | Publishes the promoted artifact as a Greengrass component and deploys it to the device, which replays a sample of the pool through it and reports what it saw. A failed install rolls the device back; a failed canary is rolled back by one command | Deployment is a pointer flip, never a container rebuild; the deployment is the only record of what a device should be running |
+| 5 | **Fleet and deployment** | Publishes the promoted artifact as a Greengrass component and deploys it to the device, which scores the cycle's pool sample with it and sends back predictions and latencies. A failed install rolls the device back; a failed canary rolls the rollout back | Inference over unseen frames happens on the device and only predictions come home; deployment is a pointer flip, and the deployment is the only record of what a device should be running |
 
 ---
 
@@ -177,8 +197,8 @@ one.
 | Concern | What it is | Invariant it owns |
 |---|---|---|
 | **Control** | One Step Functions state machine and two Lambdas. Sequences the cycle, owns retries and branching, and holds a single-flight lock so two cycles cannot overlap | Control flow exists exactly once, in ASL — there is no second local orchestrator to diverge from |
-| **Gates** | Four pure functions with pre-declared thresholds and no infrastructure of their own. Three are applied inside the evaluation job; the canary is asked of a device after deployment | Zero image-ID overlap with `eval` is a hard fail with no override, and no verdict is ever recorded without its reason |
-| **Reporting** | Queries over the telemetry the fleet emits, rendered as static charts. The fleet's own ranking is a realism check, not a selector | Every promotion and rejection is charted with its evidence, so the loop's behaviour is read off the record rather than described |
+| **Gates** | Four pure functions with pre-declared thresholds and no infrastructure of their own. Three are applied inside the evaluation job; the canary is applied to the device's pass, in the cycle that waited for it | Zero image-ID overlap with `eval` is a hard fail with no override, and no verdict is ever recorded without its reason |
+| **Reporting** | Queries over the telemetry the fleet emits and the ranking it produced, rendered as static charts | Every promotion and rejection is charted with its evidence, so the loop's behaviour is read off the record rather than described |
 
 ---
 

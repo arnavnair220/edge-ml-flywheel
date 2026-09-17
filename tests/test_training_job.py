@@ -153,6 +153,25 @@ class TestHyperParameters:
         assert "run_id" not in parameters
         assert "cycle" not in parameters
 
+    def test_the_cap_travels_to_the_container(self) -> None:
+        """The two sides of a training set arrive differently -- `images` is a
+        manifest naming a subset, the labels are whole prefixes -- so a cap can
+        be applied to one and not the other. Capping only the manifest sent 300
+        images beside 8,000 labels and `dataset.write` refused the pair, which
+        is why the skeleton lever had never once worked. The container caps its
+        labels to match, and it can only do that if it is told the number.
+        """
+        assert (
+            a_request(recipe=job.Recipe(epochs=1, max_images=300))["HyperParameters"]["max_images"]
+            == "300"
+        )
+
+    def test_an_uncapped_cycle_says_so_rather_than_leaving_it_out(self) -> None:
+        """0 is every labeled image, and it is passed explicitly: the container
+        requires the argument, so a real cycle and a skeleton run differ in the
+        value rather than in whether the field is there at all."""
+        assert a_request()["HyperParameters"]["max_images"] == "0"
+
     def test_script_mode_is_pointed_at_the_cycle_it_belongs_to(self) -> None:
         parameters = a_request(cycle=2)["HyperParameters"]
         assert parameters["sagemaker_program"] == job.ENTRY_POINT
@@ -218,3 +237,12 @@ class TestRecipe:
     def test_zero_epochs_is_refused(self) -> None:
         with pytest.raises(ValueError, match="epochs must be positive"):
             job.Recipe(epochs=0)
+
+    def test_a_negative_cap_is_refused(self) -> None:
+        """`training.images.capped` refuses it too, but by then the request has
+        been built and a job is about to start on it."""
+        with pytest.raises(ValueError, match="max images cannot be negative"):
+            job.Recipe(epochs=1, max_images=-1)
+
+    def test_the_whole_labeled_set_is_the_default(self) -> None:
+        assert job.Recipe(epochs=1).max_images == 0

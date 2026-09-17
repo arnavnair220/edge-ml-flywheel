@@ -87,9 +87,10 @@ writes only `run_id=*/cycle=*/models/*`. See [infra/training.tf](../infra/traini
 | `model.onnx` | `model_artifact_key(version, seed, ONNX)` |
 | `model.sha256` | `model_artifact_key(version, seed, SHA256)` |
 
-`model.pt` is the checkpoint the scoring job loads. `model.onnx` is the int8 graph the fleet runs,
-and the digest the model manifest carries. Every seed exports one, so `artifact_sha256` names the
-same kind of file for the seed that ships and for the seeds retained beside it.
+`model.pt` is the checkpoint the scoring job loads for `eval`. `model.onnx` is the int8 graph the
+fleet runs, the one the pool is ranked by, and the digest the model manifest carries. Every seed
+exports one, so `artifact_sha256` names the same kind of file for the seed that ships and for the
+seeds retained beside it.
 
 `model.sha256` lists both digests in `sha256sum -c` format, one line per artifact, so a device
 verifies its download with the tool it already has. The job reads every upload back and compares
