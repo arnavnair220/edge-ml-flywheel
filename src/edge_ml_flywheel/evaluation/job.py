@@ -63,6 +63,7 @@ from edge_ml_flywheel.scoring.job import (
     CODE_CHANNEL,
     INPUT_ROOT,
     OUTPUT_ROOT,
+    check_channel_names,
     container_entrypoint,
 )
 from edge_ml_flywheel.training import job as training
@@ -417,6 +418,10 @@ def processing_job(
     same string as the training and scoring jobs that produced its inputs, and
     one format means one length check.
     """
+    processing_inputs = inputs(target)
+    processing_outputs = outputs(target)
+    check_channel_names(processing_inputs, processing_outputs)
+
     return {
         "ProcessingJobName": training.job_name(target.version, min(target.seeds), attempt),
         "RoleArn": target.role_arn,
@@ -429,8 +434,8 @@ def processing_job(
             "ContainerEntrypoint": container_entrypoint(ENTRY_POINT),
             "ContainerArguments": arguments(target),
         },
-        "ProcessingInputs": inputs(target),
-        "ProcessingOutputConfig": {"Outputs": outputs(target)},
+        "ProcessingInputs": processing_inputs,
+        "ProcessingOutputConfig": {"Outputs": processing_outputs},
         "ProcessingResources": {
             "ClusterConfig": {
                 "InstanceCount": 1,
