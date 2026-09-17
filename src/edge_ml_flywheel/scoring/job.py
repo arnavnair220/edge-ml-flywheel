@@ -94,6 +94,12 @@ REQUIREMENTS: Final = "requirements.txt"
 # would put a directory tree inside something a reader expects to hold one file.
 UNPACKED: Final = f"{PROCESSING_ROOT}/{_CODE_DIR}"
 
+# Images per forward pass for the fp32 pass. Here rather than in the container
+# for `MAX_DETS`' reason one field over: the number belongs to the request the
+# job is built from, and `entrypoint` cannot be imported without a GPU stack, so
+# a constant declared there is a constant no test on a laptop ever reads.
+_FP32_BATCH: Final = 32
+
 # What one member of `ContainerEntrypoint` may be. The API rejects the request
 # rather than the job failing, so the cost of exceeding it is a validation error
 # minutes into a cycle that has already trained a model.
@@ -238,6 +244,24 @@ class Scoring:
     confidence_floor: float = 0.001
     max_detections: int = MAX_DETS
     precision: Precision = Precision.FP32
+
+    @property
+    def batch(self) -> int:
+        """Images per forward pass, which is a function of the build being run.
+
+        The int8 graph takes one frame and only one: `export.to_onnx` passes
+        `dynamic=False` so the quantizer can fold shapes into constants, which
+        fixes the batch axis at 1, and ONNX Runtime rejects anything else
+        outright. Batching it would also measure something the fleet never does
+        -- the device replays one frame at a time -- and this pass exists to say
+        what quantization cost the artifact that ships.
+
+        The fp32 pass batches, because it is a GPU over thousands of frames and
+        one image per forward leaves the card idle between them. That is a
+        throughput decision and nothing the metric can see: detection is per
+        image, so how many share a forward pass changes only the wall clock.
+        """
+        return 1 if self.precision is Precision.INT8 else _FP32_BATCH
 
     def __post_init__(self) -> None:
         if not 0.0 < self.confidence_floor < 1.0:
@@ -454,6 +478,8 @@ def arguments(target: Target, scoring: Scoring) -> list[str]:
         str(scoring.confidence_floor),
         "--max_detections",
         str(scoring.max_detections),
+        "--batch",
+        str(scoring.batch),
     ]
 
 

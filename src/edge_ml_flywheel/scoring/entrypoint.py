@@ -51,11 +51,11 @@ from edge_ml_flywheel.scoring.job import (
 
 log = logging.getLogger("edge_ml_flywheel.scoring")
 
-# Images per forward pass. Chunked here rather than left to the framework's
-# default of one, because the whole job is a pass over 67,000 frames and a batch
-# of one leaves the GPU idle between them. Not `Recipe.batch`, which is a
-# training decision constrained by gradient memory this job never allocates.
-BATCH: Final = 32
+# Images per forward pass arrive as `--batch` rather than being declared here.
+# The two passes need different values -- the int8 graph's batch axis is fixed at
+# 1 by `export.to_onnx`'s `dynamic=False` and ONNX Runtime refuses anything else
+# -- so the number is a function of the precision being run, and `job.Scoring`
+# decides it where a test can read the decision.
 
 _IMAGE_SUFFIX: Final = ".jpg"
 
@@ -79,6 +79,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--image_size", type=int, required=True)
     parser.add_argument("--confidence_floor", type=float, required=True)
     parser.add_argument("--max_detections", type=int, required=True)
+    # Required rather than defaulted, because the two passes need different
+    # values and only one of them is survivable: the int8 graph has a batch axis
+    # fixed at 1 and ONNX Runtime refuses anything else. A default here is a
+    # container that quietly batches the artifact that ships.
+    parser.add_argument("--batch", type=int, required=True)
     return parser
 
 
@@ -196,7 +201,7 @@ def detect(
     67,000 of them is a log nobody can read and a CloudWatch bill for the
     privilege.
     """
-    for chunk in _chunks(paths, BATCH):
+    for chunk in _chunks(paths, args.batch):
         results = model.predict(
             source=[str(path) for path in chunk],
             imgsz=args.image_size,
