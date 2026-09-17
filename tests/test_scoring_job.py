@@ -33,6 +33,7 @@ from edge_ml_flywheel.conventions import (
     scoring_manifest_key,
     training_code_key,
 )
+from edge_ml_flywheel.evaluation import job as evaluation_job
 from edge_ml_flywheel.oracle.cohorts import Cohorts
 from edge_ml_flywheel.scoring import cohorts as sets
 from edge_ml_flywheel.scoring import job
@@ -249,6 +250,30 @@ class TestTheContainerCommand:
         assert command[:2] == ["bash", "-c"]
         assert command[3] == job.ENTRY_POINT
         assert '"$@"' in command[2]
+
+    def test_no_member_exceeds_what_the_api_accepts(self) -> None:
+        """The failure this ends. `ContainerEntrypoint` members are capped at 256
+        characters and the absolute form of this command was 265, so the request
+        was refused by validation -- in a cycle that had already trained a model,
+        because the scoring request is built from what training produced.
+
+        Both entry points, because they differ in length and the longer one is
+        the one that is not the default.
+        """
+        for entry_point in (job.ENTRY_POINT, evaluation_job.ENTRY_POINT):
+            for member in job.container_entrypoint(entry_point):
+                assert len(member) <= job.MAX_ENTRYPOINT_MEMBER, (
+                    f"{entry_point} builds a {len(member)}-character member, which SageMaker "
+                    f"refuses: {member}"
+                )
+
+    def test_the_paths_the_request_names_stay_absolute(self) -> None:
+        """The `cd` is what buys the length, and it must not leak into what the
+        request and the container agree on: a relative channel path here is a job
+        whose inputs land somewhere the reader does not look."""
+        assert job.INPUT_ROOT == "/opt/ml/processing/input"
+        assert job.OUTPUT_ROOT == "/opt/ml/processing/output"
+        assert job.UNPACKED == "/opt/ml/processing/code"
 
 
 class TestArguments:
