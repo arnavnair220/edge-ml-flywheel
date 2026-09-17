@@ -98,3 +98,26 @@ output "ingest_connection_status" {
   description = "AVAILABLE once the GitHub connection is authorized in the console. PENDING before."
   value       = aws_codeconnections_connection.github.connection_status
 }
+
+# The fleet. Names rather than ARNs for the reason the buckets are, with one
+# exception: the thing group is what `edge_ml_flywheel.fleet` composes a
+# deployment target from, and it composes it from the name.
+output "thing_group_name" {
+  description = "Deployment target. edge_ml_flywheel.fleet builds its targetArn from this name."
+  value       = aws_iot_thing_group.devices.name
+}
+
+output "device_instance_id" {
+  description = "Open a shell with: aws ssm start-session --target <this>. Stop it between cycles with aws ec2 stop-instances."
+  value       = aws_instance.device.id
+}
+
+output "fleet_role_arn" {
+  description = "What a component on the device runs as. Reads pool images and its own artifacts; denied every label prefix."
+  value       = aws_iam_role.fleet.arn
+}
+
+output "iot_data_endpoint" {
+  description = "Where a device publishes. edge_ml_flywheel.fleet resolves this itself and bakes it into each recipe."
+  value       = data.aws_iot_endpoint.data.endpoint_address
+}

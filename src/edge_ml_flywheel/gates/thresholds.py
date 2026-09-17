@@ -31,16 +31,20 @@ from typing import Final
 class Gate(StrEnum):
     """The four checks a cycle runs, in order.
 
-    All four named though only three are implemented, for the reason `Selector`
-    names its three: a name reserved in advance is one the report format and the
-    state machine can be written against before the thing behind it exists.
+    `CANARY` is the one whose input comes from outside the cloud, and it is the
+    reason the four are not run together: the first three are computed from a
+    cycle's own artifacts, and this one cannot be asked until the artifact has
+    been deployed and a device has replayed with it. So it is read after
+    promotion rather than before, and what it decides is whether the rollout
+    continues or rolls back -- not whether the model is registered.
 
-    `CANARY` has no predicate here, and the omission is deliberate rather than
-    pending. Its input is two replay hours of device telemetry, and nothing in
-    the project produces that yet. A predicate written now would be a pure
-    function over a measurement shape invented to suit it, tested against that
-    same invention, and rewritten when the devices report what they can actually
-    measure. It lands with its producer in phase 5, where the fleet first exists.
+    Its predicate landed with its producer, which is what the reservation was
+    for: a shape invented before the devices reported anything would have been
+    tested against the invention. What they report is `ReplayReport`, and three
+    of design section 4.5's conditions are checked against it. The rest --
+    memory flatness over two replay hours, and the confidence-distribution
+    distance -- wait on a second device and a longer run, which is the fleet
+    growing rather than the gate changing.
     """
 
     DATA = "data"
@@ -83,6 +87,14 @@ class Thresholds:
     the export is near -- a quantized YOLO11n is a few megabytes against a 25 MB
     ceiling -- which is the point: it catches an export that silently wrote the
     fp32 graph, not one that is a little large.
+
+    `max_throughput_drop` is the canary's, and it is design section 4.5's 10%
+    unchanged. It is the one number that gate compares rather than checks: the
+    other two conditions are a digest matching and a component running, which are
+    facts about whether the deployment worked at all. This one asks whether the
+    model that arrived is as fast on the device as the one it replaces, and a
+    challenger that lost a tenth of the champion's frame rate has changed
+    something about the graph that the cloud passes never saw.
     """
 
     min_new_images: int = 250
@@ -90,6 +102,7 @@ class Thresholds:
     min_mean_delta: float = 0.005
     max_quantization_loss: float = 0.05
     max_artifact_bytes: int = 25 * 1024 * 1024
+    max_throughput_drop: float = 0.10
 
     def __post_init__(self) -> None:
         # Each of these admits everything rather than being obviously broken: a
@@ -114,6 +127,11 @@ class Thresholds:
             raise ValueError(
                 f"a promotion threshold of {self.min_mean_delta} promotes a challenger no better "
                 f"than the champion"
+            )
+        if not 0.0 < self.max_throughput_drop < 1.0:
+            raise ValueError(
+                f"a throughput allowance of {self.max_throughput_drop} is not a fraction between "
+                f"refusing every deployment and admitting one that has stopped"
             )
 
 

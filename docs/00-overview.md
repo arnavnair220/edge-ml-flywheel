@@ -73,8 +73,8 @@ paired bootstrap band on the overall metric is narrow enough for a cycle's delta
 **Shadow mode** — the challenger scores the same frames as the champion at the same time, with no
 effect on anything downstream, so the comparison is exact rather than statistical.
 
-**Canary** — the challenger genuinely deployed to one device out of five, watched before the
-rollout continues.
+**Canary** — the challenger genuinely deployed to a device and watched there before the rollout
+stands. At a fleet of one it is the whole rollout; a larger fleet makes it the first stage.
 
 **Saturation** — the point at which another cycle stops being worth its labels, read off the label
 efficiency curve flattening rather than off a detector.
@@ -115,13 +115,13 @@ flowchart TB
     end
 
     subgraph EDGE["Edge and fleet plane"]
-        CFG[("fleet_config<br/>desired_version per device")]
-        AGENT["IoT Greengrass on Graviton devices<br/>verify digest · staged deploy · roll back"]
+        CFG["Greengrass deployment<br/>one component version, the record of intent"]
+        AGENT["IoT Greengrass on a Graviton device<br/>verify digest · replay the pool sample · roll back"]
     end
 
     subgraph OBS["Telemetry and reporting plane"]
-        TEL["IoT Core to Firehose to parquet in S3"]
-        DASH["Athena queries<br/>six charts as static images"]
+        TEL["IoT Core to S3, by rule"]
+        DASH["queries over the telemetry<br/>six charts as static images"]
     end
 
     PART --> SEL
@@ -163,7 +163,7 @@ Listed in the order a cycle passes through them.
 | 4 | **Gating** | Runs four pass/fail checks in order — data, quality, edge, canary — and emits the per-slice regression report. Any hard failure stops the cycle and the champion stays put; the labels stay bought | Zero image-ID overlap with either eval set is a hard fail with no override |
 | 5 | **Control** | Sequences the cycle, owns retries, branching and short-circuit on gate failure, and holds a single-flight lock so two cycles cannot overlap | Control flow exists exactly once, in ASL — there is no second local orchestrator to diverge from |
 | 6 | **Registry and promotion** | Advances a version through an explicit state machine and records every rejection with its reason | No manifest, no promotion; every champion seed artifact is retained, not just the deployed one |
-| 7 | **Edge and fleet** | Publishes the promoted artifact as a Greengrass component, and the service deploys it: verify digest, one device, then two, then the fleet, rolling back on a failed health check | Deployment is a pointer flip, never a container rebuild; rollback is a single command |
+| 7 | **Edge and fleet** | Publishes the promoted artifact as a Greengrass component and deploys it to the device, which replays a sample of the pool through it and reports what it saw. A failed install rolls the device back; a failed canary is rolled back by one command | Deployment is a pointer flip, never a container rebuild; the deployment is the only record of what a device should be running |
 | 8 | **Telemetry and reporting** | Captures what the fleet saw and feeds the charts. The fleet's own ranking is a realism check, not a selector | Every promotion and rejection is charted with its evidence, so the loop's behaviour is read off the record rather than described |
 
 ---
@@ -244,3 +244,4 @@ Each plane's document lands with the plane.
 | `02-training.md` | 2 |
 | `03-evaluation.md` | 3 |
 | `06-registry-and-promotion.md` | 6 |
+| `07-fleet-and-deployment.md` | 7 |

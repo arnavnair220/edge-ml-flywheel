@@ -117,6 +117,8 @@ than by position, so a third artifact appearing in that file cannot change which
 records. A seed that published no ONNX digest is refused registration.
 
 The overview's plane 6 covers a candidate → shadow → canary → champion → archived progression. The
-approval status and the champion pointer exist; the intermediate states belong with the fleet.
+approval status and the champion pointer exist; the intermediate states land with the features that
+need them. See [plane 7](07-fleet-and-deployment.md).
 
-Promotion writes no `desired_version`. The device items are plane 7's.
+Promotion writes no `desired_version`, and nothing else does either. Plane 7 makes the Greengrass
+deployment the record of what a device should be running, so `fleet_config` holds no device item.

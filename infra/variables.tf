@@ -95,3 +95,47 @@ variable "bdd100k_host" {
   type        = string
   default     = "128.32.162.150"
 }
+
+# **`t4g.small`, not the `t4g.nano` the design names.** The nano has 512 MB, and
+# a Greengrass device is a JVM nucleus plus whatever the components run: AWS puts
+# the nucleus alone at 256 MB minimum, and the replay component is a Python
+# process holding an onnxruntime session and a decoded frame. The nano is not
+# tight, it is short, and the failure would be the nucleus being killed
+# mid-deployment -- which reads from the telemetry side as a device that never
+# reported, the one canary outcome that says nothing about the model.
+#
+# The cost is the reason the design reached for the nano and it is real: roughly
+# $16/month left running against a $40 budget alarm -- $12.30 for the instance,
+# $3.65 for the public IPv4 address AWS has billed for since 2024, and $1.60 for
+# the volume. The nano would be about $7 of that.
+#
+# What makes it affordable is that the device is only needed while a cycle is
+# being canaried, so it is stopped between them -- see `docs/07`. Stopping
+# releases the address, which leaves the volume as the whole standing charge.
+variable "device_instance_type" {
+  description = "The simulated edge device. Graviton, so the int8 ONNX runs on real ARM silicon."
+  type        = string
+  default     = "t4g.small"
+}
+
+# The nucleus the device installs, pinned rather than `-latest`. It is half of
+# what the device is, and an unpinned nucleus is a runtime that changes under a
+# p95 series without anything recording that it did -- `container/requirements`'
+# argument applied to the agent rather than to the model.
+#
+# The version and the URL are two variables because the config file names the
+# version and the installer downloads the URL, and Greengrass refuses to start if
+# the two disagree. Newer releases are listed at
+# https://github.com/aws-greengrass/aws-greengrass-nucleus/releases and the
+# archive for one is the URL below with the version substituted.
+variable "greengrass_nucleus_version" {
+  description = "Greengrass v2 nucleus version. Must match the archive greengrass_nucleus_url serves."
+  type        = string
+  default     = "2.14.3"
+}
+
+variable "greengrass_nucleus_url" {
+  description = "Where the device downloads that nucleus from."
+  type        = string
+  default     = "https://d2s8p88vqu9w66.cloudfront.net/releases/greengrass-2.14.3.zip"
+}

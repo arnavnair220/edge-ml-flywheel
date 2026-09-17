@@ -129,7 +129,11 @@ dev = [
 #
 # CI installs it anyway (`uv sync --frozen --group ingest`), so the ingest module
 # is linted, typed and unit tested like everything else rather than being code
-# that only ever runs in a place nobody watches.
+# that only ever runs in a place nobody watches. That is also what puts `pillow`
+# in front of mypy for `fleet.replay`, which decodes the frames a device
+# replays -- the device installs its own pinned copy from
+# `infra/device-requirements.txt`, the way the container installs its own from
+# `container/requirements.txt`, and neither resolves this lockfile.
 ingest = [
     # Writes the manifest parquet. Chosen over a dataframe library because
     # writing 80,000 rows with one list column is the entire requirement.
@@ -158,6 +162,11 @@ run = [
 # those are the container's, installed by pip from `container/requirements.txt`
 # inside an image that already carries a CUDA-matched torch. Nothing outside that
 # container ever runs the model.
+#
+# The fleet CLI runs under this group rather than one of its own. It reuses
+# `training.launch` for the session, the account and the buckets, so it needs
+# whatever that module needs and nothing more -- a second group listing the same
+# two packages would be a second thing to keep in step for no difference.
 training = [
     "boto3>=1.35",
     "pyarrow>=18",
