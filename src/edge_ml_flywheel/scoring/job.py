@@ -28,7 +28,7 @@ than of the job -- the images scored are exactly those named in
 `scoring_manifest_key`, and that document is the record of what was ranked.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final
@@ -357,6 +357,54 @@ def inputs(target: Target, scoring: Scoring) -> list[dict[str, Any]]:
     return channels
 
 
+def check_channel_names(
+    processing_inputs: Sequence[Mapping[str, Any]],
+    processing_outputs: Sequence[Mapping[str, Any]],
+) -> None:
+    """Refuse a request whose channel names SageMaker will reject.
+
+    Input and output names share one namespace, and the service enforces it at
+    `CreateProcessingJob` -- so a collision is a `ValidationException` minutes
+    into a cycle, against a request built from a model that has already been
+    trained. Both Processing jobs are checked by the same function because the
+    constraint belongs to the API rather than to either of them, and evaluation
+    grows a channel per seed.
+
+    `MAX_ENTRYPOINT_MEMBER` is the same bargain one field over: what the API
+    will refuse is worth refusing here, where it costs a test rather than a GPU
+    hour.
+    """
+    names = [str(channel["InputName"]) for channel in processing_inputs]
+    names.extend(str(channel["OutputName"]) for channel in processing_outputs)
+
+    collisions = sorted({name for name in names if names.count(name) > 1})
+    if collisions:
+        raise ValueError(
+            f"input and output channel names must be unique across both lists, and "
+            f"SageMaker rejects the request rather than the job: {collisions}"
+        )
+
+
+def output_name(cohort: Cohort) -> str:
+    """What the request calls one cohort's output channel.
+
+    Not the cohort's own value, which is what its *input* channel is called:
+    SageMaker requires input and output names to be unique across both lists,
+    and a job scoring `eval` named both of its `eval`. That is a rejected
+    request rather than a failed job, and it arrives in a cycle that has already
+    trained a model.
+
+    The suffix says what the channel carries rather than disambiguating for its
+    own sake, so the name is still readable in a console listing beside the
+    input it is paired with.
+
+    The container is unaffected: it writes to `OUTPUT_ROOT/<cohort>` from the
+    cohort, and `LocalPath` below still says exactly that. This name is the
+    API's label for the upload and nothing reads it back.
+    """
+    return f"{cohort.value}-detections"
+
+
 def outputs(target: Target, scoring: Scoring) -> list[dict[str, Any]]:
     """One output channel per cohort, uploaded when the job finishes.
 
@@ -366,7 +414,7 @@ def outputs(target: Target, scoring: Scoring) -> list[dict[str, Any]]:
     """
     return [
         {
-            "OutputName": cohort.value,
+            "OutputName": output_name(cohort),
             "S3Output": {
                 "S3Uri": uri(
                     target.buckets.artifacts,
@@ -426,6 +474,10 @@ def processing_job(
     string -- and having one format means one length check and one place the run
     slug is reported as the thing to shorten.
     """
+    processing_inputs = inputs(target, scoring)
+    processing_outputs = outputs(target, scoring)
+    check_channel_names(processing_inputs, processing_outputs)
+
     return {
         "ProcessingJobName": training.job_name(target.version, target.seed, attempt),
         "RoleArn": target.role_arn,
@@ -439,8 +491,8 @@ def processing_job(
             "ContainerEntrypoint": container_entrypoint(),
             "ContainerArguments": arguments(target, scoring),
         },
-        "ProcessingInputs": inputs(target, scoring),
-        "ProcessingOutputConfig": {"Outputs": outputs(target, scoring)},
+        "ProcessingInputs": processing_inputs,
+        "ProcessingOutputConfig": {"Outputs": processing_outputs},
         "ProcessingResources": {
             "ClusterConfig": {
                 "InstanceCount": 1,

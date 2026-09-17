@@ -130,7 +130,7 @@ class TestChannels:
         """The ranking comes back from the fleet. A pool channel here would be a
         second, contradictory answer to which model ranked the pool."""
         assert channel(a_request(cycle=2), Cohort.POOL.value) is None
-        assert output(a_request(cycle=2, seed=1), Cohort.POOL.value) is None
+        assert output(a_request(cycle=2, seed=1), job.output_name(Cohort.POOL)) is None
 
     def test_the_model_channel_names_the_checkpoint_and_not_the_seed_prefix(self) -> None:
         """The seed prefix also holds `_sagemaker/`, whose tarball is a second
@@ -158,7 +158,7 @@ class TestChannels:
     def test_the_cohort_writes_to_its_own_prefix(self) -> None:
         version = new_model_version(RUN, Cycle(1))
         for cohort in job.COHORTS:
-            entry = output(a_request(cycle=1, seed=1), cohort.value)
+            entry = output(a_request(cycle=1, seed=1), job.output_name(cohort))
             assert entry is not None, cohort
             assert entry["S3Output"]["S3Uri"].endswith(detections_prefix(version, Seed(1), cohort))
 
@@ -201,14 +201,14 @@ class TestTheInt8Pass:
         assert channel(request, Cohort.EVAL.value) is not None
         assert channel(request, Cohort.POOL.value) is None
         assert [entry["OutputName"] for entry in request["ProcessingOutputConfig"]["Outputs"]] == [
-            Cohort.EVAL.value
+            job.output_name(Cohort.EVAL)
         ]
 
     def test_it_writes_beside_the_fp32_boxes_rather_than_over_them(self) -> None:
         """Same model, same seed, same cohort. Without the precision segment the
         int8 boxes would overwrite the ones the paired comparison reads."""
         version = new_model_version(RUN, Cycle(1))
-        entry = output(self.int8_request(), Cohort.EVAL.value)
+        entry = output(self.int8_request(), job.output_name(Cohort.EVAL))
         assert entry is not None
         assert entry["S3Output"]["S3Uri"].endswith(
             detections_prefix(version, Seed(1), Cohort.EVAL, Precision.INT8)
@@ -266,6 +266,39 @@ class TestTheContainerCommand:
                     f"{entry_point} builds a {len(member)}-character member, which SageMaker "
                     f"refuses: {member}"
                 )
+
+    def test_an_input_and_an_output_cannot_share_a_name(self) -> None:
+        """The second rejection this cycle met. SageMaker gives inputs and
+        outputs one namespace, so a job scoring `eval` that named both of its
+        channels `eval` was refused at `CreateProcessingJob` -- after training
+        had produced the model the request was built from.
+        """
+        with pytest.raises(ValueError, match="unique across both lists"):
+            job.check_channel_names(
+                [{"InputName": "eval"}, {"InputName": "code"}],
+                [{"OutputName": "eval"}],
+            )
+
+    def test_distinct_names_are_accepted(self) -> None:
+        job.check_channel_names([{"InputName": "eval"}], [{"OutputName": "eval-detections"}])
+
+    def test_the_request_this_builds_satisfies_it(self) -> None:
+        """The guard runs inside `processing_job`, so this asserts the real
+        request rather than the guard in isolation."""
+        request = a_request()
+        names = [channel["InputName"] for channel in request["ProcessingInputs"]]
+        names += [channel["OutputName"] for channel in request["ProcessingOutputConfig"]["Outputs"]]
+
+        assert len(names) == len(set(names))
+
+    def test_the_output_channel_is_the_cohort_and_what_it_carries(self) -> None:
+        output = a_request()["ProcessingOutputConfig"]["Outputs"][0]
+
+        assert output["OutputName"] == "eval-detections"
+        assert output["S3Output"]["LocalPath"] == f"{job.OUTPUT_ROOT}/eval", (
+            "the container writes to the cohort's own directory, so renaming the API's "
+            "label must not move the path it uploads from"
+        )
 
     def test_the_paths_the_request_names_stay_absolute(self) -> None:
         """The `cd` is what buys the length, and it must not leak into what the
