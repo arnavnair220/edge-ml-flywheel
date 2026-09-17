@@ -16,21 +16,20 @@ import numpy as np
 import pytest
 from pycocotools.cocoeval import COCOeval
 
-from edge_ml_flywheel.conventions import CLASS_SET, ImageId
+from edge_ml_flywheel.conventions import CLASS_SET, MAX_DETS, ImageId
 from edge_ml_flywheel.evaluation.coco import (
     Detection,
     ImageIndex,
-    as_coco,
-    as_coco_results,
     detections,
     ground_truth,
 )
 from edge_ml_flywheel.evaluation.match import (
     AREA_BOUNDS,
     IOU_THRESHOLDS,
-    MAX_DETS,
     AreaRange,
     MatchCache,
+    as_coco,
+    as_coco_results,
     score,
 )
 from edge_ml_flywheel.evaluation.metrics import Scope, average_precision, image_rows

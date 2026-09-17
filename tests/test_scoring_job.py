@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from edge_ml_flywheel.conventions import (
+    MAX_DETS,
     SCORED_COHORTS,
     Buckets,
     Cohort,
@@ -33,7 +34,6 @@ from edge_ml_flywheel.conventions import (
     scoring_manifest_key,
     training_code_key,
 )
-from edge_ml_flywheel.evaluation.match import MAX_DETS
 from edge_ml_flywheel.oracle.cohorts import Cohorts
 from edge_ml_flywheel.scoring import cohorts as sets
 from edge_ml_flywheel.scoring import job

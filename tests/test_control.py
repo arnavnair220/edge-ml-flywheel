@@ -28,6 +28,8 @@ is what the payload shape and the test over it are for.
 
 import json
 import re
+import subprocess
+import sys
 import tarfile
 from collections.abc import Iterator
 from decimal import Decimal
@@ -445,6 +447,61 @@ class TestTheDeployedArchive:
         it was built. Timestamps, ownership and mode are all flattened."""
         package, layer = self._deployment(tmp_path)
         assert launch.archive(package, layer) == launch.archive(package, layer)
+
+
+class TestTheImportGraph:
+    """What the deployment package can carry, asserted at the import that would
+    otherwise discover it in a live execution.
+
+    The Lambda is `archive_file` over `src/`: pure Python, plus `boto3` from the
+    runtime and `numpy` and `pyarrow` from the managed layer. Everything in
+    `container/requirements.txt` is a compiled wheel that cannot be zipped into
+    it, and every one of them is reachable from this handler through a module it
+    legitimately imports -- `scoring.job` and `evaluation.job` build the two
+    processing requests, and the entrypoints beside them do the work those jobs
+    describe.
+
+    So the failure has a shape: a module-level import taken for one name -- a
+    constant, a dataclass, a type -- pulls a C extension into a function that
+    only ever builds JSON. It costs nothing at test time, nothing at apply time,
+    and fails every step of every cycle at `Runtime.ImportModuleError`.
+
+    A subprocess rather than a `meta_path` blocker here, because the suite has
+    already imported all of these by the time this runs and `sys.modules` would
+    hand them straight back.
+    """
+
+    # `container/requirements.txt` and what `ultralytics` brings with it. Named
+    # rather than derived from that file: the claim is about these packages being
+    # absent from a zip, and a requirements file the container gains a pure
+    # Python line in should not quietly widen what this refuses.
+    CONTAINER_ONLY = (
+        "pycocotools",
+        "torch",
+        "torchvision",
+        "ultralytics",
+        "cv2",
+        "PIL",
+        "onnx",
+        "onnxruntime",
+    )
+
+    def test_reaches_no_module_the_lambda_cannot_carry(self) -> None:
+        script = (
+            "import sys\n"
+            f"blocked = {self.CONTAINER_ONLY!r}\n"
+            "class Refuse:\n"
+            "    def find_spec(self, name, path=None, target=None):\n"
+            "        if name.split('.')[0] in blocked:\n"
+            "            raise ImportError(name)\n"
+            "        return None\n"
+            "sys.meta_path.insert(0, Refuse())\n"
+            "import edge_ml_flywheel.control.handler\n"
+        )
+        done = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, check=False
+        )
+        assert done.returncode == 0, done.stderr
 
 
 class TestTheDefinition:

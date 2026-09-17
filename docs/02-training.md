@@ -1,7 +1,7 @@
-# Plane 2 — Training
+# Stage 2 — Training
 
 Fine-tunes YOLO11n on one cycle's labeled set as a SageMaker training job, one job per seed. See the
-[architecture overview](00-overview.md) for the plane's position in the loop.
+[architecture overview](00-overview.md) for the stage's position in the loop.
 
 ---
 
@@ -149,5 +149,5 @@ one tree.
 
 ## Incomplete
 
-Nothing in this plane. What the export costs in accuracy is measured by plane 3's edge gate, over a
-second pass across `eval` with the quantized graph.
+Nothing in this stage. What the export costs in accuracy is measured by the [edge gate](gates.md),
+over a second pass across `eval` with the quantized graph.

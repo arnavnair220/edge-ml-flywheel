@@ -5,7 +5,9 @@ budget on the top of that ranking, retrains, proves itself against fixed gates, 
 fleet one device at a time — or rolls back. Each turn is measured in *model improvement per label
 spent*.
 
-The system is decomposed into **eight planes**. Seven sit inside the loop; one wraps it.
+The system is decomposed into **five stages** a cycle passes through, and **three cross-cutting
+concerns** that are not stages: control sequences the stages, gates are the contract they apply, and
+reporting reads what they emit.
 
 ---
 
@@ -85,42 +87,42 @@ efficiency curve flattening rather than off a detector.
 
 ```mermaid
 flowchart TB
-    subgraph CTRL["Control plane — Step Functions, one execution per cycle"]
+    subgraph CTRL["Control — Step Functions, one execution per run"]
         SFN["prepare · train · eval · gates · register · promote"]
     end
 
-    subgraph DATA["Data and label supply plane"]
+    subgraph DATA["Stage 1 — Data and label supply"]
         PART["partitioner<br/>bootstrap / pool / eval / reserve"]
         SEL["selection<br/>mean per-object uncertainty<br/>batch condition mix recorded"]
         ORACLE["oracle<br/>budget ledger, idempotent, audited"]
         POOL[("cumulative labeled set")]
     end
 
-    subgraph TRAIN["Training plane"]
+    subgraph TRAIN["Stage 2 — Training"]
         SEEDS["YOLO11n, one matched seed from the COCO base<br/>seeded, on demand, restart on failure"]
         EXPORT["ONNX int8 export for ARM64"]
     end
 
-    subgraph EVAL["Evaluation plane"]
+    subgraph EVAL["Stage 3 — Evaluation"]
         SCORE["processing job over eval and pool<br/>score once, cache per-image match arrays"]
         BOOT["paired bootstrap on the overall metric<br/>per-slice scores reported"]
     end
 
-    subgraph GATE["Gating plane — four pure checks"]
+    subgraph GATE["Gates — four pure checks, no infrastructure"]
         G["data · quality · edge · canary"]
     end
 
-    subgraph REG["Registry and promotion plane"]
+    subgraph REG["Stage 4 — Registry and promotion"]
         SM["candidate · shadow · canary · champion · archived<br/>manifest + version stamps"]
     end
 
-    subgraph EDGE["Edge and fleet plane"]
+    subgraph EDGE["Stage 5 — Fleet and deployment"]
         CFG["Greengrass deployment<br/>one component version, the record of intent"]
         AGENT["IoT Greengrass on a Graviton device<br/>verify digest · replay the pool sample · roll back"]
+        TEL["telemetry: IoT Core to S3, by rule"]
     end
 
-    subgraph OBS["Telemetry and reporting plane"]
-        TEL["IoT Core to S3, by rule"]
+    subgraph OBS["Reporting — reads what the stages emit"]
         DASH["queries over the telemetry<br/>six charts as static images"]
     end
 
@@ -151,20 +153,32 @@ Solid arrows are data and artifacts. Dotted arrows are control.
 
 ---
 
-## The planes
+## The stages
 
-Listed in the order a cycle passes through them.
+Listed in the order a cycle passes through them. Each owns infrastructure and compute, and each has
+its own document.
 
-| # | Plane | What it does in a cycle | Invariant it owns |
+| # | Stage | What it does in a cycle | Invariant it owns |
 |---|---|---|---|
 | 1 | **Data and label supply** | Partitions the dataset once, ranks the remaining pool by mean per-object uncertainty from the cycle's offline scoring pass, buys the top of that ranking, records the ranking beside what it bought, and sells labels against a hard budget | Labels can only be obtained by paying the oracle, and `eval` is not purchasable at any price |
 | 2 | **Training** | Fine-tunes YOLO11n on the cumulative labeled set at one fixed seed, from the COCO base every time, and exports an int8 ONNX artifact | Seed *k* is fixed and recorded; seed 1 is the artifact that ships, never the best-scoring seed |
 | 3 | **Evaluation** | Scores each model once over `eval` and the pool, persists per-image match arrays, then answers every later question from that cache — paired deltas, confidence bands, per-slice metrics | Bootstrap the *paired* delta on a shared eval resample, never each model independently |
-| 4 | **Gating** | Runs four pass/fail checks in order — data, quality, edge, canary — and emits the per-slice regression report. Any hard failure stops the cycle and the champion stays put; the labels stay bought | Zero image-ID overlap with either eval set is a hard fail with no override |
-| 5 | **Control** | Sequences the cycle, owns retries, branching and short-circuit on gate failure, and holds a single-flight lock so two cycles cannot overlap | Control flow exists exactly once, in ASL — there is no second local orchestrator to diverge from |
-| 6 | **Registry and promotion** | Advances a version through an explicit state machine and records every rejection with its reason | No manifest, no promotion; every champion seed artifact is retained, not just the deployed one |
-| 7 | **Edge and fleet** | Publishes the promoted artifact as a Greengrass component and deploys it to the device, which replays a sample of the pool through it and reports what it saw. A failed install rolls the device back; a failed canary is rolled back by one command | Deployment is a pointer flip, never a container rebuild; the deployment is the only record of what a device should be running |
-| 8 | **Telemetry and reporting** | Captures what the fleet saw and feeds the charts. The fleet's own ranking is a realism check, not a selector | Every promotion and rejection is charted with its evidence, so the loop's behaviour is read off the record rather than described |
+| 4 | **Registry and promotion** | Advances a version through an explicit state machine and records every rejection with its reason | No manifest, no promotion; every champion seed artifact is retained, not just the deployed one |
+| 5 | **Fleet and deployment** | Publishes the promoted artifact as a Greengrass component and deploys it to the device, which replays a sample of the pool through it and reports what it saw. A failed install rolls the device back; a failed canary is rolled back by one command | Deployment is a pointer flip, never a container rebuild; the deployment is the only record of what a device should be running |
+
+---
+
+## Cross-cutting concerns
+
+Not stages. A cycle does not pass through these; they sequence the stages, constrain them, or read
+what they produce. Each is documented separately because it spans every stage rather than sitting in
+one.
+
+| Concern | What it is | Invariant it owns |
+|---|---|---|
+| **Control** | One Step Functions state machine and two Lambdas. Sequences the cycle, owns retries and branching, and holds a single-flight lock so two cycles cannot overlap | Control flow exists exactly once, in ASL — there is no second local orchestrator to diverge from |
+| **Gates** | Four pure functions with pre-declared thresholds and no infrastructure of their own. Three are applied inside the evaluation job; the canary is asked of a device after deployment | Zero image-ID overlap with `eval` is a hard fail with no override, and no verdict is ever recorded without its reason |
+| **Reporting** | Queries over the telemetry the fleet emits, rendered as static charts. The fleet's own ranking is a realism check, not a selector | Every promotion and rejection is charted with its evidence, so the loop's behaviour is read off the record rather than described |
 
 ---
 
@@ -212,7 +226,7 @@ champion.
 
 ## Cross-cutting invariants
 
-Properties every plane honors, rather than components living anywhere:
+Properties every stage honors, rather than components living anywhere:
 
 - **`run_id` in the partition key of every stateful table, and in the prefix of every purchased
   batch.** A re-run must be physically unable to see the previous run's spent budget or promoted
@@ -236,12 +250,17 @@ Properties every plane honors, rather than components living anywhere:
 
 ## Companion docs
 
-Each plane's document lands with the plane.
+Each stage's document lands with the stage. Numbered documents are stages; unnumbered ones are
+cross-cutting.
 
-| Doc | Plane |
+| Doc | Covers |
 |---|---|
-| `01-data-and-labels.md` | 1 |
-| `02-training.md` | 2 |
-| `03-evaluation.md` | 3 |
-| `06-registry-and-promotion.md` | 6 |
-| `07-fleet-and-deployment.md` | 7 |
+| [01-data-and-labels.md](01-data-and-labels.md) | Stage 1 |
+| [02-training.md](02-training.md) | Stage 2 |
+| [03-evaluation.md](03-evaluation.md) | Stage 3 |
+| [04-registry-and-promotion.md](04-registry-and-promotion.md) | Stage 4 |
+| [05-fleet-and-deployment.md](05-fleet-and-deployment.md) | Stage 5 |
+| [control.md](control.md) | The state machine and the control function |
+| [gates.md](gates.md) | The four gates and their thresholds |
+
+Reporting has no document yet; it lands with the charts.

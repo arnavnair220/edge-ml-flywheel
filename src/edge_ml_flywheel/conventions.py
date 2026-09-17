@@ -537,6 +537,24 @@ class TimeOfDay(StrEnum):
 NATIVE_IMAGE_SIZE: Final = (1280, 720)
 
 
+# --- Detections per image -----------------------------------------------------
+
+# The cap the scoring pass writes at and the match cache is built at, and the
+# largest one anything can ask for later. `COCOeval` applies it inside the
+# per-image step, after sorting by score, so a block holds at most this many
+# detections and a smaller cap is a truncation of each block rather than a
+# re-score (see `evaluation.match.detection_rows`).
+#
+# Here rather than beside the matcher because the two planes either side of it
+# must agree: `scoring.job` writes at this cap and `evaluation.match` caches at
+# it, and a number the writer and the reader spell separately is the silent
+# drift this module exists to prevent. It is also what keeps the control
+# function's imports clear of `pycocotools` -- the Lambda is a zip of pure
+# Python that builds job requests, and importing the matcher for one integer
+# put a C extension in its import graph that its package cannot carry.
+MAX_DETS: Final = 100
+
+
 # --- Object classes -----------------------------------------------------------
 #
 # Which object categories a model predicts, and so which ones the metric covers.

@@ -1,11 +1,11 @@
-# Plane 7 — Fleet and deployment
+# Stage 5 — Fleet and deployment
 
 Publishes a promoted model as a Greengrass component, deploys it to one Graviton device, and reads
 back what the device saw. One Terraform file, one Python package and a CLI; no state machine and no
-daemon. See the [architecture overview](00-overview.md) for the plane's position in the loop.
+daemon. See the [architecture overview](00-overview.md) for the stage's position in the loop.
 
 Greengrass performs the agent loop the design describes — verify the digest, install, roll back on a
-failed install. This plane supplies what it has no opinion about: which frames the device replays,
+failed install. This stage supplies what it has no opinion about: which frames the device replays,
 what it reports, and whether that report is good enough to leave the model deployed.
 
 ---
@@ -106,9 +106,9 @@ later write to unchanged.
 
 ## Canary gate
 
-Read after promotion. The first three gates are computed from a cycle's own artifacts and decide
-whether the challenger is registered; this one cannot be asked until the artifact has reached a
-device, and it decides whether the rollout stands.
+Read after promotion, and the one gate that cannot be asked in the cloud: it needs an artifact that
+has reached a device. What it decides is whether the rollout stands. The predicates are in
+[gates.md](gates.md); what belongs here is what the device supplies to them.
 
 | Check | Fails when |
 |---|---|
@@ -116,12 +116,7 @@ device, and it decides whether the rollout stands.
 | Completion | the component started more than once, or fewer frames arrived than the summary claimed |
 | Throughput | frames per second fell more than 10% below the champion's |
 
-All three are operational. A detector is deterministic, so there is no run-to-run spread on one
-device and any "within N standard deviations" test over it is vacuous.
-
-The digest check is the independent half of verification: Greengrass checks its own download against
-its own recipe, and this catches a recipe built over the wrong object. A run's first deployment has
-no champion and passes the throughput check as its own baseline.
+A run's first deployment has no champion and passes the throughput check as its own baseline.
 
 p95 latency and cold start are reported in the verdict's reason, never gated (design §4.3). Cold
 start is the session plus the first inference, excluding interpreter startup, which costs the same
@@ -135,7 +130,7 @@ A deployment names one component version on the thing group, with `failureHandli
 A device that cannot install or start the new component returns to the one it was running.
 
 **The Greengrass deployment is the record of intent.** The design left this open between
-`fleet_config` and the deployment; this plane settles it on the deployment. No `desired_version` is
+`fleet_config` and the deployment; this stage settles it on the deployment. No `desired_version` is
 written and `fleet_config` holds no device item.
 
 **A rollback is the same call naming the previous version.** There is no separate rollback path, so
@@ -181,13 +176,14 @@ explanation rather than with a missing key.
 
 Deployment is driven by a CLI rather than by the cycle state machine. A canary is asked after the
 execution has ended, so folding it in would mean a state machine waiting on hardware every cycle.
+See [control.md](control.md).
 
 The promotion state machine is candidate → champion → archived. The intermediate shadow and canary
 states land with the features that need them.
 
 The fleet's own ranking over the frames it replayed is not reported yet.
-`fleet.telemetry.image_ids` is this plane's half of that join; the other half is a query over
-`selection_ranking_key`, and it lands with the charts in plane 8.
+`fleet.telemetry.image_ids` is this stage's half of that join; the other half is a query over
+`selection_ranking_key`, and it lands with the charts when reporting is built.
 
 `starts` is a counter in the component's work directory, which Greengrass preserves across a restart.
 It is keyed by model version, so it counts this cycle's restarts and not the previous cycle's.
@@ -197,7 +193,8 @@ It is keyed by model version, so it counts this cycle's restarts and not the pre
 ## Deferred
 
 Two of design §4.5's five conditions are absent rather than approximated: a leak test over four
-minutes and a distribution distance over one sample both pass by construction.
+minutes and a distribution distance over one sample both pass by construction. See
+[gates.md](gates.md).
 
 | Deferred | Needs |
 |---|---|

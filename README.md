@@ -36,5 +36,7 @@ denominated in labels, so the pipeline reports accuracy gained per label spent a
 
 ## Documentation
 
-Start with the [architecture overview](docs/00-overview.md) — definitions, the loop diagram, and
-the eight planes the system is built from. Each plane has its own document under [docs/](docs/).
+Start with the [architecture overview](docs/00-overview.md) — definitions, the loop diagram, and the
+five stages the system is built from. Each stage has its own numbered document under
+[docs/](docs/), alongside unnumbered ones for the cross-cutting concerns: [control](docs/control.md)
+and [gates](docs/gates.md).

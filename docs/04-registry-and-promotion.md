@@ -1,8 +1,8 @@
-# Plane 6 — Registry and promotion
+# Stage 4 — Registry and promotion
 
 Records what a cycle produced and what the gates decided about it, then advances the champion
-pointer if they passed. One control-plane step and four Step Functions states; no job and no
-compute. See the [architecture overview](00-overview.md) for the plane's position in the loop.
+pointer if they passed. One control step and four Step Functions states; no job and no compute. See
+the [architecture overview](00-overview.md) for the stage's position in the loop.
 
 ---
 
@@ -116,9 +116,9 @@ anything else verifies nothing the device does. It is read out of `model.sha256`
 than by position, so a third artifact appearing in that file cannot change which line the manifest
 records. A seed that published no ONNX digest is refused registration.
 
-The overview's plane 6 covers a candidate → shadow → canary → champion → archived progression. The
+The overview's stage 4 covers a candidate → shadow → canary → champion → archived progression. The
 approval status and the champion pointer exist; the intermediate states land with the features that
-need them. See [plane 7](07-fleet-and-deployment.md).
+need them. See [stage 5](05-fleet-and-deployment.md).
 
-Promotion writes no `desired_version`, and nothing else does either. Plane 7 makes the Greengrass
+Promotion writes no `desired_version`, and nothing else does either. Stage 5 makes the Greengrass
 deployment the record of what a device should be running, so `fleet_config` holds no device item.

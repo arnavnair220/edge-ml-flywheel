@@ -1,12 +1,58 @@
-# Plane 3 — Evaluation
+# Stage 3 — Evaluation
 
-Matches a cycle's detections against the eval cohort's ground truth, applies the quality gate, and
-caches the per-image match arrays every later statistic reads. One SageMaker Processing job per
-cycle. See the [architecture overview](00-overview.md) for the plane's position in the loop.
+Runs the model over the images, matches the detections against the eval cohort's ground truth,
+applies three of the four gates, and caches the per-image match arrays every later statistic reads.
+See the [architecture overview](00-overview.md) for the stage's position in the loop.
+
+Two SageMaker Processing jobs per cycle. **Scoring** produces detections, once per seed, and holds no
+label grant. **Matching** compares them against ground truth, once per cycle, and is the single
+principal admitted to `labels/cohort=eval/`. The split is what lets the scoring role be denied every
+label prefix outright rather than trusted to stay away from one.
 
 ---
 
-## Environment
+## Scoring
+
+| Component | Value |
+|---|---|
+| Container | `pytorch-training:2.9.0-gpu-py312-cu130-ubuntu22.04-sagemaker` |
+| Instance | `ml.g4dn.xlarge`, on demand — `ml.m5.xlarge` for the int8 pass |
+| Entry point | `container/score.py`, which calls `scoring.entrypoint` |
+| Max runtime | 3 hours, 1 hour for the int8 pass |
+
+A Processing job rather than a Batch Transform. Both produce the same detections; a transform needs a
+`Model` resource, an inference handler and one output object per input object — 67,000 objects and a
+compaction step. A Processing job loads the model once, walks the channel and writes the file.
+
+One job per seed with both cohorts inside it. `eval` and the remaining pool are two input channels
+and two output channels of a single job, because acquiring a GPU and loading the checkpoint are paid
+per job rather than per cohort.
+
+| Knob | Value |
+|---|---|
+| `image_size` | `training.job.IMAGE_SIZE` |
+| `confidence_floor` | 0.001 |
+| `max_detections` | `evaluation.match.MAX_DETS` |
+| `precision` | `fp32`, or `int8` for the edge gate's pass |
+
+`confidence_floor` is COCO's convention and far below anything a person would call a detection. AP is
+the area under a curve swept by lowering a threshold, so the low-confidence tail is most of what the
+metric integrates; raising this floor would truncate the curve and quietly lower every number the
+project reports. Selection wants the opposite and gets it by filtering at `BAND_LOW`, which is what
+lets one file serve both readers.
+
+The int8 pass runs on CPU, and not as a saving: int8 is a CPU format. ONNX Runtime's CUDA provider
+has no kernel for most of what `quantize_static` emits and falls back to float, which would measure a
+model the device will never run. It covers `eval` alone.
+
+Detections land at `detections_prefix(version, seed, cohort)`. The job carries no `VpcConfig`, no
+label channel of any kind, and no `max_images` — the images scored are exactly those named in
+`scoring_manifest_key`, and that document is the record of what was ranked. See
+[infra/scoring.tf](../infra/scoring.tf).
+
+---
+
+## Matching
 
 | Component | Value |
 |---|---|
@@ -56,31 +102,21 @@ failed gate is a completed job; only a job that cannot reach a verdict fails.
 
 ---
 
-## Gate
+## Gates
 
-The quality gate passes when the mean paired delta is at least +0.005 and the lower end of the 95%
-band over 1,000 resamples clears zero. A class scoring zero AP is a hard failure.
+Three of the four gates are applied here: `data`, `quality` and `edge`. The predicates and their
+thresholds are in [gates.md](gates.md); what belongs to this job is where they run and what they are
+given.
 
-A run's first cycle has no champion, so the delta is absent and the verdict is the collapse check
-alone.
-
-The edge gate passes when the int8 artifact is at most 25 MB and retains at least 95% of the fp32
-model's mAP. Both are properties of a file and a number, so the gate is complete without a device;
-p95 latency and cold start are reported off the fleet rather than gated (design §4.3).
-
-The 95% allowance is deliberately looser than design §4.3's 2%. A broken export is a 30% loss or a
-model that detects nothing, and a threshold tight enough to reject a working artifact would stop
-the loop over a number the fleet would never notice. What quantization actually cost is in the
-verdict's reason either way.
-
-Its input is a second pass over `eval` with the quantized graph, run by the scoring job under
-`precision=int8`. That pass is the scoring role's because it loads a model, and this job's role
-holds no model grant at all — so the artifact's size arrives as an argument rather than being read
-off the object here.
+The quality gate reads the `PairedDelta` this job computed and the per-class AP it wrote. The edge
+gate reads the artifact's size and the two mAP scores, the int8 one coming from a second pass over
+`eval` with the quantized graph, run by the scoring job under `precision=int8`. That pass is the
+scoring role's because it loads a model, and this job's role holds no model grant at all — so the
+artifact's size arrives as an argument rather than being read off the object here.
 
 A cycle whose training job predates the export has no int8 artifact, and reports no edge verdict
-rather than half of one. `canary` is unimplemented and absent from the report rather than recorded
-as passing.
+rather than half of one. `canary` cannot be asked here at all: it needs a device, so it is absent
+from the report rather than recorded as passing.
 
 ---
 
@@ -105,9 +141,14 @@ the cycle's code, manifest and detections, and a champion's cached arrays. It is
 `raw/labels/`, `labels/cohort=bootstrap/` and `derived/purchases/` in its own policy, and writes
 `eval/*` and `gates/*` only. See [infra/evaluation.tf](../infra/evaluation.tf).
 
+The scoring role reads images, the cycle's code and manifests, and the model artifact, and writes
+detections. It holds no label grant of any kind — not even to the labels the run already owns — so
+the denial is structural rather than a rule it is trusted to follow. See
+[infra/scoring.tf](../infra/scoring.tf).
+
 ---
 
 ## Incomplete
 
-The overview's plane 3 covers a per-slice regression report. It is not built: `metrics.json` carries
+The overview's stage 3 covers a per-slice regression report. It is not built: `metrics.json` carries
 overall and per-class AP only.
