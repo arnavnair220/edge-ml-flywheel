@@ -85,7 +85,7 @@
             "Resource": "arn:aws:states:::lambda:invoke",
             "Arguments": {
               "FunctionName": "${control_function_arn}",
-              "Payload": "{% {'step': 'train_request', 'run_id': $states.context.Execution.Input.run_id, 'cycle': $cycle, 'seed': $states.input.seed, 'epochs': $states.context.Execution.Input.epochs, 'instance_type': $states.context.Execution.Input.instance_type} %}"
+              "Payload": "{% {'step': 'train_request', 'run_id': $states.context.Execution.Input.run_id, 'cycle': $cycle, 'seed': $states.input.seed, 'epochs': $states.context.Execution.Input.epochs, 'max_images': $states.context.Execution.Input.max_images, 'instance_type': $states.context.Execution.Input.instance_type} %}"
             },
             "Output": "{% $states.result.Payload %}",
             "Retry": [

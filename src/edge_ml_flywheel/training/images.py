@@ -21,11 +21,18 @@ prefix -- so the training set of cycle six is a file rather than a set someone
 reconstructs later from a ledger and a partition. That is what makes `max_images`
 a parameter here rather than in the container: a short skeleton run is a short
 manifest, and the record still says exactly what was used.
+
+**Both sides of the cap live here**, and that is the point. `capped` names the
+images for the manifest; `capped_labels` drops the labels for everything the
+manifest left out, which the container needs because labels arrive on whole
+prefixes no cap can be expressed on. Two resolutions of one decision, from one
+sort, in a module that runs on a laptop -- the container is a caller, so the
+arithmetic is not stranded behind an `ultralytics` import.
 """
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -37,6 +44,7 @@ from edge_ml_flywheel.conventions import (
     raw_image_key,
     uri,
 )
+from edge_ml_flywheel.ingest.labels import Box
 
 log = logging.getLogger(__name__)
 
@@ -129,3 +137,24 @@ def capped(image_ids: Sequence[ImageId], max_images: int) -> tuple[ImageId, ...]
 
     log.info("capping the training set at %d of %d labeled images", max_images, len(ordered))
     return ordered[:max_images]
+
+
+def capped_labels(
+    labeled: Mapping[ImageId, Sequence[Box]], max_images: int
+) -> Mapping[ImageId, Sequence[Box]]:
+    """The labels for exactly the images `capped` would name, or all of them at 0.
+
+    The container's half of the cap. `prepare` applies `capped` to the labeled
+    set and writes the result as the manifest; the labels themselves arrive on
+    whole prefixes -- the bootstrap file and every purchase, appended to and
+    never rewritten -- so the same cap has to be re-derived where they are read.
+
+    Re-derived and not communicated, because both sides start from the same
+    labeled set and `capped` is a sort and a slice: the two resolve the identical
+    images without a second document to keep in step. If they ever did diverge,
+    `dataset.write` refuses the pair rather than training on the overlap.
+    """
+    kept = set(capped(tuple(labeled), max_images))
+    if len(kept) == len(labeled):
+        return labeled
+    return {image_id: boxes for image_id, boxes in labeled.items() if image_id in kept}

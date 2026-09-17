@@ -714,6 +714,25 @@ class TestTheDefinition:
         payload = definition["States"]["EvaluateRequest"]["Arguments"]["Payload"]
         assert "instance_type" not in payload
 
+    def test_the_cap_reaches_the_training_job_and_not_only_the_manifest(
+        self, definition: dict[str, Any]
+    ) -> None:
+        """The bug that stopped every skeleton run there has ever been.
+
+        `Prepare` caps the image manifest; the labels arrive on whole prefixes
+        that no cap can be expressed on, so the container has to apply the same
+        number itself. Until it was passed here, a capped cycle delivered a few
+        hundred images beside every label the run had bought, and the training
+        job refused the pair -- correctly, and after paying for the instance.
+        """
+        prepare = definition["States"]["Prepare"]["Arguments"]["Payload"]
+        training = definition["States"]["Train"]["ItemProcessor"]["States"]["TrainingRequest"][
+            "Arguments"
+        ]["Payload"]
+
+        assert "Execution.Input.max_images" in prepare
+        assert "Execution.Input.max_images" in training
+
     def test_an_optional_input_is_only_read_where_absence_is_allowed(
         self, definition: dict[str, Any]
     ) -> None:

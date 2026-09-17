@@ -187,11 +187,20 @@ def train_request(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any
     passed a number produces a model whose `recipe_version` is a claim about a
     recipe it did not run. The compute fields default to `job.Compute`, which is
     where the purchasing mode and the runtime ceiling are decided.
+
+    `max_images` is read with a default for `prepare`'s reason, and it must be
+    the same number `prepare` was given: that step caps the image manifest and
+    this one caps the labels the container collects, and the two caps are one
+    decision resolved twice. A cap reaching one and not the other is the pair
+    `dataset.write` refuses.
     """
     version = new_model_version(parse_run_id(str(event["run_id"])), Cycle(int(event["cycle"])))
     seed = Seed(int(event["seed"]))
 
-    recipe = job.Recipe(epochs=int(event["epochs"]))
+    recipe = job.Recipe(
+        epochs=int(event["epochs"]),
+        max_images=int(event.get("max_images", 0)),
+    )
     compute = job.Compute(
         instance_type=str(event.get("instance_type", job.Compute().instance_type)),
     )

@@ -75,6 +75,15 @@ def _parser() -> argparse.ArgumentParser:
     started.add_argument("--seed", type=int, required=True)
     started.add_argument("--epochs", type=int, required=True)
     started.add_argument("--batch", type=int, default=job.Recipe(epochs=1).batch)
+    # The same number `prepare` was given, and for the same skeleton run. It caps
+    # the labels the container collects where `prepare` capped the manifest, so a
+    # cap passed to one and not the other is the mismatch `dataset.write` refuses.
+    started.add_argument(
+        "--max-images",
+        type=int,
+        default=0,
+        help="Cap the labels to the images the manifest names. Must match `prepare --max-images`.",
+    )
     started.add_argument("--instance-type", default=job.Compute().instance_type)
     started.add_argument(
         "--wait",
@@ -117,7 +126,7 @@ def main(argv: list[str] | None = None) -> None:
             aws,
             version,
             Seed(args.seed),
-            job.Recipe(epochs=args.epochs, batch=args.batch),
+            job.Recipe(epochs=args.epochs, batch=args.batch, max_images=args.max_images),
             job.Compute(instance_type=args.instance_type),
         )
         print(name)
