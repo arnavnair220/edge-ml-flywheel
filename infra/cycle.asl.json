@@ -504,7 +504,7 @@
       "Comment": "The device produced detections the cycle may not spend against. Nothing is bought, the rollout has already been rolled back by the canary step, and the run stops for someone to look at the device -- which is the correct response to bytes that do not hash to what the gates were reported over.",
       "Type": "Fail",
       "Error": "PassNotTrusted",
-      "CausePath": "{% $canary_reason %}"
+      "Cause": "{% $canary_reason %}"
     },
 
     "Select": {
