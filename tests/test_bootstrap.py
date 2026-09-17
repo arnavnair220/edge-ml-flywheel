@@ -23,12 +23,10 @@ from edge_ml_flywheel.evaluation.bootstrap import RESAMPLE_SEED, paired_delta, r
 from edge_ml_flywheel.evaluation.coco import (
     Detection,
     ImageIndex,
-    as_coco,
-    as_coco_results,
     detections,
     ground_truth,
 )
-from edge_ml_flywheel.evaluation.match import MatchCache, score
+from edge_ml_flywheel.evaluation.match import MatchCache, as_coco, as_coco_results, score
 from edge_ml_flywheel.evaluation.metrics import average_precision, image_rows
 from edge_ml_flywheel.ingest.labels import Box
 

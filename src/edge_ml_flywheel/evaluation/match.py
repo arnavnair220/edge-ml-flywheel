@@ -33,17 +33,19 @@ way, and so what makes equality with `accumulate()` on the identity resample a
 meaningful test rather than an approximate one.
 """
 
+import copy
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import numpy as np
 from numpy.typing import NDArray
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
-from edge_ml_flywheel.conventions import CLASS_SET, ClassSet, ImageId
+from edge_ml_flywheel.conventions import CLASS_SET, MAX_DETS, ClassSet, ImageId
 from edge_ml_flywheel.evaluation.coco import ImageIndex
 
 # COCO's ten thresholds, 0.50 to 0.95 in steps of 0.05, spelled the way
@@ -58,11 +60,12 @@ IOU_THRESHOLDS: Final[NDArray[np.float64]] = np.linspace(
 )
 IOU_THRESHOLDS.setflags(write=False)
 
-# The cap the cache is built at, and the largest one anything can ask for later.
-# `COCOeval` applies it inside the per-image step, after sorting by score, so a
-# block holds at most this many detections and a smaller cap is a truncation of
-# each block rather than a re-score (see `detection_rows`).
-MAX_DETS: Final = 100
+# `MAX_DETS` is `conventions`', imported above rather than declared here. The
+# cache is built at that cap and the scoring pass writes at the same one, and a
+# number two planes must agree on belongs where both read it from. Import it from
+# there and not through this module -- strict mypy refuses an implicit re-export,
+# which is the check that keeps a caller wanting one integer from pulling
+# `pycocotools` in behind it.
 
 
 class AreaRange(StrEnum):
@@ -221,6 +224,63 @@ class MatchCache:
         return int(self.n_truth[blocks].sum())
 
 
+def _as_dataset(document: Mapping[str, Any]) -> Any:
+    """Hand a plain document to `COCO.dataset`, whose stub is narrower than it.
+
+    `types-pycocotools` types `dataset` as a TypedDict requiring `segmentation`
+    on every annotation and `supercategory` on every category. The `bbox` path
+    reads neither: `COCOeval` at `iouType="bbox"` touches `bbox`, `area` and
+    `iscrowd` only. Satisfying the stub would add two permanently empty fields to
+    every annotation of a 5,000-image document, so the widening is stated here
+    once instead, at both call sites' expense of one indirection.
+    """
+    return dict(document)
+
+
+def as_coco(document: Mapping[str, Any]) -> COCO:
+    """Wrap a ground-truth document as a `COCO`, without touching a disk.
+
+    `COCO(path)` is the only documented constructor and it reads JSON from a
+    file. Assigning `dataset` then calling `createIndex` is the same pair of
+    steps it performs after parsing, without the round trip through a temp file.
+
+    Here rather than beside `coco.ground_truth`, which states the document this
+    takes: constructing one is what needs `pycocotools`, and that module is
+    imported by a Lambda whose package cannot hold it.
+    """
+    coco = COCO()
+    coco.dataset = _as_dataset(document)
+    coco.createIndex()
+    return coco
+
+
+def as_coco_results(ground_truth_coco: COCO, records: Sequence[Mapping[str, Any]]) -> COCO:
+    """Wrap a results list as a `COCO`, empty list included.
+
+    `COCO.loadRes` reads `anns[0]` to decide whether the results are captions,
+    boxes or segmentations, so it raises `IndexError` on an empty list. Design
+    section 4.2 hard fails a challenger whose classes collapse to zero
+    detections, which the gate can only report if scoring does not raise first,
+    so the empty case is assembled here in the steps `loadRes` would have taken.
+    """
+    if records:
+        # `loadRes` is typed as taking a file path, as its docstring claims, and
+        # has accepted an in-memory list since 2.0. Passing a path would mean
+        # writing these records to a temp file to read them straight back.
+        return ground_truth_coco.loadRes(cast(Any, [dict(record) for record in records]))
+
+    empty = COCO()
+    empty.dataset = _as_dataset(
+        {
+            "images": list(ground_truth_coco.dataset["images"]),
+            "annotations": [],
+            "categories": copy.deepcopy(ground_truth_coco.dataset["categories"]),
+        }
+    )
+    empty.createIndex()
+    return empty
+
+
 def score(
     truth: COCO,
     results: COCO,
@@ -228,7 +288,7 @@ def score(
 ) -> MatchCache:
     """Run the per-image assignment once and keep the arrays.
 
-    `truth` and `results` come from `coco.as_coco` and `coco.as_coco_results`, so
+    `truth` and `results` come from `as_coco` and `as_coco_results` above, so
     both are already restricted to `index`'s images and the project's categories.
 
     Every IoU threshold and every area range in one pass, because `evaluate()`

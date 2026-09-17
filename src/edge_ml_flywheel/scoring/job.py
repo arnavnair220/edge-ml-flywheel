@@ -34,6 +34,7 @@ from datetime import datetime
 from typing import Any, Final
 
 from edge_ml_flywheel.conventions import (
+    MAX_DETS,
     SCORED_COHORTS,
     TRAINING_CODE_FILE,
     Buckets,
@@ -52,7 +53,6 @@ from edge_ml_flywheel.conventions import (
     training_code_key,
     uri,
 )
-from edge_ml_flywheel.evaluation.match import MAX_DETS
 from edge_ml_flywheel.training import job as training
 
 # Where Processing puts an input and looks for an output, both fixed by the
@@ -188,10 +188,13 @@ class Scoring:
     band it ranks on at 0.05 -- which is the arrangement that lets one file serve
     both readers.
 
-    `max_detections` is `evaluation.match.MAX_DETS` rather than a number beside
-    it. The match cache is built at that cap and cannot be asked for more later,
-    so a job emitting more rows would write boxes no metric can ever read, and a
-    job emitting fewer would silently cap the cache below its own limit.
+    `max_detections` is `conventions.MAX_DETS` rather than a number beside it.
+    The match cache is built at that cap and cannot be asked for more later, so a
+    job emitting more rows would write boxes no metric can ever read, and a job
+    emitting fewer would silently cap the cache below its own limit. It comes
+    from `conventions` rather than from the matcher that reads it because this
+    module is imported by the control function, whose deployment package cannot
+    carry `pycocotools`.
 
     `precision` is which build of the model the pass runs. `FP32` is the
     checkpoint and the pass every cycle makes; `INT8` is the quantized graph that

@@ -19,12 +19,9 @@ raises: the archive is data to filter, but a model predicting an untrained class
 means the eval ran under a different class set than the one reported.
 """
 
-import copy
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, Self, cast
-
-from pycocotools.coco import COCO
+from typing import Any, Final, Self
 
 from edge_ml_flywheel.conventions import NATIVE_IMAGE_SIZE, ClassSet, ImageId
 from edge_ml_flywheel.ingest.labels import Box
@@ -260,54 +257,8 @@ def detections(
     return records
 
 
-def _as_dataset(document: Mapping[str, Any]) -> Any:
-    """Hand a plain document to `COCO.dataset`, whose stub is narrower than it.
-
-    `types-pycocotools` types `dataset` as a TypedDict requiring `segmentation`
-    on every annotation and `supercategory` on every category. The `bbox` path
-    reads neither: `COCOeval` at `iouType="bbox"` touches `bbox`, `area` and
-    `iscrowd` only. Satisfying the stub would add two permanently empty fields to
-    every annotation of a 5,000-image document, so the widening is stated here
-    once instead, at both call sites' expense of one indirection.
-    """
-    return dict(document)
-
-
-def as_coco(document: Mapping[str, Any]) -> COCO:
-    """Wrap a ground-truth document as a `COCO`, without touching a disk.
-
-    `COCO(path)` is the only documented constructor and it reads JSON from a
-    file. Assigning `dataset` then calling `createIndex` is the same pair of
-    steps it performs after parsing, without the round trip through a temp file.
-    """
-    coco = COCO()
-    coco.dataset = _as_dataset(document)
-    coco.createIndex()
-    return coco
-
-
-def as_coco_results(ground_truth_coco: COCO, records: Sequence[Mapping[str, Any]]) -> COCO:
-    """Wrap a results list as a `COCO`, empty list included.
-
-    `COCO.loadRes` reads `anns[0]` to decide whether the results are captions,
-    boxes or segmentations, so it raises `IndexError` on an empty list. Design
-    section 4.2 hard fails a challenger whose classes collapse to zero
-    detections, which the gate can only report if scoring does not raise first,
-    so the empty case is assembled here in the steps `loadRes` would have taken.
-    """
-    if records:
-        # `loadRes` is typed as taking a file path, as its docstring claims, and
-        # has accepted an in-memory list since 2.0. Passing a path would mean
-        # writing these records to a temp file to read them straight back.
-        return ground_truth_coco.loadRes(cast(Any, [dict(record) for record in records]))
-
-    empty = COCO()
-    empty.dataset = _as_dataset(
-        {
-            "images": list(ground_truth_coco.dataset["images"]),
-            "annotations": [],
-            "categories": copy.deepcopy(ground_truth_coco.dataset["categories"]),
-        }
-    )
-    empty.createIndex()
-    return empty
+# The three functions that *construct* a `COCO` live in `match`, the module that
+# drives it. This one states the documents; that one runs the matching. The split
+# is what keeps `pycocotools` out of the control function's import graph, which
+# reaches `Detection` from here through `scoring.detections` and
+# `selection.score`.

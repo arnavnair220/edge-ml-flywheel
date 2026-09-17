@@ -1,8 +1,9 @@
-# Plane 1 — Data and label supply
+# Stage 1 — Data and label supply
 
-Plane 1 spans ingest, partitioning, selection and label purchase. It owns two invariants: labels are
-obtainable only by paying the oracle, and the eval set is fixed at partition time and never enters
-training. See the [architecture overview](00-overview.md) for the plane's position in the loop.
+This stage spans ingest, partitioning, selection and label purchase. It owns two invariants: labels
+are obtainable only by paying the oracle, and the eval set is fixed at partition time and never
+enters training. See the [architecture overview](00-overview.md) for the stage's position in the
+loop.
 
 ---
 
@@ -395,8 +396,8 @@ It is written under the write-once cycle prefix. The ledger records which images
 records what they were ranked against, which is not recoverable afterwards.
 
 The batch's `weather` and `timeofday` mix is not written. It is a join of this file onto the image
-manifest, which is zstd and unreadable by the control plane's pyarrow, so the mix is a query over two
-files already in the bucket. It lands with the composition chart that reads it. A blind-spot count
+manifest, which is zstd and unreadable by the control function's pyarrow, so the mix is a query over
+two files already in the bucket. It lands with the composition chart that reads it. A blind-spot count
 and the batch's predicted classes are logged per cycle.
 
 A short run capped with `max_images` must be registered with a budget it can afford: selection
@@ -429,7 +430,7 @@ means contamination requires a code bug and an IAM misconfiguration rather than 
 - `bootstrap` is refused with the rest. Its labels are already owned, and it reaches training through
   its own label file, so the oracle does one thing: charge, then serve.
 
-`eval` labels are read only by the evaluation plane: never purchasable, never appended to the
+`eval` labels are read only by the evaluation stage: never purchasable, never appended to the
 training set, never re-drawn within a run. The gate refuses them by cohort, and no key builder in the
 oracle can address the split they are drawn from. Zero image-ID overlap between the labeled set and
 `eval` is a hard gate failure with no override, and is the backstop rather than the mechanism.

@@ -20,11 +20,10 @@ from edge_ml_flywheel.conventions import (
 from edge_ml_flywheel.evaluation.coco import (
     Detection,
     ImageIndex,
-    as_coco,
-    as_coco_results,
     detections,
     ground_truth,
 )
+from edge_ml_flywheel.evaluation.match import as_coco, as_coco_results
 from edge_ml_flywheel.ingest.labels import Box
 
 # Well-formed BDD100K IDs, declared out of sorted order so every test exercises

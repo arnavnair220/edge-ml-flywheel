@@ -60,7 +60,14 @@ from edge_ml_flywheel.evaluation.job import (
     detections_channel,
     output_names,
 )
-from edge_ml_flywheel.evaluation.match import MatchCache, load, save, score
+from edge_ml_flywheel.evaluation.match import (
+    MatchCache,
+    as_coco,
+    as_coco_results,
+    load,
+    save,
+    score,
+)
 from edge_ml_flywheel.evaluation.metrics import (
     OVERALL,
     Scope,
@@ -187,7 +194,7 @@ def pass_cache(root: Path, truth: COCO, index: ImageIndex, described: str) -> Ma
         log.warning("%s detected nothing at all over %d images", described, len(index))
 
     predictions = detection_rows.group(rows)
-    results = coco.as_coco_results(truth, coco.detections(predictions, CLASS_SET, index))
+    results = as_coco_results(truth, coco.detections(predictions, CLASS_SET, index))
     cache = score(truth, results, index)
 
     log.info(
@@ -348,7 +355,7 @@ def main(argv: list[str] | None = None) -> None:
     index = scored_images()
     log.info("evaluating %s at seeds %s over %d images", version, list(seeds), len(index))
 
-    truth = coco.as_coco(coco.ground_truth(eval_boxes(index), CLASS_SET, index))
+    truth = as_coco(coco.ground_truth(eval_boxes(index), CLASS_SET, index))
 
     # The caches are written as they are built, before anything is compared, so a
     # failure in the bootstrap leaves behind the expensive half of this job.
