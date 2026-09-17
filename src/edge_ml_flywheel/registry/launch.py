@@ -101,6 +101,31 @@ def _read_json(aws: boto3.Session, bucket: str, key: str, missing: str) -> dict[
     return dict(json.loads(body))
 
 
+def read_manifest(aws: boto3.Session, bucket: str, version: ModelVersion) -> ModelManifest:
+    """The manifest a registration wrote, parsed back into what it encodes.
+
+    Here rather than in `fleet`, which is its second reader, because this module
+    already owns the manifest's round trip: `_write_manifest` parses the document
+    back through `from_document` to check what landed, and a second reader
+    spelling its own read is a second thing to fix when the encoding moves.
+
+    What the fleet wants out of it is `artifact_sha256` for the deployed seed,
+    which is the digest a device's own hash is compared against -- so this is the
+    path that makes the canary's first check mean something. Reading the file
+    rather than trusting an argument is the whole of it: a digest an operator
+    passed is a digest that matches whatever they read it from.
+    """
+    return document.from_document(
+        _read_json(
+            aws,
+            bucket,
+            model_manifest_key(version),
+            f"The cycle that trained {version} did not reach registration, so there is no "
+            f"manifest and nothing that may be deployed.",
+        )
+    )
+
+
 def artifact_digests(
     aws: boto3.Session, bucket: str, version: ModelVersion, seeds: Sequence[Seed]
 ) -> dict[Seed, str]:

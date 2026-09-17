@@ -943,11 +943,22 @@ def table_name(table: Table) -> str:
 
 # --- fleet_config entities ----------------------------------------------------
 #
-# `Table.FLEET_CONFIG` sorts on `entity`, and two shapes of item share the
-# partition: the run's own control item, and one per device carrying that
-# device's `desired_version`. The run's is `run`; the devices' are `device#<n>`
-# and are deliberately unspelled until the fleet plane writes one, because a
-# constant nothing uses is a format nothing checks.
+# `Table.FLEET_CONFIG` sorts on `entity`, and one shape of item uses it: the
+# run's own control item, at `run`.
+#
+# **There is no per-device item, and that is the fleet plane's answer rather than
+# a gap it left.** The design reserved `device#<n>` to carry a `desired_version`
+# a device would read, and asked which of that item or the Greengrass deployment
+# would be the record of intent (design section 6). A deployment already is one:
+# it names a component version, the service holds it, and a device is told what
+# to run rather than polling for it. An item beside it would be a second copy of
+# one fact, written by a different call, with nothing to say which is right when
+# they disagree -- and the disagreement would be invisible, because the copy the
+# device acts on is the one nothing here reads.
+#
+# So the spelling stays reserved and unused. What a device is running is read
+# back from the deployment and from what the device itself reports, both of which
+# are produced by the thing that actually decides it.
 #
 # The run item is where the cycle counter lives, which makes this string
 # load-bearing beyond addressing. Advancing the counter is a conditional update
@@ -1883,9 +1894,189 @@ def training_code_key(run_id: RunId, cycle: Cycle) -> str:
     return f"{cycle_prefix(run_id, cycle)}training/{TRAINING_CODE_FILE}"
 
 
+# --- Artifacts bucket: the fleet's own objects --------------------------------
+
+# The file name `replay_manifest_key` ends in, named because two readers address
+# it and only one of them builds the key. `TRAINING_CODE_FILE`'s situation
+# exactly: Greengrass names a downloaded artifact after the last component of its
+# key, so the component recipe spells the file directly, and a second spelling
+# would be a component that starts and finds no frames.
+REPLAY_MANIFEST_FILE: Final = "replay.json"
+
+
+def replay_manifest_key(run_id: RunId, cycle: Cycle) -> str:
+    """The pool frames one cycle put in front of the fleet.
+
+    `scoring_manifest_key`'s argument for the third set of images a cycle shows a
+    model, and the one design section 7.2 requires by name: the sample is drawn
+    per cycle because the pool shrinks as the run proceeds, and it is the small
+    per-cycle list of image IDs that later ties a telemetry record back to a
+    scoring decision. Without it a confidence reported from a device is a number
+    about a frame nobody can identify.
+
+    Drawn out of `selection_ranking_key`'s rows rather than recomputed from the
+    partition and the ledger, so the frames the fleet replays are by construction
+    frames the cycle also ranked -- which is what the realism check compares and
+    what makes the telemetry regenerable offline from retained images.
+
+    A JSON array of image IDs rather than a manifest of S3 keys: it is read by
+    the device, which resolves each ID through `raw_image_key` under its own
+    grant, and by a later join against the ranking. Neither wants SageMaker's
+    `ManifestFile` envelope.
+    """
+    return f"{cycle_prefix(run_id, cycle)}fleet/{REPLAY_MANIFEST_FILE}"
+
+
+# Where the device-side code is held, outside every run prefix because it is a
+# function of the commit and of nothing else -- `BASE_WEIGHTS_PREFIX`'s placement
+# and its reason. Two cycles built from one tree ship one object, and a component
+# version built twice from the same commit names the identical bytes.
+REPLAY_CODE_PREFIX: Final = "fleet/code/"
+
+# The archive's file name, and the commit is the *directory* above it rather than
+# the name itself. That is not tidiness: Greengrass unpacks an archive into a
+# directory named after the file, so a key ending in `<sha>.zip` would put the
+# package under a path that changes with every commit -- and the recipe sets
+# `PYTHONPATH` to that path, so it would be a component that starts and cannot
+# import itself on the first cycle after any change. Holding the name fixed and
+# moving the commit above it makes the archive content-addressed and the unpacked
+# path constant.
+REPLAY_CODE_FILE: Final = "replay.zip"
+
+
+def replay_code_key(git_commit: str) -> str:
+    """The package as the replay component receives it, addressed by commit.
+
+    `training_code_key`'s object for the device rather than for a job, and keyed
+    differently for a reason that document does not have. A training archive is
+    evidence about one cycle and lives under that cycle's write-once prefix; this
+    one is an input to any number of them, and naming it by the tree that
+    produced it is what lets a redeploy of the same commit be a no-op instead of
+    an overwrite of an object a live component is still pointed at.
+
+    The commit is checked rather than trusted, because the name is the whole of
+    the addressing: a truncated SHA would quietly claim a prefix a full one never
+    writes to, and the component would ship a tree nobody can identify.
+    """
+    if not _GIT_COMMIT.match(git_commit):
+        raise ValueError(f"not a full 40-character git commit SHA: {git_commit!r}")
+    return f"{REPLAY_CODE_PREFIX}{git_commit}/{REPLAY_CODE_FILE}"
+
+
+# --- Fleet: Greengrass components ---------------------------------------------
+#
+# A promoted model reaches a device as a Greengrass component (design section 6),
+# and a component is addressed by a name and a version. A model version cannot be
+# either of them as it stands: Greengrass requires the version to be semantic --
+# `<major>.<minor>.<patch>` -- and a model version is a timestamp, a slug and a
+# cycle.
+#
+# So the two halves of a model version are split across the two halves of a
+# component's address. **The name carries the run and the version carries the
+# cycle**, which is `model_package_group`'s arrangement applied to the other
+# registry a model is held in: one component per run, one version per cycle,
+# because the champion a version is compared against is a fact about its run
+# (design section 5). Two runs therefore cannot collide on a component version,
+# which they would if the version were the cycle alone -- and a Greengrass
+# component version is immutable once created, so that collision is one nothing
+# can clear up afterwards.
+#
+# **The cycle is not padded, and this is the one place in this module where
+# padding would be wrong.** Semver forbids a leading zero in a numeric
+# identifier, so `0.003.0` is a string no Greengrass API accepts. Nor is padding
+# needed: semver compares those identifiers numerically, so `0.10.0` already
+# sorts above `0.9.0` without the help that `CYCLE_DIGITS` exists to give every
+# key that sorts lexicographically.
+
+# The major and patch are fixed at zero and only the minor moves. A major of 0
+# says what is true -- nothing about this component's interface is promised
+# between cycles -- and spending the other two identifiers on anything would mean
+# inventing a second number the cycle does not supply.
+_COMPONENT_MAJOR: Final = 0
+_COMPONENT_PATCH: Final = 0
+
+_COMPONENT_VERSION: Final = re.compile(
+    rf"^{_COMPONENT_MAJOR}\.(?P<cycle>0|[1-9][0-9]*)\.{_COMPONENT_PATCH}$"
+)
+
+# What appears as the publisher on every component version. A required field with
+# no addressing role, so it is the project and nothing more.
+COMPONENT_PUBLISHER: Final = PROJECT
+
+# Greengrass's ceiling on a component name, and the reason the name is the run
+# rather than the run plus a description of it: `PROJECT` and the longest run ID
+# `RUN_SLUG_MAX_LEN` permits come to 66 characters, which leaves room and is
+# checked anyway for `model_package_group`'s reason -- the worst place to find a
+# name too long is the first deployment of a run already several cycles in.
+COMPONENT_NAME_MAX: Final = 128
+
+
+def model_component(run_id: RunId) -> str:
+    """The Greengrass component one run's models are deployed as.
+
+    Dot-separated rather than hyphenated, which is the reverse-DNS shape every
+    AWS-published component uses and which reads as one name with two parts
+    rather than as a longer run ID.
+    """
+    name = f"{PROJECT}.{parse_run_id(run_id)}"
+    if len(name) > COMPONENT_NAME_MAX:
+        raise ValueError(
+            f"component name is {len(name)} characters, over Greengrass's "
+            f"{COMPONENT_NAME_MAX}: {name}"
+        )
+    return name
+
+
+def component_version(cycle: Cycle) -> str:
+    """One cycle's component version. Unpadded, for the reason stated above."""
+    if cycle < 0:
+        raise ValueError(f"a cycle is not negative and semver has no sign for it: {cycle}")
+    return f"{_COMPONENT_MAJOR}.{cycle}.{_COMPONENT_PATCH}"
+
+
+def parse_component_version(value: str) -> Cycle:
+    """The cycle a component version names.
+
+    The inverse exists so that reading a deployment back is not string surgery at
+    the call site, and so a one-sided change to either half fails a test --
+    `parse_purchase_event`'s arrangement. It is also what a rollback reads: the
+    revision names a version, and which cycle that was is the fact the audit
+    record wants.
+    """
+    match = _COMPONENT_VERSION.match(value)
+    if not match:
+        raise ValueError(
+            f"not a component version this project mints: {value!r}. Expected "
+            f"{_COMPONENT_MAJOR}.<cycle>.{_COMPONENT_PATCH} with no leading zero on the cycle"
+        )
+    return Cycle(int(match["cycle"]))
+
+
+def component_address(version: ModelVersion) -> tuple[str, str]:
+    """The component name and version one model is deployed as.
+
+    Both halves from the one string, never passed beside it -- `model_prefix`'s
+    rule, and the reason this exists rather than two calls at every site: a
+    caller holding a model version has no business splitting it itself.
+    """
+    run_id, cycle = _locate(version)
+    return model_component(run_id), component_version(cycle)
+
+
 # --- Telemetry bucket ---------------------------------------------------------
 
 ATHENA_RESULTS_PREFIX: Final = "athena-results/"
+
+
+def telemetry_run_prefix(run_id: RunId) -> str:
+    """Everything one run's fleet has ever said, as a single prefix.
+
+    `purchases_run_prefix`'s shape and its reason. A replay is read back by
+    listing rather than by date -- the reader knows which version it is asking
+    about and not which afternoon the device ran -- so the day partition below is
+    for a query engine and this is for the listing that feeds the canary.
+    """
+    return f"fleet/{run_prefix(run_id)}"
 
 
 def telemetry_prefix(run_id: RunId, day: date) -> str:
@@ -1894,4 +2085,198 @@ def telemetry_prefix(run_id: RunId, day: date) -> str:
     Day granularity, not hour: at this volume hourly partitions produce small
     files and Athena gets slower, not faster.
     """
-    return f"fleet/{run_prefix(run_id)}dt={day.isoformat()}/"
+    return f"{telemetry_run_prefix(run_id)}dt={day.isoformat()}/"
+
+
+# --- Telemetry: what a device says --------------------------------------------
+#
+# A device publishes to `telemetry_topic` and an IoT rule lands the message in
+# the telemetry bucket under `telemetry_prefix`. Nothing on the device writes a
+# file (design section 7), so these shapes are the whole of what a replay leaves
+# behind.
+#
+# **The topic's segments are load-bearing.** The rule's S3 key template addresses
+# the run and the thing by position -- `${topic(3)}` and `${topic(4)}` -- which
+# makes the layout below a contract with a Terraform file rather than a string
+# this module is free to rearrange. It is stated here for the reason the whole
+# module exists, and the cost of getting it wrong is the usual one: the publish
+# succeeds and the object lands under a prefix nothing reads.
+#
+# **Frames are batched and the summary is not.** A replay is several hundred
+# frames of a few hundred bytes each, and one object per frame would be one S3
+# GET per frame for a reader that wants all of them. One object per hundred is
+# the same bytes in a fiftieth of the requests, well inside IoT Core's 128 KB
+# message ceiling. The summary is a single record because there is one.
+
+TELEMETRY_ROOT: Final = f"{PROJECT}/fleet"
+
+# What the IoT rule subscribes to: every run, every thing. The two wildcards are
+# the two segments below.
+TELEMETRY_TOPIC_FILTER: Final = f"{TELEMETRY_ROOT}/+/+"
+
+# Frames per published message. Sized so a full message stays well under IoT
+# Core's ceiling at the detection counts BDD100K produces, and so a 500-frame
+# replay is five objects rather than five hundred.
+TELEMETRY_BATCH: Final = 100
+
+
+def telemetry_topic_prefix(run_id: RunId) -> str:
+    """Everything in a device's topic except which device it is.
+
+    Split out because the last segment is not always a name this module can
+    check. A Greengrass recipe names the publishing device as `{iot:thingName}`,
+    which the nucleus substitutes on the device -- so the recipe needs this
+    prefix and supplies its own final segment, while `telemetry_topic` below is
+    what every reader and every test uses. Building the topic in the recipe
+    instead would be a second spelling of the layout the IoT rule depends on.
+    """
+    return f"{TELEMETRY_ROOT}/{parse_run_id(run_id)}/"
+
+
+def telemetry_topic(run_id: RunId, thing: str) -> str:
+    """Where one device publishes one run's replay.
+
+    The thing name is the last segment so that the rule can name it in the object
+    it writes, which is what keeps two devices' records apart in a prefix neither
+    of them partitions. Checked as a key component for exactly that reason: a
+    slash in it would move the object a level down and change which segment the
+    rule reads the run out of.
+    """
+    return f"{telemetry_topic_prefix(run_id)}{_token('thing', thing)}"
+
+
+class TelemetryKind(StrEnum):
+    """Which of the two records a telemetry object holds.
+
+    A discriminator rather than two topics, because two topics would be two rules
+    and two prefixes for records a reader always wants together: a batch of
+    frames means nothing without the summary saying how many there should have
+    been.
+    """
+
+    FRAMES = "frames"
+    REPLAY = "replay"
+
+
+@dataclass(frozen=True, slots=True)
+class FrameRow:
+    """One replayed frame, as an entry inside a `TelemetryKind.FRAMES` record.
+
+    Three facts and deliberately not the boxes. `inference_ms` is the measurement
+    design section 4.3 asks for and the only one that must come off the device --
+    p95 is computed from these, and mean hides the stalls that matter. `scores`
+    is the confidence of each detection, which is what a later distribution
+    comparison reads; the coordinates are omitted because nothing downstream of
+    the fleet matches a device's boxes against ground truth, and the offline pass
+    already wrote every box this model draws.
+
+    `image_id` is what ties the record to the ranking that chose the frame, which
+    is `replay_manifest_key`'s whole purpose.
+
+    A frame the model found nothing in carries an empty `scores` and is not an
+    absent row. It is a real observation -- the champion's blind spots are what
+    `selection.score` ranks highest -- and dropping it would make a replay's
+    frame count disagree with its summary for a reason nothing recorded.
+    """
+
+    image_id: ImageId
+    inference_ms: float
+    scores: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        parse_image_id(self.image_id)
+        if self.inference_ms <= 0.0:
+            raise ValueError(
+                f"a frame that took {self.inference_ms} ms is not a frame that was inferred"
+            )
+        outside = [score for score in self.scores if not 0.0 <= score <= 1.0]
+        if outside:
+            raise ValueError(f"a confidence outside [0, 1] is not a confidence: {outside[:5]}")
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayReport:
+    """One device's whole replay of one model version, frames and summary joined.
+
+    What the canary gate reads. It is a reduction of the objects under
+    `telemetry_prefix` rather than a document anything writes, which is why the
+    two counts are separate fields: `replayed` is what the device said it put
+    through the model and `latencies_ms` is what actually arrived. A replay whose
+    summary claims 500 frames and whose batches carry 300 is a replay that lost
+    messages, and a report that stored one number could not say so.
+
+    `artifact_sha256` is the digest the device computed over the file it loaded,
+    not the one Greengrass verified on download. The service checks its own copy
+    against its own recipe, which is a closed loop; this is the independent half,
+    and comparing it against `ModelManifest.artifact_sha256` is what says the
+    bytes that ran are the bytes the gates were reported over.
+
+    `starts` is how many times the component has started for this version, read
+    off a counter in its work directory. One is a clean install. More is
+    Greengrass restarting something that exited, which is the failure design
+    section 4.5 calls "hot-swapping did not crash the agent" and the reason the
+    check is worth making at all.
+    """
+
+    version: ModelVersion
+    thing: str
+    artifact_sha256: str
+    cold_start_ms: float
+    starts: int
+    replayed: int
+    latencies_ms: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        parse_model_version(self.version)
+        if not _SHA256.match(self.artifact_sha256):
+            raise ValueError(f"not a lowercase hex sha256 digest: {self.artifact_sha256!r}")
+        if self.cold_start_ms <= 0.0:
+            raise ValueError(f"a cold start of {self.cold_start_ms} ms was never measured")
+        if self.starts < 1:
+            raise ValueError(
+                f"a component that started {self.starts} times published nothing, so this report "
+                f"could not exist"
+            )
+        if self.replayed < 0:
+            raise ValueError(f"a replay cannot have put {self.replayed} frames through a model")
+
+    @property
+    def reported(self) -> int:
+        """Frames that actually arrived, against `replayed` frames claimed."""
+        return len(self.latencies_ms)
+
+    @property
+    def complete(self) -> bool:
+        """Every frame the summary claimed is a frame a batch carried.
+
+        Equality rather than a floor, in both directions. Fewer is lost messages;
+        more is two replays of one version landing in one prefix, which makes
+        every number below an average over two runs of the component.
+        """
+        return self.reported == self.replayed
+
+    @property
+    def p95_ms(self) -> float:
+        """Nearest-rank p95, which is a latency this device actually recorded.
+
+        Not an interpolation between two of them. At a few hundred frames the two
+        differ by less than the measurement's own spread, and a reported figure
+        that appears in no sample is one nobody can go back and find.
+        """
+        if not self.latencies_ms:
+            raise ValueError(f"{self.thing} reported no frame, so it has no p95")
+        ordered = sorted(self.latencies_ms)
+        rank = -(-len(ordered) * 95 // 100)  # ceil, without importing math for it
+        return ordered[rank - 1]
+
+    @property
+    def throughput_fps(self) -> float:
+        """Frames a second of inference, which is what the canary compares.
+
+        Off the mean rather than the p95: throughput is how much work the device
+        got through, so the slow frames should count exactly as much as they
+        cost. p95 is the separate question of how bad the worst of them was.
+        """
+        if not self.latencies_ms:
+            raise ValueError(f"{self.thing} reported no frame, so it has no throughput")
+        return 1000.0 * len(self.latencies_ms) / sum(self.latencies_ms)

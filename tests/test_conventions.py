@@ -18,14 +18,18 @@ import pytest
 
 from edge_ml_flywheel.conventions import (
     ATHENA_RESULTS_PREFIX,
+    COMPONENT_NAME_MAX,
     LABELED_COHORTS,
     MANIFEST_PREFIX,
     PURCHASES_PREFIX,
     RAW_PROVENANCE_PREFIX,
+    RUN_SLUG_MAX_LEN,
+    TELEMETRY_TOPIC_FILTER,
     AssignmentRow,
     Buckets,
     Cohort,
     Cycle,
+    FrameRow,
     GateResult,
     ImageId,
     ManifestRow,
@@ -34,6 +38,7 @@ from edge_ml_flywheel.conventions import (
     ModelVersion,
     PartitionVersion,
     RecipeVersion,
+    ReplayReport,
     RunId,
     RunRegistration,
     Scene,
@@ -48,6 +53,8 @@ from edge_ml_flywheel.conventions import (
     cohort_labels_key,
     cohort_labels_prefix,
     columns,
+    component_address,
+    component_version,
     cycle_prefix,
     eval_matches_key,
     eval_metrics_key,
@@ -55,12 +62,14 @@ from edge_ml_flywheel.conventions import (
     gate_report_key,
     manifest_key,
     model_artifact_key,
+    model_component,
     model_manifest_key,
     model_prefix,
     model_version_cycle,
     model_version_run_id,
     new_model_version,
     new_run_id,
+    parse_component_version,
     parse_image_id,
     parse_model_version,
     parse_run_id,
@@ -69,6 +78,8 @@ from edge_ml_flywheel.conventions import (
     purchase_labels_prefix,
     raw_image_key,
     raw_label_key,
+    replay_code_key,
+    replay_manifest_key,
     run_prefix,
     run_slug,
     run_started_at,
@@ -76,6 +87,8 @@ from edge_ml_flywheel.conventions import (
     sha256sums_document,
     table_name,
     telemetry_prefix,
+    telemetry_run_prefix,
+    telemetry_topic,
     training_manifest_key,
     uri,
 )
@@ -1167,3 +1180,201 @@ class TestSortOrder:
         assert model_artifact_key(VERSION, Seed(2), ModelArtifact.ONNX) < model_artifact_key(
             VERSION, Seed(9), ModelArtifact.ONNX
         )
+
+
+# --- The fleet ----------------------------------------------------------------
+
+
+class TestFleetKeys:
+    """Golden strings, for the reason at the top of this file."""
+
+    def test_replay_manifest_key(self) -> None:
+        assert (
+            replay_manifest_key(RUN, CYCLE)
+            == "run_id=20260812t143355z-v0-skeleton/cycle=003/fleet/replay.json"
+        )
+
+    def test_replay_code_key_puts_the_commit_above_the_file_name(self) -> None:
+        """Greengrass names the unpacked directory after the file, so the name is
+        fixed and the commit is the directory above it. A key ending in
+        `<sha>.zip` would move the component's own `PYTHONPATH` on every commit.
+        """
+        assert replay_code_key(COMMIT) == f"fleet/code/{COMMIT}/replay.zip"
+
+    def test_a_short_commit_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="40-character git commit"):
+            replay_code_key(COMMIT[:12])
+
+    def test_telemetry_run_prefix(self) -> None:
+        assert telemetry_run_prefix(RUN) == "fleet/run_id=20260812t143355z-v0-skeleton/"
+
+    def test_telemetry_prefix_sits_under_the_run_prefix(self) -> None:
+        """So the canary's listing and Athena's partition are one layout rather
+        than two that happen to agree."""
+        assert telemetry_prefix(RUN, date(2026, 9, 16)).startswith(telemetry_run_prefix(RUN))
+
+
+class TestTheTelemetryTopic:
+    def test_topic(self) -> None:
+        assert (
+            telemetry_topic(RUN, "device-1")
+            == "edge-ml-flywheel/fleet/20260812t143355z-v0-skeleton/device-1"
+        )
+
+    def test_the_run_and_thing_are_the_third_and_fourth_segments(self) -> None:
+        """The IoT rule's S3 key template addresses them by position, as
+        `topic(3)` and `topic(4)`, so this is a contract with a Terraform file
+        rather than a layout this module is free to rearrange."""
+        segments = telemetry_topic(RUN, "device-1").split("/")
+
+        assert segments[2] == RUN
+        assert segments[3] == "device-1"
+
+    def test_the_filter_wildcards_exactly_those_two_segments(self) -> None:
+        """A filter with the wrong number of levels subscribes to nothing, and an
+        IoT rule matching no message fails silently and forever."""
+        published = telemetry_topic(RUN, "device-1").split("/")
+        subscribed = TELEMETRY_TOPIC_FILTER.split("/")
+
+        assert len(published) == len(subscribed)
+        assert subscribed[:2] == published[:2]
+        assert subscribed[2:] == ["+", "+"]
+
+    def test_a_thing_name_that_would_break_the_topic_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="thing"):
+            telemetry_topic(RUN, "device/1")
+
+
+class TestTheComponentAddress:
+    def test_the_name_is_the_project_and_the_run(self) -> None:
+        assert model_component(RUN) == "edge-ml-flywheel.20260812t143355z-v0-skeleton"
+
+    def test_the_longest_legal_run_still_names_a_component(self) -> None:
+        """The worst place to find a name too long is the first deployment of a
+        run already several cycles in, so the cap is checked against the longest
+        run ID a slug permits rather than against a typical one."""
+        longest = new_run_id(CREATED, "a" * RUN_SLUG_MAX_LEN)
+
+        assert len(model_component(longest)) <= COMPONENT_NAME_MAX
+
+    @pytest.mark.parametrize(
+        ("cycle", "expected"), [(0, "0.0.0"), (3, "0.3.0"), (10, "0.10.0"), (999, "0.999.0")]
+    )
+    def test_the_cycle_is_not_padded(self, cycle: int, expected: str) -> None:
+        """The one place in this module where padding would be wrong: semver
+        forbids a leading zero in a numeric identifier, so `0.003.0` is a string
+        no Greengrass API accepts."""
+        assert component_version(Cycle(cycle)) == expected
+
+    def test_component_versions_compare_numerically_without_padding(self) -> None:
+        """Which is why the padding is not needed. Semver compares these
+        identifiers as numbers, so cycle 10 already sorts above cycle 9 -- the
+        comparison `CYCLE_DIGITS` exists to rescue everywhere else."""
+        minors = [int(component_version(Cycle(cycle)).split(".")[1]) for cycle in (2, 9, 10)]
+
+        assert minors == sorted(minors)
+
+    @pytest.mark.parametrize("cycle", [0, 3, 10, 999])
+    def test_a_component_version_round_trips(self, cycle: int) -> None:
+        assert parse_component_version(component_version(Cycle(cycle))) == cycle
+
+    @pytest.mark.parametrize("value", ["0.003.0", "1.3.0", "0.3.1", "0.3", "v0.3.0", "0.-1.0"])
+    def test_a_version_this_project_does_not_mint_is_refused(self, value: str) -> None:
+        with pytest.raises(ValueError, match="component version"):
+            parse_component_version(value)
+
+    def test_a_negative_cycle_has_no_semver(self) -> None:
+        with pytest.raises(ValueError, match="negative"):
+            component_version(Cycle(-1))
+
+    def test_the_address_splits_one_version_into_both_halves(self) -> None:
+        assert component_address(VERSION) == (
+            "edge-ml-flywheel.20260812t143355z-v0-skeleton",
+            "0.3.0",
+        )
+
+    def test_two_runs_at_one_cycle_share_no_address(self) -> None:
+        """The reason the run is in the name. A Greengrass component version is
+        immutable once created, so a collision between two runs at cycle 3 would
+        be one nothing could clear up afterwards."""
+        other = new_run_id(datetime(2026, 9, 1, 9, 0, 0, tzinfo=UTC), "second")
+
+        assert component_address(VERSION) != component_address(new_model_version(other, CYCLE))
+
+
+class TestFrameRow:
+    def test_a_frame_the_model_found_nothing_in_is_a_real_row(self) -> None:
+        """The champion's blind spots are what the selector ranks highest, so an
+        empty frame is an observation rather than a row to drop."""
+        assert FrameRow(image_id=IMAGE, inference_ms=41.0, scores=()).scores == ()
+
+    def test_a_frame_that_took_no_time_was_not_inferred(self) -> None:
+        with pytest.raises(ValueError, match="not a frame that was inferred"):
+            FrameRow(image_id=IMAGE, inference_ms=0.0, scores=())
+
+    def test_a_confidence_outside_zero_to_one_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="not a confidence"):
+            FrameRow(image_id=IMAGE, inference_ms=41.0, scores=(0.5, 1.4))
+
+
+def a_report(**overrides: Any) -> ReplayReport:
+    """A valid replay report with named fields replaced.
+
+    `a_registration`'s arrangement: four frames at 10, 20, 30 and 40 ms, which is
+    25 ms a frame and so exactly 40 frames a second.
+    """
+    fields: dict[str, Any] = {
+        "version": VERSION,
+        "thing": "device-1",
+        "artifact_sha256": SHA,
+        "cold_start_ms": 800.0,
+        "starts": 1,
+        "replayed": 4,
+        "latencies_ms": (10.0, 20.0, 30.0, 40.0),
+    }
+    return ReplayReport(**(fields | overrides))
+
+
+class TestReplayReport:
+    def test_complete_means_every_claimed_frame_arrived(self) -> None:
+        assert a_report().complete
+
+    def test_fewer_frames_than_claimed_is_incomplete(self) -> None:
+        assert not a_report(latencies_ms=(10.0, 20.0)).complete
+
+    def test_more_frames_than_claimed_is_also_incomplete(self) -> None:
+        """Two replays of one version landing in one prefix, which would make
+        every number below an average over two runs of the component."""
+        assert not a_report(replayed=2).complete
+
+    def test_p95_is_a_latency_the_device_actually_recorded(self) -> None:
+        """Nearest rank rather than an interpolation: a reported figure appearing
+        in no sample is one nobody can go back and find."""
+        report = a_report()
+
+        assert report.p95_ms in report.latencies_ms
+        assert report.p95_ms == 40.0
+
+    def test_p95_does_not_depend_on_arrival_order(self) -> None:
+        assert a_report(latencies_ms=(40.0, 10.0, 30.0, 20.0)).p95_ms == 40.0
+
+    def test_throughput_is_off_the_mean(self) -> None:
+        """Throughput is how much work the device got through, so a slow frame
+        counts exactly as much as it cost. 25 ms a frame is 40 a second."""
+        assert a_report().throughput_fps == pytest.approx(40.0)
+
+    def test_a_report_with_no_frame_has_no_p95_or_throughput(self) -> None:
+        empty = a_report(replayed=0, latencies_ms=())
+
+        with pytest.raises(ValueError, match="no frame"):
+            _ = empty.p95_ms
+        with pytest.raises(ValueError, match="no frame"):
+            _ = empty.throughput_fps
+
+    def test_a_component_that_started_zero_times_published_nothing(self) -> None:
+        with pytest.raises(ValueError, match="published nothing"):
+            a_report(starts=0)
+
+    def test_a_digest_that_is_not_a_sha256_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="sha256"):
+            a_report(artifact_sha256="nope")

@@ -14,19 +14,27 @@ and a rejection with its reason is the artifact the project is built to produce
 **A gate reports every condition that failed, not the first.** The next attempt
 costs a training run, so short-circuiting turns one diagnosis into two cycles.
 
-`Gate` names four checks and this package implements three. `EDGE` is complete:
-both its thresholds -- artifact size and quantized accuracy against fp32 -- are
-properties of a file and a number, and speed is reported off the fleet rather
-than gated (design section 4.3), so nothing about it waits on silicon. `CANARY`
-reads two replay hours of device telemetry and has no predicate at all, because
-nothing produces that input yet and one written now would be tested against an
-invented shape. `thresholds.Gate` reserves its name in the meantime so the report
-format and the state machine can already be written against it.
+`Gate` names four checks and this package implements all four, but not at the
+same moment in a cycle. `DATA`, `QUALITY` and `EDGE` are computed from a cycle's
+own artifacts and decide whether the challenger is registered and promoted.
+`CANARY` is computed from what a device reported after the promoted artifact
+reached it, so it is asked afterwards and what it decides is whether the rollout
+continues or rolls back. Its input is a `ReplayReport`, which is a reduction of
+telemetry rather than an AWS call, so it stays a pure function like the rest.
 """
 
+from edge_ml_flywheel.gates.canary import canary_gate
 from edge_ml_flywheel.gates.data import data_gate
 from edge_ml_flywheel.gates.edge import edge_gate
 from edge_ml_flywheel.gates.quality import quality_gate
 from edge_ml_flywheel.gates.thresholds import DEFAULT, Gate, Thresholds
 
-__all__ = ["DEFAULT", "Gate", "Thresholds", "data_gate", "edge_gate", "quality_gate"]
+__all__ = [
+    "DEFAULT",
+    "Gate",
+    "Thresholds",
+    "canary_gate",
+    "data_gate",
+    "edge_gate",
+    "quality_gate",
+]
