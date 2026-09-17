@@ -296,6 +296,14 @@ data "aws_iam_policy_document" "control" {
       # `models/*` is read for `register`: SageMaker files its `model.tar.gz`
       # under a directory named for the training job, so the key the registry
       # points at is found rather than built.
+      #
+      # `gates/*` is listed because `register` asks whether the report is there
+      # before opening it, and `base.exists` asks that with a listing. The read
+      # itself is already granted above -- the verdict is the whole input to the
+      # step, since a rejection is recorded with its reason exactly as a
+      # promotion is. Missing here, the first cycle to reach a verdict failed on
+      # the permission rather than on the verdict, with the report sitting in the
+      # bucket.
       values = [
         "run_id=*/cycle=*/training/*",
         "run_id=*/cycle=*/scoring/*",
@@ -303,6 +311,7 @@ data "aws_iam_policy_document" "control" {
         "run_id=*/cycle=*/detections/*",
         "run_id=*/cycle=*/selection/*",
         "run_id=*/cycle=*/eval/*",
+        "run_id=*/cycle=*/gates/*",
         "run_id=*/cycle=*/fleet/*",
         "base/*",
       ]
