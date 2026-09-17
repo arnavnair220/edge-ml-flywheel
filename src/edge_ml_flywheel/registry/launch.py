@@ -310,7 +310,6 @@ def register(
         buckets=base.buckets(aws),
         image=job.image_uri(str(aws.region_name)),
         model_data_url=model_data_url(aws, artifacts, version, deployed),
-        tags={"recipe_version": str(run.recipe_version)},
     )
 
     log.info(

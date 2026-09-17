@@ -24,11 +24,9 @@ instance types here -- listing them would describe an endpoint nobody creates.
 """
 
 import json
-from collections.abc import Mapping
 from typing import Any, Final
 
 from edge_ml_flywheel.conventions import (
-    PROJECT,
     Buckets,
     ModelArtifact,
     ModelManifest,
@@ -182,7 +180,6 @@ def create_model_package(
     buckets: Buckets,
     image: str,
     model_data_url: str,
-    tags: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """The whole `CreateModelPackage` request for one cycle's challenger.
 
@@ -193,6 +190,14 @@ def create_model_package(
     restating a number from it. That file is per seed and this request is per
     model, so a figure copied here would be one of several with nothing to say
     which -- and the registry would hold a metric nothing produced.
+
+    **No `Tags`.** SageMaker refuses them on a package version and says to put
+    them on the group, which is the one place a per-version fact cannot go: the
+    group is the run, opened once by whichever cycle reaches it first. Nothing is
+    lost either way. The tags were `project`, `run_id`, `cycle` and
+    `recipe_version`, and `metadata` below carries all four of the per-model ones
+    already -- so the request had two spellings of the same facts and the API
+    rejected the redundant one.
     """
     return {
         "ModelPackageGroupName": model_package_group(manifest.run_id),
@@ -216,13 +221,4 @@ def create_model_package(
             "ModelCardContent": card_content(manifest, buckets),
             "ModelCardStatus": CARD_STATUS,
         },
-        "Tags": [
-            {"Key": key, "Value": value}
-            for key, value in {
-                "project": PROJECT,
-                "run_id": str(manifest.run_id),
-                "cycle": str(manifest.cycle),
-                **(tags or {}),
-            }.items()
-        ],
     }
