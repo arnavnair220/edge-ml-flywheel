@@ -1,0 +1,33 @@
+# What the replay component needs, installed once into a virtualenv when the
+# instance boots rather than by the component's own install step.
+#
+# Installed at boot for two reasons. These wheels are tens of megabytes and do
+# not change between cycles, so installing them per deployment would make every
+# rollout as slow as the slowest pip resolve; and a rollback is a deployment, so
+# a pip step in the recipe would put a network failure in the path of the one
+# operation that has to work when something else already has not.
+#
+# Pinned exactly, for `container/requirements.txt`'s reason. What a device
+# reports is a measurement, and the runtime it was measured under is part of
+# what makes two cycles' numbers comparable -- a floating onnxruntime is a p95
+# that moves for a reason no manifest records.
+#
+# This is the ARM64 half of the export path, and it is deliberately the same
+# runtime version the cloud quantized with. The int8 graph was produced by
+# `onnxruntime.quantization` at that version, so running it under another is
+# comparing an artifact against operators it was not written for.
+onnxruntime==1.30.0
+
+# Decodes the pool frames and letterboxes them. The preprocessing has to match
+# what the model was exported against or the device measures the same graph on
+# an input distribution it has never seen.
+pillow==11.3.0
+
+# The array layer the decode and suppression are written over, and what
+# onnxruntime hands back. The major tracks the project lockfile's.
+numpy==2.5.2
+
+# Fetches the frames from the data bucket and publishes to IoT Core. Greengrass
+# sets the container-credentials variables for a component, so this picks up the
+# token exchange role with no configuration.
+boto3==1.42.0

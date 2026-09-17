@@ -1,0 +1,28 @@
+# Every text file is checked out with LF, on every platform.
+#
+# This is not a formatting preference. Two files in this repository are read
+# byte for byte and shipped somewhere else to be executed, rather than only
+# being edited here:
+#
+#   infra/device.sh              rendered into an instance's user data by
+#                                `templatefile` and run by cloud-init
+#   infra/device-requirements.txt  embedded in that script's heredoc
+#
+# Git's `core.autocrlf` is true on Windows, which stores LF and checks out CRLF.
+# A device provisioned from a Windows clone would therefore receive a script
+# whose every line ends in a carriage return, starting with a shebang naming
+# `/bin/bash\r` -- an interpreter that does not exist. First boot fails, the
+# nucleus is never installed, and the only symptom is a device that never
+# reports, which is the one canary outcome that says nothing about the model.
+# The same apply from CI would succeed, because its runner checks out LF.
+#
+# Applied to the whole tree rather than to those two paths, because the failure
+# is not a property of shell scripts -- it is a property of any file whose bytes
+# leave this machine. The source archives the training job and the replay
+# component receive are built from the working tree too, so a Windows checkout
+# and a Linux one would otherwise pack different bytes for one commit.
+#
+# `text=auto` leaves detected binaries alone. Nothing committed changes: with
+# `core.autocrlf` true these files are already stored with LF, so this decides
+# checkout and nothing else.
+* text=auto eol=lf
