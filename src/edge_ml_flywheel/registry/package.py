@@ -179,7 +179,6 @@ def create_model_package(
     manifest: ModelManifest,
     buckets: Buckets,
     image: str,
-    model_data_url: str,
 ) -> dict[str, Any]:
     """The whole `CreateModelPackage` request for one cycle's challenger.
 
@@ -198,13 +197,28 @@ def create_model_package(
     `recipe_version`, and `metadata` below carries all four of the per-model ones
     already -- so the request had two spellings of the same facts and the API
     rejected the redundant one.
+
+    **No `ModelDataUrl` either, and that one is about what this registry is
+    for.** The field names a `model.tar.gz` for SageMaker hosting to load, and
+    nothing in this project hosts a model: the artifact that ships is the int8
+    ONNX, pulled from S3 by a Greengrass component and verified against its
+    digest on the device. So the field pointed at a PyTorch tarball no reader
+    has, and SageMaker refused the request anyway -- it validates that it can
+    read the object, the training job had encrypted it under `alias/aws/s3`, and
+    the key policy of an AWS-managed key cannot be changed to let it.
+
+    What the version records instead is what this project actually verifies:
+    `artifact_sha256` in the metadata below is the digest the device checks, and
+    `manifest` is the document naming every artifact and every seed. A model
+    package here is the register of what was built and what the gates made of
+    it, not the thing a runtime loads.
     """
     return {
         "ModelPackageGroupName": model_package_group(manifest.run_id),
         "ModelPackageDescription": description(manifest),
         "ModelApprovalStatus": approval_status(manifest),
         "InferenceSpecification": {
-            "Containers": [{"Image": image, "ModelDataUrl": model_data_url}],
+            "Containers": [{"Image": image}],
             "SupportedContentTypes": [CONTENT_TYPE],
             "SupportedResponseMIMETypes": [RESPONSE_TYPE],
         },

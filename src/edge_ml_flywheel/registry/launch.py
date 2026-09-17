@@ -33,7 +33,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
 import boto3
 
@@ -49,7 +49,6 @@ from edge_ml_flywheel.conventions import (
     model_artifact_key,
     model_manifest_key,
     model_package_group,
-    model_seed_prefix,
     model_version_cycle,
     model_version_run_id,
     purchases_run_prefix,
@@ -64,13 +63,15 @@ from edge_ml_flywheel.training import launch as base
 
 log = logging.getLogger(__name__)
 
-# Where SageMaker's own copy of the model lands, under the seed prefix. The
-# training job is handed this prefix as its `OutputDataConfig` and the service
-# appends `<job name>/output/model.tar.gz` under it -- so the tarball's full key
-# is a function of a job name this step does not know, and finding it is a
-# listing rather than a build. See `training.job.training_job`.
-SAGEMAKER_PREFIX: Final = "_sagemaker/"
-SAGEMAKER_MODEL: Final = "output/model.tar.gz"
+# SageMaker's own copy of the model still lands under `_sagemaker/` beside the
+# seed's artifacts -- the training job is handed that prefix as its
+# `OutputDataConfig` and the service appends `<job name>/output/model.tar.gz`.
+# Nothing here reads it. It is a PyTorch tarball for SageMaker hosting, which
+# this project does not use: the artifact that ships is the int8 ONNX the
+# training job wrote itself, and `sha256sums` below is what a device checks it
+# against. Registering the tarball meant a listing to find a key nobody could
+# build, and a request SageMaker refused because it could not decrypt what it
+# was pointed at.
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,30 +166,6 @@ def artifact_digests(
         digests[seed] = published[ModelArtifact.ONNX]
 
     return digests
-
-
-def model_data_url(aws: boto3.Session, bucket: str, version: ModelVersion, seed: Seed) -> str:
-    """The deployed seed's `model.tar.gz`, found by listing.
-
-    SageMaker writes it under a directory named for the training job, and a cycle
-    that retried a failed job has two of those -- so the key is not derivable and
-    a second attempt makes the listing ambiguous. The most recent object wins,
-    which is the attempt that produced the model this cycle is registering: an
-    earlier one failed, and a job that failed uploaded no model.
-    """
-    prefix = f"{model_seed_prefix(version, seed)}{SAGEMAKER_PREFIX}"
-    found = aws.client("s3").list_objects_v2(Bucket=bucket, Prefix=prefix)
-    tarballs = [
-        item for item in found.get("Contents", ()) if str(item["Key"]).endswith(SAGEMAKER_MODEL)
-    ]
-    if not tarballs:
-        raise SystemExit(
-            f"{uri(bucket, prefix)} holds no {SAGEMAKER_MODEL}, so the training job for seed "
-            f"{seed} of {version} never wrote one. There is nothing to register."
-        )
-
-    latest = max(tarballs, key=lambda item: item["LastModified"])
-    return uri(bucket, str(latest["Key"]))
 
 
 def purchased(aws: boto3.Session, run: RunRegistration) -> tuple[int, frozenset[Cohort]]:
@@ -309,7 +286,6 @@ def register(
         manifest=built,
         buckets=base.buckets(aws),
         image=job.image_uri(str(aws.region_name)),
-        model_data_url=model_data_url(aws, artifacts, version, deployed),
     )
 
     log.info(
