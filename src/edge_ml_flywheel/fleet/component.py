@@ -82,6 +82,19 @@ INTERPRETER: Final = "/opt/edge-ml-flywheel/venv/bin/python"
 # disagree is a component that starts and cannot import itself.
 CODE_DIRECTORY: Final = REPLAY_CODE_FILE.removesuffix(".zip")
 
+# The AWS component that hands a component the token exchange role's
+# credentials, by putting `AWS_CONTAINER_CREDENTIALS_FULL_URI` in its
+# environment. Depending on it is the only way to get them: without the
+# dependency boto3 finds no variable, falls back to instance metadata, and the
+# component runs as the EC2 instance rather than as the role the fleet's grants
+# are on.
+#
+# The range is the major version, because the credential contract is what is
+# depended on and a minor release of an AWS component is not something a cycle
+# should pin itself behind.
+TOKEN_EXCHANGE_COMPONENT: Final = "aws.greengrass.TokenExchangeService"
+TOKEN_EXCHANGE_VERSIONS: Final = ">=2.0.0 <3.0.0"
+
 # How the nucleus spells a device's own name inside a recipe. The device names
 # itself rather than being told what it is called, so a second device needs no
 # edit here and cannot be configured into publishing under the first one's name.
@@ -192,7 +205,7 @@ class Replay:
 STANDARD: Final = Replay()
 
 
-def run_script() -> str:
+def run_script(topic_prefix: str) -> str:
     """The command the nucleus runs, as one line.
 
     Every path is a recipe variable rather than a literal. Greengrass decides
@@ -221,12 +234,35 @@ def run_script() -> str:
             f"--thing {THING_NAME}",
             "--run_id {configuration:/runId}",
             "--version {configuration:/version}",
-            "--topic {configuration:/topic}",
+            # The whole topic, and none of it through configuration. The prefix
+            # is a per-cycle constant known when this recipe is built, and the
+            # device's own name is the one part only the nucleus can fill in.
+            #
+            # It went through configuration twice and failed differently each
+            # time. A value holding `{iot:thingName}` is stored verbatim, so the
+            # device published to a topic containing the literal and every
+            # publish was ForbiddenException. Moving the name into the command
+            # then produced `…/device-1device-1`: Greengrass keeps merged
+            # configuration per component *name*, so the previous deployment's
+            # `topic` outlived the version that declared it and took precedence
+            # over the new default, which the command then appended to.
+            #
+            # A literal here has neither failure. There is nothing to merge and
+            # one substitution to make.
+            f"--topic {topic_prefix}{THING_NAME}",
             "--endpoint {configuration:/iotEndpoint}",
             "--bucket {configuration:/dataBucket}",
             "--detections_bucket {configuration:/detectionsBucket}",
             "--detections_key {configuration:/detectionsKey}",
-            "--task_token {configuration:/taskToken}",
+            # Quoted, and the only argument here that is. The token is empty by
+            # design on two paths -- the default a component version is published
+            # with, and every rollback, which waits for nothing -- and an
+            # unquoted empty expansion is not an empty argument but no argument
+            # at all, so `--task_token` swallowed `--cycle` and argparse exited
+            # 2. A rollback would have installed a component that could not
+            # start, which is the one path whose whole purpose is working on a
+            # day something else did not.
+            '--task_token "{configuration:/taskToken}"',
             "--cycle {configuration:/cycle}",
             "--warmup {configuration:/warmup}",
             "--image_size {configuration:/imageSize}",
@@ -249,8 +285,19 @@ def recipe(
     first publish -- a grant and a failure mode bought to avoid passing a string
     the deploying side already holds.
 
-    No `ComponentDependencies`. The nucleus runs this and is not a dependency a
-    component declares; everything else it needs is in the interpreter the
+    One `ComponentDependencies`, and it is what the device's whole IAM design
+    rests on. Greengrass hands a component the token exchange role's credentials
+    only if it depends on `aws.greengrass.TokenExchangeService`, which is the
+    component that sets `AWS_CONTAINER_CREDENTIALS_FULL_URI` in its environment.
+    Without it boto3 finds no such variable, falls back to the instance metadata
+    service, and runs as the EC2 instance -- a role whose description is "reads
+    its own certificate and nothing else", and which is denied the pool images
+    the replay exists to score. That is what the device did: `AccessDenied` on
+    `raw/images/100k/train/…` as `assumed-role/edge-ml-flywheel-device`, the
+    instance rather than the fleet role beside it.
+
+    Nothing else is declared. The nucleus runs this and is not a dependency a
+    component names, and everything the code imports is in the interpreter the
     instance built at boot.
     """
     cycle = release.deploying
@@ -266,6 +313,12 @@ def recipe(
             f"Scores cycle {cycle}'s pool sample with {release.version} and reports what it saw."
         ),
         "ComponentPublisher": COMPONENT_PUBLISHER,
+        "ComponentDependencies": {
+            TOKEN_EXCHANGE_COMPONENT: {
+                "VersionRequirement": TOKEN_EXCHANGE_VERSIONS,
+                "DependencyType": "HARD",
+            }
+        },
         "ComponentConfiguration": {
             "DefaultConfiguration": {
                 "runId": str(run_id),
@@ -275,7 +328,10 @@ def recipe(
                 # rejected cycle redeploys the champion, so one version can be
                 # three cycles' deployments.
                 "cycle": cycle,
-                "topic": f"{telemetry_topic_prefix(run_id)}{THING_NAME}",
+                # The topic is not here. It is built in the command, which is
+                # the only place the device's own name can be filled in and the
+                # only place a stale merged configuration cannot reach. See
+                # `run_script`.
                 "iotEndpoint": iot_endpoint,
                 "dataBucket": buckets.data,
                 "detectionsBucket": buckets.artifacts,
@@ -315,7 +371,7 @@ def recipe(
                     # resolved `{artifacts:decompressedPath}` -- so the variable
                     # is assigned in the command, where one expansion does both
                     # jobs. See `run_script`.
-                    "Run": {"Script": run_script()}
+                    "Run": {"Script": run_script(telemetry_topic_prefix(run_id))}
                 },
                 "Artifacts": [
                     {"URI": uri(buckets.artifacts, model)},

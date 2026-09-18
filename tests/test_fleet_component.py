@@ -167,17 +167,39 @@ class TestTheRecipe:
 class TestWhatTheDeviceIsTold:
     def test_the_device_names_itself_in_the_topic(self) -> None:
         """So a second device needs no edit here and cannot be configured into
-        publishing under the first one's name."""
-        topic = a_recipe()["ComponentConfiguration"]["DefaultConfiguration"]["topic"]
+        publishing under the first one's name.
 
-        assert topic.endswith("/{iot:thingName}")
-        assert str(RUN) in topic
+        The whole topic is in the *lifecycle*, and none of it in configuration.
+        It went through configuration twice and failed differently each time: a
+        value holding `{iot:thingName}` is stored verbatim, so the device
+        published to a topic containing the literal and every publish came back
+        ForbiddenException; moving only the name into the command then produced
+        `…/device-1device-1`, because Greengrass keeps merged configuration per
+        component *name* and the previous deployment's `topic` outlived the
+        version that declared it.
+        """
+        configuration = a_recipe()["ComponentConfiguration"]["DefaultConfiguration"]
+        script = a_recipe()["Manifests"][0]["Lifecycle"]["Run"]["Script"]
+
+        assert "topic" not in configuration
+        assert f"--topic edge-ml-flywheel/fleet/{RUN}/{{iot:thingName}}" in script
+
+    def test_no_configuration_value_hides_a_recipe_variable(self) -> None:
+        """The class of bug the topic was one of. The nucleus substitutes recipe
+        variables in the lifecycle and stores configuration values as they are,
+        so a `{...}` here is a literal the device acts on -- and the failure is
+        an API refusing a value that looks almost right.
+        """
+        configuration = a_recipe()["ComponentConfiguration"]["DefaultConfiguration"]
+
+        for name, value in configuration.items():
+            assert "{" not in str(value), f"{name} carries a recipe variable that will not expand"
 
     def test_the_run_script_uses_recipe_variables_for_every_path(self) -> None:
         """Greengrass decides where an artifact lands and where a component may
         write, so a path guessed here is one that works until the nucleus changes
         its layout."""
-        script = component.run_script()
+        script = component.run_script("edge-ml-flywheel/fleet/a-run/")
 
         assert "{artifacts:path}/model.onnx" in script
         assert "{artifacts:path}/replay.json" in script
@@ -193,6 +215,37 @@ class TestWhatTheDeviceIsTold:
             f"PYTHONPATH={{artifacts:decompressedPath}}/{component.CODE_DIRECTORY} "
         )
         assert replay_code_key(COMMIT).endswith(f"/{component.CODE_DIRECTORY}.zip")
+
+    def test_it_depends_on_the_service_that_hands_it_credentials(self) -> None:
+        """The whole of the device's IAM design rests on this one line.
+
+        Greengrass gives a component the token exchange role's credentials only
+        if it depends on `aws.greengrass.TokenExchangeService`, which is what
+        sets `AWS_CONTAINER_CREDENTIALS_FULL_URI` for it. Without the dependency
+        boto3 finds no variable, falls back to instance metadata, and the replay
+        runs as the EC2 instance -- a role that reads its own certificate and
+        nothing else. The device proved it: `AccessDenied` on
+        `raw/images/100k/train/…` as `assumed-role/edge-ml-flywheel-device`,
+        which is the instance and not the fleet role holding those grants.
+        """
+        dependencies = a_recipe()["ComponentDependencies"]
+
+        assert component.TOKEN_EXCHANGE_COMPONENT in dependencies
+        assert dependencies[component.TOKEN_EXCHANGE_COMPONENT]["DependencyType"] == "HARD"
+
+    def test_the_token_survives_being_empty(self) -> None:
+        """It is empty on two paths that matter: the default a component version
+        is published with, and every rollback, which waits for nothing.
+
+        Unquoted, an empty expansion is not an empty argument but no argument at
+        all -- `--task_token` then swallowed `--cycle` and argparse exited 2. So
+        a rollback would have installed a component that could not start, on the
+        one path whose whole purpose is working on a day something else did not.
+        `replay` already reads an empty token as nobody waiting.
+        """
+        script = a_recipe()["Manifests"][0]["Lifecycle"]["Run"]["Script"]
+
+        assert '--task_token "{configuration:/taskToken}"' in script
 
     def test_the_path_is_in_the_command_rather_than_the_lifecycle(self) -> None:
         """A component that set `PYTHONPATH` through the lifecycle's `Setenv`
@@ -211,7 +264,7 @@ class TestWhatTheDeviceIsTold:
 
     def test_it_runs_the_package_as_a_module(self) -> None:
         """Which is why the archive carries no entry point beside the package."""
-        assert "-m edge_ml_flywheel.fleet.replay" in component.run_script()
+        assert "-m edge_ml_flywheel.fleet.replay" in component.run_script("prefix/")
 
 
 class TestTheDeployment:
