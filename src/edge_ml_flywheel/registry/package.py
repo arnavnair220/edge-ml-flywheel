@@ -142,7 +142,17 @@ def model_card(manifest: ModelManifest, buckets: Buckets) -> dict[str, Any]:
     deployed = model_artifact_key(manifest.version, manifest.deployed_seed, ModelArtifact.ONNX)
     return {
         "model_overview": {
-            "model_name": str(manifest.version),
+            # No `model_name`. A card carried on a `CreateModelPackage` is
+            # rejected outright when it names one -- with any value, `abc`
+            # included -- because the package is what the card is about and
+            # SageMaker fills that in itself. The whole request fails on "The
+            # ModelCardContent JSON isn't valid", which names neither the field
+            # nor the section, so this was found by submitting the card one key
+            # at a time against a throwaway group.
+            #
+            # Nothing is lost: the version names the package group's ladder, and
+            # `custom_details` carries it under `version` beside the digest and
+            # the manifest URI.
             "model_description": description(manifest),
             "model_artifact": [uri(buckets.artifacts, deployed)],
         },
