@@ -198,9 +198,21 @@ def run_script() -> str:
     Every path is a recipe variable rather than a literal. Greengrass decides
     where an artifact lands and where a component may write, and a path guessed
     here would be one that works until the nucleus changes its layout.
+
+    **It opens by assigning `PYTHONPATH`**, which is the package's own location
+    and the reason `python -m` finds it at all. In the command rather than in the
+    lifecycle's `Setenv`, because a component that set it there started with the
+    variable empty -- three failures in 250 ms, `No module named
+    edge_ml_flywheel`, broken before the nucleus had logged that config node
+    arriving. The expansion is not in doubt: the same script printed a resolved
+    `{artifacts:decompressedPath}`, and the zip unpacks under it at
+    `replay/edge_ml_flywheel/` exactly as `_code_path` says. An assignment
+    prefixed to a command is one shell does before the process exists, so there
+    is no second thing to arrive late.
     """
     return " ".join(
         (
+            f"PYTHONPATH={_code_path()}",
             INTERPRETER,
             "-m edge_ml_flywheel.fleet.replay",
             f"--model {{artifacts:path}}/{ModelArtifact.ONNX.value}",
@@ -289,15 +301,21 @@ def recipe(
             {
                 "Platform": PLATFORM,
                 "Lifecycle": {
-                    "Run": {
-                        # The package is put on the path rather than installed
-                        # into the interpreter, so the venv stays a function of
-                        # the instance and the code stays a function of the
-                        # deployment. A pip install here would make a rollback
-                        # depend on an uninstall.
-                        "Setenv": {"PYTHONPATH": _code_path()},
-                        "Script": run_script(),
-                    }
+                    # A bare `Script` and no `Setenv`. The package is put on the
+                    # path rather than installed into the interpreter, so the
+                    # venv stays a function of the instance and the code stays a
+                    # function of the deployment -- a pip install here would make
+                    # a rollback depend on an uninstall. `PYTHONPATH` therefore
+                    # has to reach the process, and `Setenv` does not deliver it:
+                    # a component that set it there ran with `$PYTHONPATH` empty,
+                    # failed three times in 250 ms on `No module named
+                    # edge_ml_flywheel`, and was broken before the nucleus logged
+                    # the config node for that variable arriving. Recipe variables
+                    # themselves are fine -- the same script printed a fully
+                    # resolved `{artifacts:decompressedPath}` -- so the variable
+                    # is assigned in the command, where one expansion does both
+                    # jobs. See `run_script`.
+                    "Run": {"Script": run_script()}
                 },
                 "Artifacts": [
                     {"URI": uri(buckets.artifacts, model)},

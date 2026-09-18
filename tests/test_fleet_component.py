@@ -187,10 +187,27 @@ class TestWhatTheDeviceIsTold:
     def test_the_code_path_and_the_archive_name_agree(self) -> None:
         """A disagreement between the two is a component that starts and cannot
         import itself, which is why one is derived from the other."""
-        setenv = a_recipe()["Manifests"][0]["Lifecycle"]["Run"]["Setenv"]
+        script = a_recipe()["Manifests"][0]["Lifecycle"]["Run"]["Script"]
 
-        assert setenv["PYTHONPATH"].endswith(f"/{component.CODE_DIRECTORY}")
+        assert script.startswith(
+            f"PYTHONPATH={{artifacts:decompressedPath}}/{component.CODE_DIRECTORY} "
+        )
         assert replay_code_key(COMMIT).endswith(f"/{component.CODE_DIRECTORY}.zip")
+
+    def test_the_path_is_in_the_command_rather_than_the_lifecycle(self) -> None:
+        """A component that set `PYTHONPATH` through the lifecycle's `Setenv`
+        started with it empty: three failures in 250 ms on `No module named
+        edge_ml_flywheel`, and broken before the nucleus had logged that config
+        node arriving. Recipe variables were never the problem -- the same script
+        printed a fully resolved `{artifacts:decompressedPath}`.
+
+        An assignment prefixed to the command is one the shell makes before the
+        process exists, so there is nothing left to arrive late.
+        """
+        run = a_recipe()["Manifests"][0]["Lifecycle"]["Run"]
+
+        assert "Setenv" not in run
+        assert "PYTHONPATH=" in run["Script"]
 
     def test_it_runs_the_package_as_a_module(self) -> None:
         """Which is why the archive carries no entry point beside the package."""
