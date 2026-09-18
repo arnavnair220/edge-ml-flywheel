@@ -258,8 +258,23 @@ class TestTheRequest:
         SageMaker looks for one."""
         card = json.loads(self.request()["ModelCard"]["ModelCardContent"])
 
-        assert card["model_overview"]["model_name"] == VERSION
+        assert card["model_overview"]["model_description"] == package.description(manifest())
         assert card["additional_information"]["custom_details"]["artifact_sha256"] == DIGEST
+
+    def test_the_card_does_not_name_the_model(self) -> None:
+        """A card carried on a `CreateModelPackage` is refused outright when it
+        names one -- with any value at all, since the package is what the card is
+        about and SageMaker fills the name in itself.
+
+        The refusal is "The ModelCardContent JSON isn't valid", which names
+        neither the field nor the section, and it arrives after a cycle has
+        trained, scored twice and evaluated. So it is asserted here, where the
+        cost of learning it again is a test rather than twenty minutes.
+        """
+        card = json.loads(self.request()["ModelCard"]["ModelCardContent"])
+
+        assert "model_name" not in card["model_overview"]
+        assert card["additional_information"]["custom_details"]["version"] == VERSION
 
     def test_the_card_restates_the_manifest_rather_than_adding_to_it(self) -> None:
         """One spelling of what the model is. The custom details are `metadata`
