@@ -2371,3 +2371,98 @@ class ReplayReport:
         if not self.latencies_ms:
             raise ValueError(f"{self.thing} reported no frame, so it has no throughput")
         return 1000.0 * len(self.latencies_ms) / sum(self.latencies_ms)
+
+
+# ---------------------------------------------------------------------------
+# Reporting
+#
+# One document per run rather than per cycle, written when the run ends. Every
+# other artifact under a run prefix is written once because it is evidence, and
+# this one is written once because it is a reduction *of* that evidence: it holds
+# nothing a stage did not already record, so summarizing a run twice cannot reach
+# two answers unless one of those artifacts changed.
+#
+# At the end rather than as the run goes, which is what keeps a null meaning one
+# thing. A summary maintained per cycle would carry a newest row whose p95 and
+# canary verdict are absent for most of its life -- not measured and not yet
+# measured, indistinguishable in the same field.
+
+
+RUN_SUMMARY_FILE: Final = "summary.json"
+
+
+def run_summary_key(run_id: RunId) -> str:
+    """One run's cycles, reduced to a row each. The headline deliverable.
+
+    Under the run prefix rather than a cycle's, because a row per cycle is a
+    statement about the run: the shape a reader is looking for is the sequence,
+    and a document per cycle would make the deliverable a directory listing that
+    has to be joined before it says anything.
+
+    Rows and not a table. The markdown a reader sees is rendered from this by
+    `reporting.summary.table`, outside the cycle, so column order and headings
+    are not held inside the control plane where changing one costs a deploy.
+    """
+    return f"{run_prefix(run_id)}{RUN_SUMMARY_FILE}"
+
+
+@dataclass(frozen=True, slots=True)
+class CycleSummary:
+    """One cycle, as the deliverable reports it.
+
+    Facts only. What a cycle *decided* -- promoted, rejected, rolled back -- is
+    read off `gates` by `failed` below rather than stored: a recorded verdict
+    would be a second opinion able to disagree with the verdicts it came from.
+
+    Two fields are `None` rather than zero, and the distinction carries weight in
+    both cases. `delta` is absent for the baseline cycle, which had no champion
+    to be compared against and is not a challenger that failed to beat one.
+    `p95_ms` is absent for a cycle whose model no device finished replaying --
+    written at the end of a run, that means a challenger that never reached a
+    device rather than a measurement still outstanding, and a zero would read as
+    a model that cost nothing per frame. `deployed` is `None` only before
+    anything has been promoted at all.
+
+    `labels_spent` is cumulative, as the manifest records it: the training set is
+    the union of everything bought to date, so the number beside a cycle is what
+    that cycle's model was trained on rather than what its own batch cost.
+    """
+
+    cycle: Cycle
+    version: ModelVersion
+    labels_spent: int
+    gates: tuple[GateResult, ...]
+    delta: tuple[float, float, float] | None
+    deployed: ModelVersion | None
+    p95_ms: float | None
+
+    def __post_init__(self) -> None:
+        parse_model_version(self.version)
+        if self.deployed is not None:
+            parse_model_version(self.deployed)
+        if self.cycle < 0:
+            raise ValueError(f"a cycle is a position in a run and cannot be {self.cycle}")
+        if self.labels_spent < 0:
+            raise ValueError(f"a run cannot have bought {self.labels_spent} labels")
+        if self.delta is not None:
+            observed, lower, upper = self.delta
+            if not lower <= observed <= upper:
+                raise ValueError(
+                    f"a delta of {observed} sits outside its own band [{lower}, {upper}], so one "
+                    f"of the three was read from the wrong field"
+                )
+        if self.p95_ms is not None and self.p95_ms <= 0.0:
+            raise ValueError(f"a p95 of {self.p95_ms} ms was never measured")
+
+    @property
+    def failed(self) -> tuple[str, ...]:
+        """The gates that refused, in the order the report listed them.
+
+        The one reading of the row that lives here rather than in a reader, and
+        it earns it by being how a cycle's outcome is told apart from another's:
+        an empty tuple beside a full `gates` is a promotion, `("canary",)` is a
+        rollout that was undone on the device, and anything else is a challenger
+        refused before it shipped. A stored word for that would be a second
+        opinion able to disagree with the verdicts it came from.
+        """
+        return tuple(gate.gate for gate in self.gates if not gate.passed)

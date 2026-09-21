@@ -94,6 +94,13 @@ locals {
   # as a channel. One object rather than the prefix, so this grant cannot become
   # a way to put a second checkpoint beside the one the recipe names.
   control_base_object = "${local.bucket_arns["artifacts"]}/base/yolo11n.pt"
+
+  # `run_summary_key`. One object per run and the only key in this policy above
+  # a cycle prefix, because the document is a statement about the run rather than
+  # about one of its turns. Named exactly rather than as `run_id=*/*`, which would
+  # reach every cycle prefix under it and make a reporting step able to write
+  # anything a cycle wrote.
+  control_summary_objects = "${local.bucket_arns["artifacts"]}/run_id=*/summary.json"
 }
 
 # ---------------------------------------------------------------------------
@@ -267,6 +274,18 @@ data "aws_iam_policy_document" "control" {
     effect    = "Allow"
     actions   = ["s3:PutObject", "s3:GetObject"]
     resources = [local.control_manifest_objects]
+  }
+
+  # The run summary, which `summarize` writes once the loop has left. `GetObject`
+  # is the read-back, as with the manifest: this document is the deliverable and
+  # is not reported as written on the strength of a call that returned. It is the
+  # only write this role makes outside a cycle prefix, and the only artifact in
+  # the project a later step reads back out of the bucket to check itself.
+  statement {
+    sid       = "WriteTheRunSummary"
+    effect    = "Allow"
+    actions   = ["s3:PutObject", "s3:GetObject"]
+    resources = [local.control_summary_objects]
   }
 
   statement {

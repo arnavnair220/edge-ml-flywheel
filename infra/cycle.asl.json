@@ -585,11 +585,36 @@
           "Next": "ClaimCycle"
         }
       ],
-      "Default": "Done"
+      "Default": "Summarize"
+    },
+
+    "Summarize": {
+      "Comment": "Reduce the finished run to one document under its own prefix: a row per cycle carrying the version, labels spent, the delta and its band, every gate's verdict, the version the device ended on and its p95 latency. The only step outside a cycle, and the first thing this machine has ever done after the loop -- `Done` was a bare `Succeed` before it. Here rather than inside the loop because every cycle has finished reporting by now, which is what makes an absent p95 mean \"this challenger never shipped\" rather than \"the device has not answered yet\"; a summary maintained per cycle would carry both meanings in one field. It reads only what the cycles already wrote and decides nothing, so a run summarized twice cannot produce two answers. `cycles` is `$cycle + 1`, the last cycle claimed made a count, rather than `$cycle_cap` -- a run that exhausted its pool early has fewer cycles than it was allowed and the cap would name a manifest nothing wrote.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${control_function_arn}",
+        "Payload": "{% {'step': 'summarize', 'run_id': $states.context.Execution.Input.run_id, 'cycles': $cycle + 1} %}"
+      },
+      "Output": {},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Done"
     },
 
     "Done": {
-      "Comment": "The run has spent its cycles or its pool. Not a failure: a run that finishes its cap is a run that finished.",
+      "Comment": "The run has spent its cycles or its pool, and its summary is written. Not a failure: a run that finishes its cap is a run that finished.",
       "Type": "Succeed"
     }
   }

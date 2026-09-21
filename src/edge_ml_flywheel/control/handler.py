@@ -85,6 +85,7 @@ from edge_ml_flywheel.evaluation import launch as evaluation_launch
 from edge_ml_flywheel.fleet import component
 from edge_ml_flywheel.fleet import deploy as fleet_deploy
 from edge_ml_flywheel.registry import launch as registry_launch
+from edge_ml_flywheel.reporting import launch as reporting_launch
 from edge_ml_flywheel.scoring import job as scoring_job
 from edge_ml_flywheel.scoring import launch as scoring_launch
 from edge_ml_flywheel.selection import launch as selection_launch
@@ -482,6 +483,35 @@ def select(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def summarize(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
+    """Reduce a finished run to one document and return where it landed.
+
+    The only step that is not part of a cycle. Every other entry in `STEPS` runs
+    inside one and is handed the cycle it belongs to; this one runs after the
+    last of them, is handed how many there were, and reads all of them.
+
+    `cycles` is the count the run's counter reached, not its cap: a run that
+    exhausted the pool early has fewer cycles than it was allowed, and asking for
+    the cap would look for a manifest that no cycle wrote. The state machine
+    passes `$cycle + 1` -- the last cycle it claimed, made a count.
+
+    Writes rather than returns the rows. The document is the deliverable and an
+    execution's output is not somewhere a reader can fetch anything from, so what
+    comes back is the URI and the number of cycles behind it.
+    """
+    run_id = parse_run_id(str(event["run_id"]))
+    cycles = int(event["cycles"])
+    if cycles < 1:
+        raise ControlError(
+            f"{run_id} claimed {cycles} cycles, so there is nothing to summarize. A run is "
+            f"summarized after its last cycle, and this one had none."
+        )
+
+    location = reporting_launch.write(aws, run_id, cycles)
+    log.info("summary of %s at %s", run_id, location)
+    return {"run_id": run_id, "cycles": cycles, "summary_uri": location}
+
+
 def register(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
     """Write the cycle's model manifest and build the request that records its
     verdict.
@@ -532,6 +562,8 @@ STEPS: Final[Mapping[str, Callable[[boto3.Session, Mapping[str, Any]], dict[str,
     "fleet_score": fleet_score,
     "canary": canary,
     "select": select,
+    # Last, and the one that is not a cycle step: it runs once the loop has left.
+    "summarize": summarize,
 }
 
 
