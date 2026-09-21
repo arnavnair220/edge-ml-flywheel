@@ -161,9 +161,10 @@ neither changes on a retry.
 
 Two roles. The control function reads the run registration and the project bucket, and holds no
 SageMaker grant and no `iam:PassRole` — it cannot start a job even by mistake. The fleet steps add
-the Greengrass create-component and create-deployment grants, `ec2:DescribeInstances` on the device
-so `Deploy` can refuse a stopped one, and read access to the telemetry prefix. It still cannot pass a
-role or start a job.
+the Greengrass create-component and create-deployment grants, `iot:DescribeEndpoint` so the recipe
+can name the address the device publishes to, `ec2:DescribeInstances` on the device so `Deploy` can
+refuse a stopped one, and read access to the telemetry prefix. It still cannot pass a role or start a
+job.
 
 The state machine role holds the SageMaker create, describe and stop grants for training jobs,
 processing jobs and model packages, `dynamodb:UpdateItem` on the fleet config table,

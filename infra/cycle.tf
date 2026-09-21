@@ -376,6 +376,21 @@ data "aws_iam_policy_document" "control" {
     resources = ["arn:aws:iot:${var.aws_region}:${var.account_id}:thinggroup/${var.project}-devices"]
   }
 
+  # The recipe names the address the device publishes its telemetry to, and
+  # `fleet.deploy.iot_endpoint` resolves it here so that the device is handed one
+  # rather than discovering its own. That makes the lookup part of building a
+  # component version, which is why the grant sits with the Greengrass calls
+  # rather than with the telemetry read below.
+  #
+  # `iot:DescribeEndpoint` takes no resource -- it returns the one ATS address
+  # the account has -- so `*` is the API's shape rather than a widening.
+  statement {
+    sid       = "FindWhereTheDevicePublishes"
+    effect    = "Allow"
+    actions   = ["iot:DescribeEndpoint"]
+    resources = ["*"]
+  }
+
   # `deploy` refuses a cycle whose device is stopped rather than deploying into
   # a two-hour wait that can only time out. A describe and nothing else: this
   # role cannot start the instance, which is deliberate -- a stopped device is an
