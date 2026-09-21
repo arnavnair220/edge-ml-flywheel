@@ -387,6 +387,41 @@ data "aws_iam_policy_document" "control" {
     ]
   }
 
+  # A deployment to a thing group is an IoT job, and Greengrass creates and
+  # tracks that job under the caller's identity rather than its own. So the ten
+  # actions AWS documents for `CreateDeployment` are all reachable from one call
+  # -- `iot:DescribeThingGroup` to resolve the target, the job actions to place
+  # and revise the work, the shadow actions to hand each device its state. They
+  # are granted together because they fail one at a time otherwise, each behind
+  # the last, and each costs an apply to discover.
+  #
+  # AWS's own example scopes all ten to `*`. These are narrowed to this
+  # project's thing group, its devices and the jobs the deployment mints: the
+  # job ID cannot be known in advance, but a job is the only resource type in
+  # this account that Greengrass creates, and nothing else here is an IoT thing.
+  statement {
+    sid    = "TrackTheJobADeploymentIs"
+    effect = "Allow"
+
+    actions = [
+      "iot:CancelJob",
+      "iot:CreateJob",
+      "iot:DescribeJob",
+      "iot:UpdateJob",
+      "iot:DescribeThing",
+      "iot:DescribeThingGroup",
+      "iot:GetThingShadow",
+      "iot:UpdateThingShadow",
+      "iot:DeleteThingShadow",
+    ]
+
+    resources = [
+      "arn:aws:iot:${var.aws_region}:${var.account_id}:job/*",
+      "arn:aws:iot:${var.aws_region}:${var.account_id}:thinggroup/${var.project}-devices",
+      "arn:aws:iot:${var.aws_region}:${var.account_id}:thing/${var.project}-device-*",
+    ]
+  }
+
   # The recipe names the address the device publishes its telemetry to, and
   # `fleet.deploy.iot_endpoint` resolves it here so that the device is handed one
   # rather than discovering its own. That makes the lookup part of building a
