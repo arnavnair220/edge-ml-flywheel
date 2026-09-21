@@ -417,10 +417,18 @@ data "aws_iam_policy_document" "control" {
   # The package the component runs, addressed by commit. Two cycles built from
   # one tree write identical bytes to one key, so this is a put with no delete
   # against an object that is content-addressed by construction.
+  #
+  # The read is not this function's: `CreateComponentVersion` hashes every
+  # artifact the recipe names, and it does that under the caller's identity. So
+  # the grant that stages the archive is also the grant that lets the component
+  # be published from it, and a put alone fails at the publish with the artifact
+  # reported as inaccessible rather than as unreadable. The recipe's other two
+  # artifacts -- the model and the frame list -- are already readable under the
+  # statements that write them, which is why this was the one that showed.
   statement {
     sid       = "StageTheDeviceCode"
     effect    = "Allow"
-    actions   = ["s3:PutObject"]
+    actions   = ["s3:PutObject", "s3:GetObject"]
     resources = ["${local.bucket_arns["artifacts"]}/fleet/code/*"]
   }
 
