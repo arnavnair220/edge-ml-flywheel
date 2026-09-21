@@ -369,11 +369,22 @@ data "aws_iam_policy_document" "control" {
     resources = ["*"]
   }
 
+  # `CreateDeployment` authorizes against two resources, not one: the deployment
+  # it is about to create, and the target it names. Scoping this to the thing
+  # group alone read as the tighter policy and was in fact no policy at all --
+  # the call is refused on `deployments:*` before the target is ever considered.
+  # The deployment ARN cannot be narrowed, because the ID is minted by the call
+  # being authorized; the target is the scope that does the work here, and it is
+  # still this project's thing group rather than the account's.
   statement {
-    sid       = "DeployToTheFleet"
-    effect    = "Allow"
-    actions   = ["greengrass:CreateDeployment"]
-    resources = ["arn:aws:iot:${var.aws_region}:${var.account_id}:thinggroup/${var.project}-devices"]
+    sid     = "DeployToTheFleet"
+    effect  = "Allow"
+    actions = ["greengrass:CreateDeployment"]
+
+    resources = [
+      "arn:aws:greengrass:${var.aws_region}:${var.account_id}:deployments:*",
+      "arn:aws:iot:${var.aws_region}:${var.account_id}:thinggroup/${var.project}-devices",
+    ]
   }
 
   # The recipe names the address the device publishes its telemetry to, and
