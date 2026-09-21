@@ -137,7 +137,7 @@ flowchart TB
     end
 
     subgraph OBS["Reporting — reads what the stages emit"]
-        DASH["queries over the telemetry<br/>six charts as static images"]
+        DASH["run summary, one row per cycle<br/>plus five charts as static images"]
     end
 
     PART --> SAMPLE
@@ -198,7 +198,7 @@ one.
 |---|---|---|
 | **Control** | One Step Functions state machine and two Lambdas. Sequences the cycle, owns retries and branching, and holds a single-flight lock so two cycles cannot overlap | Control flow exists exactly once, in ASL — there is no second local orchestrator to diverge from |
 | **Gates** | Four pure functions with pre-declared thresholds and no infrastructure of their own. Three are applied inside the evaluation job; the canary is applied to the device's pass, in the cycle that waited for it | Zero image-ID overlap with `eval` is a hard fail with no override, and no verdict is ever recorded without its reason |
-| **Reporting** | Queries over the telemetry the fleet emits and the ranking it produced, rendered as static charts | Every promotion and rejection is charted with its evidence, so the loop's behaviour is read off the record rather than described |
+| **Reporting** | One summary per run, written when the run ends — a row per cycle carrying the version, labels spent, the delta and its band, each gate's verdict, the deployed version and the device's p95 latency — plus queries over the telemetry and the ranking, rendered as static charts | Reporting is derived and decides nothing: every figure is read back out of the manifests, gate reports and telemetry the stages already wrote, and what a cycle decided is read off its verdicts rather than stored beside them, so a summary cannot disagree with the run it describes |
 
 ---
 
@@ -282,5 +282,7 @@ cross-cutting.
 | [05-fleet-and-deployment.md](05-fleet-and-deployment.md) | Stage 5 |
 | [control.md](control.md) | The state machine and the control function |
 | [gates.md](gates.md) | The four gates and their thresholds |
+| [reporting.md](reporting.md) | Where a finished run's summary is, and what it holds |
 
-Reporting has no document yet; it lands with the charts.
+The charts are not built. They land beside [reporting.md](reporting.md) as committed static images
+when they are.
