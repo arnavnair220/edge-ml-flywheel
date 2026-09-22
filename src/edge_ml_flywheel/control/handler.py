@@ -409,7 +409,7 @@ def fleet_score(aws: boto3.Session, event: Mapping[str, Any]) -> dict[str, Any]:
             "once the device finished. The state resource must end in .waitForTaskToken."
         )
 
-    deployment = fleet_deploy.redeploy(aws, version, _target(aws), task_token=token)
+    deployment = fleet_deploy.redeploy(aws, version, _target(aws), task_token=token, cycle=cycle)
     log.info("deployment %s hands cycle %d to the fleet", deployment, cycle)
     return {"run_id": run_id, "cycle": cycle, "version": version, "deployment": deployment}
 

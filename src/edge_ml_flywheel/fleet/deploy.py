@@ -208,7 +208,11 @@ def publish_component(aws: boto3.Session, recipe: dict[str, Any]) -> str:
 
 
 def redeploy(
-    aws: boto3.Session, version: ModelVersion, target_arn: str, task_token: str = ""
+    aws: boto3.Session,
+    version: ModelVersion,
+    target_arn: str,
+    task_token: str = "",
+    cycle: Cycle | None = None,
 ) -> str:
     """Deploy one component version to the fleet, and return the deployment ID.
 
@@ -222,8 +226,20 @@ def redeploy(
     execution when its detections are durable. A rollback passes none, because
     nothing is waiting on a rollback -- the cycle that was waiting is the one
     that failed.
+
+    **`cycle` is the cycle doing the deploying, and a rollout must pass it.**
+    `component_address` falls back to the model's own cycle, which is right only
+    while the two agree. A cycle that rejected its challenger deploys the
+    standing champion, and without this it would deploy the champion's *original*
+    component -- the one whose recipe carries an earlier cycle number and an
+    earlier sample. The device keys its start counter by the cycle it is told,
+    so that deployment reads on the far side as the earlier cycle starting a
+    second time, and the canary refuses a pass that in fact ran once and cleanly.
+
+    A rollback omits it deliberately. It is putting the champion's own component
+    back, not making a new one for a cycle that is already over.
     """
-    request = component.deployment(version, target_arn, task_token=task_token)
+    request = component.deployment(version, target_arn, task_token=task_token, cycle=cycle)
     response = aws.client("greengrassv2").create_deployment(**request)
     deployment_id = str(response["deploymentId"])
     log.info("deployment %s puts %s on %s", deployment_id, version, target_arn)
