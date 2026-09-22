@@ -121,8 +121,8 @@ reason recorded rather than buying 1,000 labels off it. See
 [05-fleet-and-deployment.md](05-fleet-and-deployment.md).
 
 `MoreCycles` goes round while the cap is unspent and the pool is not empty. The cap is checked here
-and again in `ClaimCycle`, deliberately: this decides whether to go round, that decides whether going
-round is permitted, and only one of them is a lock.
+and again in `ClaimCycle`: this decides whether to go round, that decides whether going round is
+permitted, and only one of them is a lock.
 
 `OpenTheRegistryGroup` catches every error and continues. Every cycle after the first finds the group
 already there, and what SageMaker calls that failure is a validation error whose message is not a
@@ -206,8 +206,8 @@ scoring alike, since both are capped and re-prepared together.
 
 **The execution waits on hardware.** A cycle cannot finish while the device is down, because nothing
 else scores the pool. The two hours in `FleetScore` bound how long a run stalls before it fails and
-says so; they do not let it continue without the fleet. There is no cloud fallback, by design: a
-ranking from a model the fleet never ran is what this arrangement exists to prevent.
+says so; they do not let it continue without the fleet. There is no cloud fallback: a ranking from a
+model the fleet never ran would not reflect what the device is running.
 
 A run's first cycle must promote to have a model on the device. See
 [05-fleet-and-deployment.md](05-fleet-and-deployment.md).

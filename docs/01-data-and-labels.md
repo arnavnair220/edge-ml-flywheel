@@ -104,8 +104,8 @@ a versioned table: the project trains one kind of model, so there is nothing to 
 version to carry. Declaration order is permanent — a category ID is a position in that tuple and is
 stored in every cached match array — so a class is appended, never inserted or reordered.
 
-`train` is the tenth boxed category and is deliberately outside the set: at 151 boxes archive-wide it
-is too rare to learn or to score.
+`train` is the tenth boxed category and is outside the set: at 151 boxes archive-wide it is too rare
+to learn or to score.
 Both follow `partition_version`'s rule: add a version, never edit one.
 
 - Category IDs are 1-based positions in the version's tuple, ordered by measured frequency, and are

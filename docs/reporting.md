@@ -52,8 +52,8 @@ rollout undone by the canary — because the device ends both on the previous ve
 
 ## Reading an outcome off a row
 
-There is no `decision` field, deliberately: a stored word would be a second opinion able to disagree
-with the verdicts it came from. What a cycle did is read off `gates`.
+There is no `decision` field: a stored word would be a second opinion able to disagree with the
+verdicts it came from. What a cycle did is read off `gates`.
 
 | `gates` | Outcome |
 |---|---|
@@ -119,13 +119,13 @@ object.
 }
 ```
 
-Read as a table, those three rows are a promotion, a promotion that survived its canary, and an
-honest rejection that kept its labels — cycle 2's `labels_spent` is spent, its `deployed` is still
+Read as a table, those three rows are a promotion, a promotion that survived its canary, and a
+rejection that kept its labels — cycle 2's `labels_spent` is spent, its `deployed` is still
 cycle 1's model, and the next challenger trains on the larger set.
 
 ---
 
 ## Incomplete
 
-The charts of design §8 are not built. When they are, they land here as committed static images
-beside this document.
+The charts are not built. When they are, they land here as committed static images beside this
+document.
