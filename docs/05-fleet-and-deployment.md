@@ -9,9 +9,9 @@ fleet drives through, so the model that scores it is the quantized artifact actu
 hardware actually running it. What comes back is predictions and latencies, never pixels, which is
 the direction traffic runs in a real fleet.
 
-Greengrass performs the agent loop the design describes — verify the digest, install, roll back on a
-failed install. This stage supplies what it has no opinion about: which frames the device scores,
-what it reports, and whether that report is good enough to leave the model deployed.
+Greengrass performs the agent loop itself — verify the digest, install, roll back on a failed
+install. This stage supplies what it has no opinion about: which frames the device scores, what it
+reports, and whether that report is good enough to leave the model deployed.
 
 ---
 
@@ -26,8 +26,8 @@ what it reports, and whether that report is good enough to leave the model deplo
 | Nucleus | Greengrass v2 `2.14.3`, installed at first boot as a systemd unit |
 | Interpreter | `/opt/edge-ml-flywheel/venv`, built at first boot from `infra/device-requirements.txt` |
 
-`t4g.small` rather than the design's `t4g.nano`: a JVM nucleus needs 256 MB before the scoring
-component's onnxruntime session, so 512 MB is short.
+`t4g.small` rather than `t4g.nano`: a JVM nucleus needs 256 MB before the scoring component's
+onnxruntime session, so 512 MB is short.
 
 **The instance runs for the length of a run, not the length of a canary.** Every cycle blocks on it,
 so it is started when a run opens and stopped when the run ends, at roughly $16/month against a $40
@@ -73,9 +73,9 @@ therefore three component versions over one `model.onnx`.
 That makes the number in `0.<cycle>.0` a poor answer to "what is this device running", so the
 deployment carries the model version in its configuration and every read takes it from there.
 
-The design's separate replay component is folded in. At one device the split costs a mechanism for
-discovering which version is deployed and buys a redeploy of one without the other, which never
-happens.
+Replay is folded into the same component rather than split into its own. At one device the split
+costs a mechanism for discovering which version is deployed and buys a redeploy of one without the
+other, which never happens.
 
 ---
 
@@ -83,8 +83,8 @@ happens.
 
 `POOL_SAMPLE` frames after 50 warmup, batch size 1, at the image size the model was exported against.
 Ten thousand frames, which is the number that keeps a cycle's wait under an hour at the device's
-measured per-frame cost; it is a constant to raise once several cycles have reported their own
-throughput, not a figure the design derives.
+measured per-frame cost. It is a constant, raised once several cycles have reported their own
+throughput.
 
 | Property | Value |
 |---|---|
@@ -112,8 +112,8 @@ only, since a bought image has labels and is in the training set rather than the
 The draw is seeded by the run and the cycle, so a redeploy after a rollback scores identical frames
 and the second pass is comparable to the first. The list is written to
 `replay_manifest_key(run_id, cycle)` before the deployment and shipped as a component artifact. It is
-the per-cycle record of sampled image IDs design §7.2 requires, and what ties every later number —
-a telemetry latency, a ranking row, a purchase — back to one frame.
+the per-cycle record of sampled image IDs, and what ties every later number — a telemetry latency, a
+ranking row, a purchase — back to one frame.
 
 Ten thousand of a shrinking 62,000 is the sampled fraction, so a cycle ranks the part of the pool it
 saw and buys 1,000 out of that. The alternative is the whole remaining pool every cycle, which is
@@ -208,10 +208,10 @@ pass. The predicates are in [gates.md](gates.md); what belongs here is what the 
 
 A run's first deployment has no champion and passes the throughput check as its own baseline.
 
-p95 latency and cold start are reported in the verdict's reason, never gated (design §4.3). Cold
-start is the session plus the first inference, excluding interpreter startup, which costs the same
-for every version. Latency is measured over 10,000 frames, so the p95 is a percentile rather than an
-estimate of one.
+p95 latency and cold start are reported in the verdict's reason, never gated. Cold start is the
+session plus the first inference, excluding interpreter startup, which costs the same for every
+version. Latency is measured over 10,000 frames, so the p95 is a percentile rather than an estimate
+of one.
 
 **A failed canary and a failed pass are different things.** Throughput is a property of the rollout:
 the model ran correctly and slowly, the deployment is rolled back, and the cycle ranks and buys from
@@ -232,9 +232,9 @@ deploys its challenger; a cycle that did not leaves the standing deployment alon
 champion. Either way the pool is ranked by whatever is deployed, which is the definition the
 selector already carries.
 
-**The Greengrass deployment is the record of intent.** The design left this open between
-`fleet_config` and the deployment; this stage settles it on the deployment. No `desired_version` is
-written and `fleet_config` holds no device item.
+**The Greengrass deployment is the record of intent.** What a device should be running is read off
+the deployment and nowhere else. No `desired_version` is written and `fleet_config` holds no device
+item.
 
 **A rollback is the same call naming the previous version.** There is no separate rollback path, so
 the path a rollback takes is the one every cycle has already exercised.
@@ -300,7 +300,7 @@ against uncertainty — where the model is slow *and* unsure. It lands with the 
 and across a new component version. It is keyed by **cycle**, not by model version: a cycle that
 rejects its challenger redeploys the champion, so one model version can be three cycles' deployments,
 and a counter keyed by it would report a clean install as a restart and fail the completion check for
-something that never happened. A cycle deploys exactly once, which is what makes it the key.
+something that never happened. A cycle deploys exactly once, so it is the key.
 
 Nothing in the suite covers it, because `fleet.replay` imports onnxruntime and the tests run without
 it — the same line `detect` sits on the testable side of.
@@ -314,9 +314,8 @@ model the fleet never ran.
 
 ## Deferred
 
-Two of design §4.5's five conditions are absent rather than approximated: a leak test over four
-minutes and a distribution distance over one sample both pass by construction. See
-[gates.md](gates.md).
+Two canary conditions are absent rather than approximated: a leak test over four minutes and a
+distribution distance over one sample both pass by construction. See [gates.md](gates.md).
 
 | Deferred | Needs |
 |---|---|

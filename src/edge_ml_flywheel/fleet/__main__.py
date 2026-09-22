@@ -152,7 +152,7 @@ def _deploy(aws: Any, args: argparse.Namespace) -> str:
     deploy.publish_component(aws, deploy.recipe_for(aws, release, replay))
 
     log.info("%s", deploy.describe(version, base.buckets(aws)))
-    return deploy.redeploy(aws, version, _target(aws))
+    return deploy.redeploy(aws, version, _target(aws), cycle=cycle)
 
 
 def _canary(aws: Any, args: argparse.Namespace) -> bool:

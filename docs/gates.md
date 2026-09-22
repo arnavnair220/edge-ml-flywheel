@@ -33,9 +33,8 @@ buys from. See [control.md](control.md).
 
 ## Two properties across all four
 
-**A verdict is never recorded without its reason.** `GateResult` carries both. The rejection log is
-what the project is built to produce (design §5), and a bare `False` six weeks later is a fact
-nobody can act on.
+**A verdict is never recorded without its reason.** `GateResult` carries both, so a rejection says
+what failed rather than only that something did.
 
 **A gate reports every condition that failed, not the first.** The next attempt costs a training run,
 so short-circuiting turns one diagnosis into two cycles.
@@ -62,8 +61,8 @@ project; a run that changes them is measuring something else, which `RunRegistra
 expresses. Each is validated on construction against a value that would admit everything — a floor of
 zero images passes a cycle that bought nothing.
 
-Two numbers are deliberately elsewhere. The confidence level is `bootstrap`'s constant rather than an
-argument, so a caller cannot shop for a level that promotes. The label budget is on the run
+Two numbers live elsewhere. The confidence level is `bootstrap`'s constant rather than an argument,
+so a caller cannot shop for a level that promotes. The label budget is on the run
 registration, which is the write-once item that makes it fixed for the run.
 
 ---
@@ -83,20 +82,19 @@ Leakage is hard, with no override and no threshold to soften it. An `eval` image
 invalidates every number the run has produced, and it does so silently — the metric goes up, which is
 what a leak looks like.
 
-It is checked twice on purpose. `oracle.cohorts` already refuses a batch reaching into `eval`, and
+It is checked twice. `oracle.cohorts` already refuses a batch reaching into `eval`, and
 this re-runs the identical judgement on what the ledger says was actually bought. The oracle's check
 runs on the list it was handed; this one runs on the labels that came back. A bug that lets the two
-disagree is the bug worth catching, and the design calls this the single most valuable check in the
-system (§4.1). It reuses `refusals` rather than restating it, so there is one implementation of what
-`eval` means.
+disagree is what this catches. It reuses `refusals` rather than restating it, so there is one
+implementation of what `eval` means.
 
 Coverage counts boxes bought *this* cycle, so it asks whether the batch teaches every class
 something. Coverage of the cumulative training set is not in question: the bootstrap is 8,000 random
 images.
 
-Integrity checks are absent. Design §4.1 also lists corrupt files, wrong resolution and blank frames;
-those decode a thousand JPEGs, and ingest already validated resolution and recorded a sha256 per
-image. Distribution shift is not checked and never will be here — a concentrated snow purchase is the
+Integrity checks are absent. Corrupt files, wrong resolution and blank frames would each decode a
+thousand JPEGs, and ingest already validated resolution and recorded a sha256 per image.
+Distribution shift is not checked and never will be here — a concentrated snow purchase is the
 selector working. The batch's composition is charted against the pool's base rates and gated on by
 nothing.
 
@@ -112,19 +110,15 @@ Three conditions over numbers the evaluation job has already computed.
 | Band | The lower end of the 95% resampling band clears zero |
 | Collapse | No class scores zero AP |
 
-Both statistical conditions are required, not either (design §4.2). The design predicts the two are
-close to redundant and says to confirm it against real numbers, which is only possible if both are
-evaluated and both are reported. That arithmetic was worked out over a seed spread, and a cycle now
-trains one seed: the band resamples images rather than seeds, so the floor carries more of the
-decision than the prediction assumed.
+Both statistical conditions are required, not either, and both are reported. The band resamples
+images rather than seeds, so at one seed per cycle it carries most of the decision.
 
-The band is the condition that makes this more than a demo. Most pipelines promote on a raw metric
-bump sitting inside the noise. Requiring the interval to clear zero means sometimes correctly
-refusing to promote, and a chart of honest rejections is the evidence the project is for.
+Requiring the interval to clear zero means a raw metric bump sitting inside the noise does not
+promote. A cycle that gained nothing measurable is rejected and its reason recorded.
 
-Slices cast no vote. Per-slice scores are computed every cycle and charted, never gated (design
-§4.4). Acquisition is condition-blind, so a cycle makes no per-condition bet for a per-condition gate
-to settle. The collapse check is not a slice test: it asks whether the model produces output at all.
+Slices cast no vote. Per-slice scores are computed every cycle and charted, never gated. Acquisition
+is condition-blind, so a cycle makes no per-condition bet for a per-condition gate to settle. The
+collapse check is not a slice test: it asks whether the model produces output at all.
 
 A run's first cycle has no champion, so the delta is absent and the verdict is the collapse check
 alone. Reporting no verdict would leave `gates_passed` false for the only model that can become the
@@ -146,18 +140,15 @@ The accuracy check is relative, not absolute. A challenger that improved and one
 quantize about as well, so the question is what the conversion cost *this* model rather than where it
 landed.
 
-The 5% allowance is looser than design §4.3's 2%, which was written before anything had been
-quantized. What the project needs from this gate is that a broken export cannot ship, and a broken
-export is not a 3% model — it is a 30% one, or a graph that detects nothing. A threshold tight enough
-to reject a slightly lossy but working artifact would stop the loop over a number the fleet would
-never notice, and what quantization actually cost is in the reason either way. Tighten it once
-several cycles have said what the real spread is.
+The 5% allowance catches a broken export rather than a slightly lossy one. A broken export is not a
+3% model — it is a 30% one, or a graph that detects nothing. What quantization actually cost is in
+the reason either way.
 
-The size ceiling is not a number the export is near — a quantized YOLO11n is a few megabytes — which
-is the point: it catches a cycle that shipped the fp32 graph under the int8 filename.
+The size ceiling is not a number the export is near — a quantized YOLO11n is a few megabytes. It
+catches a cycle that shipped the fp32 graph under the int8 filename.
 
-Speed is reported, not gated (design §4.3). Gating on latency would mean a promotion decision that
-cannot be made until the model has already been deployed.
+Speed is reported, not gated. Gating on latency would mean a promotion decision that cannot be made
+until the model has already been deployed.
 
 ---
 
@@ -172,7 +163,7 @@ Three conditions over one device's pass, all operational rather than statistical
 | Throughput | Frame rate is within `max_throughput_drop` of the champion's |
 
 A detector is deterministic, so there is no run-to-run spread on one device and any "within N
-standard deviations" test over it is vacuous (design §4.5). What can genuinely fail is the plumbing.
+standard deviations" test over it is vacuous. What can fail is the plumbing.
 
 **Two of the three also decide whether the cycle may buy.** Digest and completion are statements
 about the detections the selector is about to rank — the wrong bytes ran, or the file is short — so
@@ -193,8 +184,7 @@ question that hardware answers.
 
 ## Incomplete
 
-Design §4.5 lists five canary conditions and three are implemented. Memory flatness over two replay
-hours needs the hours; the distance between two confidence distributions needs a champion replaying
-the same frames at the same time, which is shadow mode and a second component. They are absent rather
-than approximated, because a leak test over four minutes and a distribution distance over one sample
-pass by construction and then report themselves as evidence.
+Two further conditions are absent rather than approximated. Memory flatness over two replay hours
+needs the hours; the distance between two confidence distributions needs a champion replaying the
+same frames at the same time, which is shadow mode and a second component. A leak test over four
+minutes and a distribution distance over one sample pass by construction.

@@ -87,7 +87,7 @@ paired bootstrap band on the overall metric is narrow enough for a cycle's delta
 **Shadow mode** — the challenger scores the same frames as the champion at the same time, with no
 effect on anything downstream, so the comparison is exact rather than statistical.
 
-**Canary** — the challenger genuinely deployed to a device and watched there before the rollout
+**Canary** — the challenger deployed to a device and watched there before the rollout
 stands. At a fleet of one it is the whole rollout; a larger fleet makes it the first stage.
 
 **Saturation** — the point at which another cycle stops being worth its labels, read off the label
@@ -202,48 +202,6 @@ one.
 
 ---
 
-## Planned additions
-
-Work the design accommodates but does not build.
-
-**The A/A test.** A challenger trained on a bootstrap resample of the champion's own labels at the
-same seed. Zero new information, so a healthy quality gate must refuse to promote, and a promotion
-would mean the evaluation machinery itself has a false positive. Nothing else measures that rate,
-so the supported claim is a gate that rejected honestly on live data rather than a gate whose
-false-positive rate is known. It needs no second selection rule — it changes what the challenger
-trains on, not how the batch was chosen — which makes it the cheapest of the three to add.
-
-**The label-efficiency A/B.** A second run of the same length buying at random instead of by
-uncertainty, orchestration and fleet stripped out, both arms paired on the same seed and the same
-bootstrap. The gap between the two curves is the case for uncertainty sampling specifically.
-Until it is measured, the supported claim is a closed loop that meters label spend, gates against
-fixed thresholds, and promotes or rolls back — not that uncertainty selection is the cheaper way to
-buy labels.
-
-**The confidence-ordered control.** One cycle buying the images the champion is *most* certain
-about. Those frames carry the least new information, so the gain should be close to nothing; a
-control cycle that gains about as much as a real one indicates the uncertainty ranking is not the
-source of the improvement.
-
-Those two need a second selection rule, and there is deliberately only one: `selection.select` ranks
-by uncertainty and takes no rule argument. Adding an arm therefore means adding a rule and a way to
-choose between them, not changing a configuration value. That is the cost of a project with one
-selector, accepted because this is a working flywheel rather than an experiment about selection.
-
-Two properties keep the rest of the work small:
-
-- **An arm is a run.** `run_id` already partitions every table and every purchase prefix, so two
-  arms cannot read each other's ledgers without any further key design.
-- **The partition and `eval` are frozen and reproducible under `partition_version`.** A later arm is
-  comparable only if it trains from the same 8,000-image bootstrap and scores against the same
-  5,000-image eval, which is a property of the partition rather than of when the arm is run.
-
-Whatever chooses between two rules must stay out of the versions that force a fresh champion
-baseline. A change of rule must not re-baseline, or the two arms would differ by a selector *and* a
-champion.
-
----
-
 ## Cross-cutting invariants
 
 Properties every stage honors, rather than components living anywhere:
@@ -261,17 +219,59 @@ Properties every stage honors, rather than components living anywhere:
   longer the same test on the same data universe, and forces a fresh champion baseline instead of a
   promotion decision. The class set is not among them because there is only one: it cannot differ
   between two models being compared.
-- **The IAM boundary that makes the budget real.** The training role has no read access to the
-  withheld labels.
+- **The IAM boundary behind the budget.** The training role has no read access to the withheld
+  labels.
 - **Cost discipline.** No NAT gateway; VPC endpoints instead. A budget alarm exists before any
   other infrastructure.
+
+---
+
+## Planned additions
+
+Work this architecture accommodates but does not build.
+
+**The A/A test.** A challenger trained on a bootstrap resample of the champion's own labels at the
+same seed. Zero new information, so a healthy quality gate must refuse to promote, and a promotion
+would mean the evaluation machinery itself has a false positive. Nothing else measures that rate,
+so the supported claim is a gate that rejected on live data rather than a gate whose false-positive
+rate is known. It needs no second selection rule — it changes what the challenger
+trains on, not how the batch was chosen — which makes it the cheapest of the three to add.
+
+**The label-efficiency A/B.** A second run of the same length buying at random instead of by
+uncertainty, orchestration and fleet stripped out, both arms paired on the same seed and the same
+bootstrap. The gap between the two curves measures uncertainty sampling specifically.
+Until it is measured, the supported claim is a closed loop that meters label spend, gates against
+fixed thresholds, and promotes or rolls back — not that uncertainty selection is the cheaper way to
+buy labels.
+
+**The confidence-ordered control.** One cycle buying the images the champion is *most* certain
+about. Those frames carry the least new information, so the gain should be close to nothing; a
+control cycle that gains about as much as a real one indicates the uncertainty ranking is not the
+source of the improvement.
+
+Those two need a second selection rule, and there is only one: `selection.select` ranks by
+uncertainty and takes no rule argument. Adding an arm therefore means adding a rule and a way to
+choose between them, not changing a configuration value. That is the cost of a project with one
+selector, accepted because this is a working flywheel rather than an experiment about selection.
+
+Two properties keep the rest of the work small:
+
+- **An arm is a run.** `run_id` already partitions every table and every purchase prefix, so two
+  arms cannot read each other's ledgers without any further key design.
+- **The partition and `eval` are frozen and reproducible under `partition_version`.** A later arm is
+  comparable only if it trains from the same 8,000-image bootstrap and scores against the same
+  5,000-image eval, which is a property of the partition rather than of when the arm is run.
+
+Whatever chooses between two rules must stay out of the versions that force a fresh champion
+baseline. A change of rule must not re-baseline, or the two arms would differ by a selector *and* a
+champion.
 
 ---
 
 ## Companion docs
 
 Each stage's document lands with the stage. Numbered documents are stages; unnumbered ones are
-cross-cutting.
+cross-cutting, except [running.md](running.md), which is the operator's view of all of them.
 
 | Doc | Covers |
 |---|---|
@@ -283,6 +283,7 @@ cross-cutting.
 | [control.md](control.md) | The state machine and the control function |
 | [gates.md](gates.md) | The four gates and their thresholds |
 | [reporting.md](reporting.md) | Where a finished run's summary is, and what it holds |
+| [running.md](running.md) | Bring-up: prerequisites, OIDC, and the commands |
 
 The charts are not built. They land beside [reporting.md](reporting.md) as committed static images
 when they are.
