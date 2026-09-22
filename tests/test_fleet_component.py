@@ -19,10 +19,13 @@ import pytest
 from edge_ml_flywheel.conventions import (
     POOL_SAMPLE,
     Buckets,
+    Cohort,
     Cycle,
     ModelVersion,
+    Precision,
     RunId,
     Seed,
+    detections_key,
     new_model_version,
     replay_code_key,
     replay_manifest_key,
@@ -184,6 +187,43 @@ class TestWhatTheDeviceIsTold:
         assert "topic" not in configuration
         assert f"--topic edge-ml-flywheel/fleet/{RUN}/{{iot:thingName}}" in script
 
+    def test_nothing_that_varies_by_cycle_is_left_in_configuration(self) -> None:
+        """The second class of bug configuration has produced, and the one that
+        stopped a run at cycle 1.
+
+        Greengrass keeps configuration per component *name*, and a later
+        version's `DefaultConfiguration` does not displace what an earlier one
+        left there -- only the keys a deployment merges are rewritten. So a value
+        that varies by cycle and lives here is read at the value the run's first
+        cycle published, for every cycle after it. The cycle number did exactly
+        that: cycle 1 ran as cycle 0, against cycle 0's start counter and cycle
+        0's detections key.
+
+        Asserting the two configurations are equal refuses the class. A new
+        per-cycle value put here fails this without anyone remembering why.
+        """
+        first = component.Release(version=VERSION, seed=Seed(1), git_commit=COMMIT, cycle=Cycle(3))
+        later = component.Release(version=VERSION, seed=Seed(1), git_commit=COMMIT, cycle=Cycle(7))
+
+        assert (
+            a_recipe(release=first)["ComponentConfiguration"]["DefaultConfiguration"]
+            == a_recipe(release=later)["ComponentConfiguration"]["DefaultConfiguration"]
+        )
+
+    def test_the_cycle_and_the_detections_key_reach_the_device_as_literals(self) -> None:
+        """Where the two that do vary went instead. The topic's treatment, for
+        the topic's reason."""
+        release = component.Release(
+            version=VERSION, seed=Seed(1), git_commit=COMMIT, cycle=Cycle(7)
+        )
+        script = a_recipe(release=release)["Manifests"][0]["Lifecycle"]["Run"]["Script"]
+        key = detections_key(
+            VERSION, Seed(1), Cohort.POOL, precision=Precision.INT8, cycle=Cycle(7)
+        )
+
+        assert "--cycle 7" in script
+        assert f"--detections_key {key}" in script
+
     def test_no_configuration_value_hides_a_recipe_variable(self) -> None:
         """The class of bug the topic was one of. The nucleus substitutes recipe
         variables in the lifecycle and stores configuration values as they are,
@@ -199,7 +239,7 @@ class TestWhatTheDeviceIsTold:
         """Greengrass decides where an artifact lands and where a component may
         write, so a path guessed here is one that works until the nucleus changes
         its layout."""
-        script = component.run_script("edge-ml-flywheel/fleet/a-run/")
+        script = component.run_script("edge-ml-flywheel/fleet/a-run/", Cycle(1), "a/key.parquet")
 
         assert "{artifacts:path}/model.onnx" in script
         assert "{artifacts:path}/replay.json" in script
@@ -264,7 +304,9 @@ class TestWhatTheDeviceIsTold:
 
     def test_it_runs_the_package_as_a_module(self) -> None:
         """Which is why the archive carries no entry point beside the package."""
-        assert "-m edge_ml_flywheel.fleet.replay" in component.run_script("prefix/")
+        script = component.run_script("prefix/", Cycle(1), "a/key.parquet")
+
+        assert "-m edge_ml_flywheel.fleet.replay" in script
 
 
 class TestTheDeployment:
@@ -276,7 +318,7 @@ class TestTheDeployment:
         assert request["components"] == {
             "edge-ml-flywheel.20260812t143355z-v0-skeleton": {
                 "componentVersion": "0.3.0",
-                "configurationUpdate": {"merge": json.dumps({"version": VERSION})},
+                "configurationUpdate": {"merge": json.dumps({"version": VERSION, "taskToken": ""})},
             }
         }
 
@@ -326,16 +368,23 @@ class TestTheDeployment:
 
         assert merged["taskToken"] == "opaque"
 
-    def test_a_rollback_hands_nobody_a_token(self) -> None:
-        """Nothing is waiting on a rollback. The cycle that was waiting is the
-        one that failed."""
+    def test_a_rollback_hands_nobody_a_token_by_clearing_the_one_there(self) -> None:
+        """Nothing is waiting on a rollback -- the cycle that was waiting is the
+        one that failed -- and saying so takes a merge rather than a silence.
+
+        What a deployment does not merge, it inherits: Greengrass keeps
+        configuration per component name, so a rollback that omitted the key
+        would leave the rollout's own token behind and the rolled-back component
+        would resume an execution that is already over. Absent is the one thing
+        an empty token must not be.
+        """
         target = "arn:aws:iot:us-east-1:123456789012:thinggroup/x"
         name = "edge-ml-flywheel.20260812t143355z-v0-skeleton"
 
         request = component.deployment(VERSION, target)
         merged = json.loads(request["components"][name]["configurationUpdate"]["merge"])
 
-        assert "taskToken" not in merged
+        assert merged["taskToken"] == ""
 
     def test_the_deployment_name_carries_the_version_it_puts_out(self) -> None:
         request = component.deployment(VERSION, "arn:aws:iot:us-east-1:123456789012:thinggroup/x")

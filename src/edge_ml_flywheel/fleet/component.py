@@ -205,12 +205,26 @@ class Replay:
 STANDARD: Final = Replay()
 
 
-def run_script(topic_prefix: str) -> str:
+def run_script(topic_prefix: str, cycle: Cycle, detections: str) -> str:
     """The command the nucleus runs, as one line.
 
     Every path is a recipe variable rather than a literal. Greengrass decides
     where an artifact lands and where a component may write, and a path guessed
     here would be one that works until the nucleus changes its layout.
+
+    **`cycle` and `detections` are literals for the topic's reason**, which is
+    the rule this file has now learned twice. Greengrass keeps merged
+    configuration per component *name*, and a new component version's
+    `DefaultConfiguration` does not displace what an earlier one left there. Only
+    the keys a deployment merges are rewritten each time. So a value that varies
+    by cycle and lives in configuration is read at the value the run's *first*
+    cycle published, for every cycle after it.
+
+    Both of these do vary. The cycle is the key the device's start counter is
+    kept under, and the detections key names the object the pass writes. Left in
+    configuration they made cycle 1 run as cycle 0 -- a second start against
+    cycle 0's counter, which the canary reads as Greengrass restarting something
+    that crashed, and a pass that would have overwritten cycle 0's detections.
 
     **It opens by assigning `PYTHONPATH`**, which is the package's own location
     and the reason `python -m` finds it at all. In the command rather than in the
@@ -253,7 +267,7 @@ def run_script(topic_prefix: str) -> str:
             "--endpoint {configuration:/iotEndpoint}",
             "--bucket {configuration:/dataBucket}",
             "--detections_bucket {configuration:/detectionsBucket}",
-            "--detections_key {configuration:/detectionsKey}",
+            f"--detections_key {detections}",
             # Quoted, and the only argument here that is. The token is empty by
             # design on two paths -- the default a component version is published
             # with, and every rollback, which waits for nothing -- and an
@@ -263,7 +277,7 @@ def run_script(topic_prefix: str) -> str:
             # start, which is the one path whose whole purpose is working on a
             # day something else did not.
             '--task_token "{configuration:/taskToken}"',
-            "--cycle {configuration:/cycle}",
+            f"--cycle {cycle}",
             "--warmup {configuration:/warmup}",
             "--image_size {configuration:/imageSize}",
             "--confidence_floor {configuration:/confidenceFloor}",
@@ -323,25 +337,18 @@ def recipe(
             "DefaultConfiguration": {
                 "runId": str(run_id),
                 "version": str(release.version),
-                # The deploying cycle, which the device keys its start counter
-                # by. Not derivable on the device from the model version: a
-                # rejected cycle redeploys the champion, so one version can be
-                # three cycles' deployments.
-                "cycle": cycle,
-                # The topic is not here. It is built in the command, which is
-                # the only place the device's own name can be filled in and the
-                # only place a stale merged configuration cannot reach. See
-                # `run_script`.
+                # Neither the cycle, the detections key nor the topic is here.
+                # All three vary by cycle, and configuration is where a value
+                # that varies by cycle goes stale: Greengrass keeps it per
+                # component *name*, and only the keys a deployment merges are
+                # rewritten. They are literals in the command. See `run_script`.
+                #
+                # What remains is constant for the life of a component name --
+                # the name carries the run -- or is merged by every deployment,
+                # which is `version` and `taskToken`.
                 "iotEndpoint": iot_endpoint,
                 "dataBucket": buckets.data,
                 "detectionsBucket": buckets.artifacts,
-                "detectionsKey": detections_key(
-                    release.version,
-                    release.seed,
-                    Cohort.POOL,
-                    precision=Precision.INT8,
-                    cycle=cycle,
-                ),
                 # Empty by default and filled by the deployment, because a task
                 # token does not exist when a component version is published and
                 # a component version is immutable once it does. A pass with no
@@ -371,7 +378,19 @@ def recipe(
                     # resolved `{artifacts:decompressedPath}` -- so the variable
                     # is assigned in the command, where one expansion does both
                     # jobs. See `run_script`.
-                    "Run": {"Script": run_script(telemetry_topic_prefix(run_id))}
+                    "Run": {
+                        "Script": run_script(
+                            telemetry_topic_prefix(run_id),
+                            cycle,
+                            detections_key(
+                                release.version,
+                                release.seed,
+                                Cohort.POOL,
+                                precision=Precision.INT8,
+                                cycle=cycle,
+                            ),
+                        )
+                    }
                 },
                 "Artifacts": [
                     {"URI": uri(buckets.artifacts, model)},
@@ -432,9 +451,18 @@ def deployment(
     installed perfectly well and is slower, or loaded the wrong file.
     """
     component, semver = component_address(version, cycle)
-    merge: dict[str, str] = {"version": str(version)}
-    if task_token:
-        merge["taskToken"] = task_token
+
+    # Both keys merged every time, including an empty token. What a deployment
+    # does not merge, it inherits: Greengrass keeps configuration per component
+    # name, so omitting the token on a rollback would leave the rollout's own
+    # token in place and the rolled-back component would resume -- or try to --
+    # an execution that is already over. Merging the empty string is what makes
+    # "no token" a value rather than a silence.
+    #
+    # It is also why these two are the only configuration left that varies: a
+    # key merged on every deployment cannot go stale, and one that is not must
+    # not vary. See `run_script`.
+    merge: dict[str, str] = {"version": str(version), "taskToken": task_token}
 
     update: dict[str, dict[str, Any]] = {
         component: {
