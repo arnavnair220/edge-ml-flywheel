@@ -812,6 +812,69 @@ PARTITIONS: Final[Mapping[PartitionVersion, PartitionSpec]] = {
             Cohort.RESERVE: 5_000,
         },
     ),
+    # Versions 1 to 3 are one decision taken three ways: how small the labeled
+    # start has to be before a cycle's 1,000 labels move the metric.
+    #
+    # Version 0 answered that with measurements. Four cycles promoted once and
+    # rejected three times, at deltas of +0.0007, +0.0034 and +0.0034 against a
+    # +0.0050 floor -- and the last two are equal, so the third 1,000 labels
+    # bought nothing the second had not. A thousand images on eight thousand is a
+    # 12.5% increase, and 12.5% is beneath what this eval can resolve.
+    #
+    # `training.job` reached the same conclusion from the other side and acted on
+    # resolution: 416 is there because "a COCO-pretrained detector at full
+    # resolution starts strong enough that a cycle's 1,000 labels cannot move the
+    # metric". That handicap was not enough on its own. This is the same argument
+    # applied to the axis that governs it.
+    #
+    # **The floor does not move.** A threshold lowered until models clear it
+    # reports the threshold rather than the models, and the run that would need
+    # it is the one whose gains are too small to matter. These versions make the
+    # gains larger instead.
+    #
+    # Three sizes rather than one because which is right is not known in advance
+    # and the failure is asymmetric. The smaller the bootstrap the larger the
+    # early gains, but cycle 0 must still clear the collapse check -- `motor`,
+    # `bike` and `rider` score 0.030, 0.040 and 0.041 on eight thousand images,
+    # and a class at exactly zero is a first cycle that cannot promote and a run
+    # that cannot start. Draw one, run a single cycle against it, and take the
+    # next size up if a class comes back empty. Defining a version does not draw
+    # it, so the two unused here cost a line each.
+    #
+    # **The seed is version 0's, deliberately.** A draw is per split, ascending
+    # by ticket, quotas consumed in cohort order -- so one seed makes every
+    # bootstrap the same ordering's opening stretch, and 2,000 is inside 3,000 is
+    # inside 4,000 is inside version 0's 8,000. The versions differ in how much
+    # data a run starts with and not in which, and `eval` is the identical five
+    # thousand images in all four, so every number measured against version 0 is
+    # still measured against the same ruler.
+    PartitionVersion(1): PartitionSpec(
+        seed=PartitionSeed(20260819),
+        sizes={
+            Cohort.BOOTSTRAP: 2_000,
+            Cohort.POOL: 68_000,
+            Cohort.EVAL: 5_000,
+            Cohort.RESERVE: 5_000,
+        },
+    ),
+    PartitionVersion(2): PartitionSpec(
+        seed=PartitionSeed(20260819),
+        sizes={
+            Cohort.BOOTSTRAP: 3_000,
+            Cohort.POOL: 67_000,
+            Cohort.EVAL: 5_000,
+            Cohort.RESERVE: 5_000,
+        },
+    ),
+    PartitionVersion(3): PartitionSpec(
+        seed=PartitionSeed(20260819),
+        sizes={
+            Cohort.BOOTSTRAP: 4_000,
+            Cohort.POOL: 66_000,
+            Cohort.EVAL: 5_000,
+            Cohort.RESERVE: 5_000,
+        },
+    ),
 }
 
 

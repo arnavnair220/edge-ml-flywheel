@@ -21,6 +21,7 @@ import pytest
 
 from edge_ml_flywheel.conventions import (
     COHORT_SPLIT,
+    PARTITIONS,
     AssignmentRow,
     Cohort,
     ImageId,
@@ -126,6 +127,70 @@ class TestPartitionSpec:
         # A version nobody wrote down has no seed, so it has no partition.
         with pytest.raises(ValueError, match="partition version 7 is not defined"):
             partition_spec(PartitionVersion(7))
+
+    def test_every_version_fills_both_splits_exactly(self) -> None:
+        # The draw refuses quotas that do not total their split, but it refuses
+        # them in CodeBuild after the manifest has been read. A size that cannot
+        # be drawn is worth failing here instead.
+        for version in sorted(PARTITIONS):
+            spec = partition_spec(version)
+            drawn = {
+                split: sum(size for _, size in spec.quotas(split))
+                for split in (Split.TRAIN, Split.VAL)
+            }
+            assert drawn == {Split.TRAIN: 70_000, Split.VAL: 10_000}, f"version {version}"
+
+    def test_the_bootstrap_sizes_nest_and_the_eval_never_moves(self) -> None:
+        # What makes versions 1 to 3 a ladder rather than three unrelated draws.
+        # One seed orders each split once and quotas consume it in cohort order,
+        # so every bootstrap is that ordering's opening stretch and the smaller
+        # ones are inside the larger. The versions therefore differ in how much
+        # data a run starts with and not in which.
+        #
+        # `eval` is the half that must not move at all: it is the ruler every
+        # cycle of every version is measured against, and a version that redrew
+        # it would silently make its numbers incomparable with version 0's.
+        for version in sorted(PARTITIONS):
+            spec = partition_spec(version)
+            assert spec.seed == SEED, f"version {version} would draw a different ordering"
+            assert spec.sizes[Cohort.EVAL] == 5_000, f"version {version} moved the ruler"
+
+    def test_a_smaller_bootstrap_is_the_larger_one_s_opening_stretch(self) -> None:
+        # The nesting itself, drawn rather than argued from the sizes. Two specs
+        # that agree on the seed and differ on the bootstrap produce cohorts
+        # where the smaller is a subset of the larger, and the images it gives up
+        # land in the pool rather than anywhere else.
+        manifest = a_manifest()
+        smaller = PartitionSpec(
+            seed=SEED,
+            sizes={Cohort.BOOTSTRAP: 3, Cohort.POOL: 57, Cohort.EVAL: 5, Cohort.RESERVE: 15},
+        )
+        larger = PartitionSpec(
+            seed=SEED,
+            sizes={Cohort.BOOTSTRAP: 8, Cohort.POOL: 52, Cohort.EVAL: 5, Cohort.RESERVE: 15},
+        )
+
+        few = partition.assign(manifest, smaller)
+        many = partition.assign(manifest, larger)
+
+        assert in_cohort(few, Cohort.BOOTSTRAP) < in_cohort(many, Cohort.BOOTSTRAP)
+        assert in_cohort(many, Cohort.BOOTSTRAP) - in_cohort(few, Cohort.BOOTSTRAP) <= in_cohort(
+            few, Cohort.POOL
+        )
+
+    def test_the_eval_cohort_is_the_same_images_whatever_the_bootstrap(self) -> None:
+        # The ruler. `eval` draws from `val` and the bootstrap from `train`, so
+        # resizing one cannot reach the other -- which is what keeps a version 1
+        # run comparable with every number version 0 measured.
+        manifest = a_manifest()
+        smaller = PartitionSpec(
+            seed=SEED,
+            sizes={Cohort.BOOTSTRAP: 3, Cohort.POOL: 57, Cohort.EVAL: 5, Cohort.RESERVE: 15},
+        )
+
+        assert in_cohort(partition.assign(manifest, smaller), Cohort.EVAL) == in_cohort(
+            partition.assign(manifest, SPEC), Cohort.EVAL
+        )
 
     def test_a_spec_must_size_every_cohort(self) -> None:
         # A cohort added to the enum without a size lands here rather than in a
