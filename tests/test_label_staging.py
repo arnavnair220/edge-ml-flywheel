@@ -23,6 +23,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from edge_ml_flywheel import storage
 from edge_ml_flywheel.conventions import (
     COHORT_SPLIT,
     LABELED_COHORTS,
@@ -38,10 +39,9 @@ from edge_ml_flywheel.partition.__main__ import main
 
 REGION = "us-east-1"
 
-# What moto's STS hands back, which is what `Buckets.for_account` names the
-# bucket from.
-ACCOUNT = "123456789012"
-BUCKET = f"edge-ml-flywheel-data-{ACCOUNT}"
+# Any name: the bucket comes from configuration, so nothing here depends on it
+# matching an account.
+BUCKET = "edge-ml-flywheel-data-test"
 
 V0 = PartitionVersion(0)
 
@@ -98,8 +98,10 @@ def data(monkeypatch: pytest.MonkeyPatch) -> Iterator[boto3.Session]:
         ("AWS_SECRET_ACCESS_KEY", "testing"),
         ("AWS_SESSION_TOKEN", "testing"),
         ("AWS_DEFAULT_REGION", REGION),
+        (storage.DATA_BUCKET, BUCKET),
     ):
         monkeypatch.setenv(name, value)
+    monkeypatch.delenv(storage.ENDPOINT_URL, raising=False)
 
     with mock_aws():
         session = boto3.Session(region_name=REGION)
@@ -123,7 +125,7 @@ class TestStage:
     def test_every_key_lands_at_its_own_path(self, data: boto3.Session, tmp_path: Path) -> None:
         keys = [raw_label_key(an_image_id(0), COHORT_SPLIT[Cohort.BOOTSTRAP])]
 
-        landed = fetch.stage(fetch.client(data), BUCKET, keys, tmp_path)
+        landed = fetch.stage(fetch.data_store(), keys, tmp_path)
 
         assert landed == 1
         assert (tmp_path / keys[0]).read_bytes() == a_document(an_image_id(0))
@@ -142,12 +144,20 @@ class TestStage:
         absent = raw_label_key(an_image_id(404), COHORT_SPLIT[Cohort.BOOTSTRAP])
 
         with pytest.raises(RuntimeError, match=r"1 of 2 label documents"):
-            fetch.stage(fetch.client(data), BUCKET, [present, absent], tmp_path)
+            fetch.stage(fetch.data_store(), [present, absent], tmp_path)
 
         assert (tmp_path / present).is_file()
 
-    def test_the_bucket_comes_from_the_account(self, data: boto3.Session) -> None:
-        assert fetch.data_bucket(data) == BUCKET
+    def test_the_bucket_comes_from_configuration(self, data: boto3.Session) -> None:
+        assert fetch.data_store().bucket == BUCKET
+
+    def test_an_unconfigured_bucket_is_refused_by_name(
+        self, data: boto3.Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(storage.DATA_BUCKET)
+
+        with pytest.raises(SystemExit, match=storage.DATA_BUCKET):
+            fetch.data_store()
 
 
 class TestStageLabelsCommand:

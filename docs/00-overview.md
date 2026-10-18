@@ -283,6 +283,7 @@ cross-cutting, except [running.md](running.md), which is the operator's view of 
 | [control.md](control.md) | The state machine and the control function |
 | [gates.md](gates.md) | The four gates and their thresholds |
 | [reporting.md](reporting.md) | Where a finished run's summary is, and what it holds |
+| [storage.md](storage.md) | The object-store interface, its configuration, and its access boundaries |
 | [running.md](running.md) | Bring-up: prerequisites, OIDC, and the commands |
 
 The charts are not built. They land beside [reporting.md](reporting.md) as committed static images

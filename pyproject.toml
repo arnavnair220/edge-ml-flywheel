@@ -119,7 +119,15 @@ dev = [
     # fake that returns whatever the test needs: the conditional put is the
     # module's whole reason to exist, so the thing under test is precisely
     # whether a real engine refuses the second write.
-    "moto[dynamodb]>=5",
+    #
+    # `s3` for the storage contract suite, which runs every `ObjectStore`
+    # operation against moto on every run.
+    "moto[dynamodb,s3]>=5",
+    # The same suite against a real MinIO server, in a container started for the
+    # session. moto is a model of S3 written by the people who wrote the client;
+    # MinIO is a second implementation of the API, which is the claim the
+    # storage layer makes. Skipped where no Docker daemon answers.
+    "testcontainers[minio]>=4",
 ]
 
 # A group rather than a project dependency, because these are the ingest

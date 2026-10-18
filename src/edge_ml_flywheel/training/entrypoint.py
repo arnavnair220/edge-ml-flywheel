@@ -36,7 +36,6 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
-import boto3
 import numpy as np
 import torch
 from ultralytics import YOLO
@@ -50,6 +49,7 @@ from edge_ml_flywheel.conventions import (
     sha256sums_document,
     uri,
 )
+from edge_ml_flywheel.storage.s3 import S3Store
 from edge_ml_flywheel.training import dataset, export, images, labels
 from edge_ml_flywheel.training.job import (
     BASE_CHANNEL,
@@ -271,18 +271,18 @@ def publish(checkpoint: Path, root: Path, args: argparse.Namespace) -> None:
     local_sha = model_dir / ModelArtifact.SHA256.value
     local_sha.write_text(sha256sums_document(digests), encoding="utf-8")
 
-    client = boto3.client("s3")
+    store = S3Store.connect(bucket)
     for artifact, path in (*local.items(), (ModelArtifact.SHA256, local_sha)):
         key = model_artifact_key(version, seed, artifact)
-        client.upload_file(str(path), bucket, key)
+        store.upload(path, key)
         log.info("wrote %s", uri(bucket, key))
 
     for artifact, sha256 in digests.items():
         landed = WORK / f"readback-{artifact.value}"
-        client.download_file(bucket, model_artifact_key(version, seed, artifact), str(landed))
+        store.download(model_artifact_key(version, seed, artifact), landed)
         if digest(landed) != sha256:
             raise SystemExit(
-                f"{artifact.value} read back from S3 does not match what was uploaded: "
+                f"{artifact.value} read back from the store does not match what was uploaded: "
                 f"{sha256} written, {digest(landed)} read"
             )
         landed.unlink()

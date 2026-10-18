@@ -1,8 +1,8 @@
 """The operator's side of a deployment: sample, package, publish, deploy, read.
 
-`training.launch`'s shape for the fleet, and it shares that module's session and
-bucket helpers rather than restating them -- the arrangement every other
-`launch` in this package uses.
+`training.launch`'s shape for the fleet. Every bucket it touches is reached
+through `storage`, named by configuration; the model manifest is still read
+through `registry.launch` until the registry moves to MLflow.
 
 **Nothing here decides whether a rollout continues.** This stages what a device
 needs, asks Greengrass to put it there, and reads back what the device said.
@@ -48,6 +48,8 @@ from edge_ml_flywheel.conventions import (
 from edge_ml_flywheel.fleet import component, telemetry
 from edge_ml_flywheel.gates.canary import canary_gate, detections_stand
 from edge_ml_flywheel.registry import launch as registry
+from edge_ml_flywheel.storage import ObjectStore
+from edge_ml_flywheel.storage.s3 import S3Store
 from edge_ml_flywheel.training import launch as base
 
 log = logging.getLogger(__name__)
@@ -126,7 +128,7 @@ def checkout_archive() -> bytes:
     return code_archive(base.repo_root() / "src" / _CODE_ROOT)
 
 
-def stage_code(aws: boto3.Session, git_commit: str, code: bytes) -> str:
+def upload_code(artifacts: ObjectStore, git_commit: str, code: bytes) -> str:
     """Upload the tree the component runs, and return its key.
 
     Unconditional. The key is the commit, so re-uploading writes identical bytes
@@ -134,13 +136,12 @@ def stage_code(aws: boto3.Session, git_commit: str, code: bytes) -> str:
     a few hundred kilobytes.
     """
     key = replay_code_key(git_commit)
-    artifacts = base.buckets(aws).artifacts
-    aws.client("s3").put_object(Bucket=artifacts, Key=key, Body=code)
-    log.info("packaged %d KB of source to %s", len(code) // 1024, uri(artifacts, key))
+    artifacts.put(key, code)
+    log.info("packaged %d KB of source to %s", len(code) // 1024, uri(artifacts.bucket, key))
     return key
 
 
-def sampled_frames(aws: boto3.Session, run_id: RunId, cycle: Cycle) -> tuple[ImageId, ...]:
+def read_sampled_frames(artifacts: ObjectStore, run_id: RunId, cycle: Cycle) -> tuple[ImageId, ...]:
     """The pool frames this cycle's device scores, read off what the cycle drew.
 
     **The draw is not made here.** `scoring.launch.prepare` makes it, early in
@@ -155,16 +156,16 @@ def sampled_frames(aws: boto3.Session, run_id: RunId, cycle: Cycle) -> tuple[Ima
     hour later, as a component that started and found no frames.
     """
     key = replay_manifest_key(run_id, cycle)
-    artifacts = base.buckets(aws).artifacts
-    if not base.exists(aws, artifacts, key):
+    where = uri(artifacts.bucket, key)
+    if not artifacts.exists(key):
         raise SystemExit(
-            f"{uri(artifacts, key)} does not exist, so cycle {cycle} has not drawn the frames its "
+            f"{where} does not exist, so cycle {cycle} has not drawn the frames its "
             f"device would score. Score prepare writes it; run it before deploying."
         )
 
-    document = json.loads(aws.client("s3").get_object(Bucket=artifacts, Key=key)["Body"].read())
+    document = json.loads(artifacts.get(key))
     if not isinstance(document, list) or not document:
-        raise SystemExit(f"{uri(artifacts, key)} is not a non-empty list of image IDs")
+        raise SystemExit(f"{where} is not a non-empty list of image IDs")
 
     drawn = tuple(parse_image_id(str(value)) for value in document)
     log.info("cycle %d put %d pool frames in front of the fleet", cycle, len(drawn))
@@ -292,7 +293,7 @@ def deployed(aws: boto3.Session, run_id: RunId, target_arn: str) -> ModelVersion
 # ---------------------------------------------------------------------------
 
 
-def records(aws: boto3.Session, run_id: RunId) -> list[dict[str, Any]]:
+def read_records(telemetry_store: ObjectStore, run_id: RunId) -> list[dict[str, Any]]:
     """Every telemetry object one run's fleet has produced, parsed.
 
     The whole run's prefix rather than one version's, because that is what
@@ -306,25 +307,19 @@ def records(aws: boto3.Session, run_id: RunId) -> list[dict[str, Any]]:
     so a document that will not parse means one of those two changed -- and
     dropping it would report a short replay instead.
     """
-    client = aws.client("s3")
-    telemetry_bucket = base.buckets(aws).telemetry
     prefix = telemetry_run_prefix(run_id)
 
     found: list[dict[str, Any]] = []
-    for page in client.get_paginator("list_objects_v2").paginate(
-        Bucket=telemetry_bucket, Prefix=prefix
-    ):
-        for entry in page.get("Contents", ()):
-            body = client.get_object(Bucket=telemetry_bucket, Key=entry["Key"])["Body"].read()
-            try:
-                found.append(json.loads(body))
-            except json.JSONDecodeError as broken:
-                raise SystemExit(
-                    f"{uri(telemetry_bucket, str(entry['Key']))} is not the JSON this project "
-                    f"publishes: {broken}"
-                ) from None
+    for key in telemetry_store.keys(prefix):
+        try:
+            found.append(json.loads(telemetry_store.get(key)))
+        except json.JSONDecodeError as broken:
+            raise SystemExit(
+                f"{uri(telemetry_store.bucket, key)} is not the JSON this project "
+                f"publishes: {broken}"
+            ) from None
 
-    log.info("%d telemetry records under %s", len(found), uri(telemetry_bucket, prefix))
+    log.info("%d telemetry records under %s", len(found), uri(telemetry_store.bucket, prefix))
     return found
 
 
@@ -352,6 +347,7 @@ def judge(
     run_id: RunId,
     version: ModelVersion,
     champion: ModelVersion | None = None,
+    buckets: Buckets | None = None,
 ) -> Verdict:
     """Reduce the telemetry, apply the canary gate, and say what may be bought.
 
@@ -365,9 +361,13 @@ def judge(
     is also this version -- a cycle that rejected its challenger and redeployed
     the incumbent -- compares against itself, so it is dropped here rather than
     producing a throughput check whose answer is always zero drift.
+
+    `buckets` is passed by every caller outside the old stack; see
+    `_old_stack_buckets` for what omitting it means.
     """
-    manifest = registry.read_manifest(aws, base.buckets(aws).artifacts, version)
-    documents = records(aws, run_id)
+    named = buckets if buckets is not None else _old_stack_buckets(aws)
+    manifest = registry.read_manifest(aws, named.artifacts, version)
+    documents = read_records(S3Store.connect(named.telemetry), run_id)
 
     try:
         report = telemetry.report(documents, version)
@@ -423,20 +423,61 @@ def require_device(aws: boto3.Session) -> str:
 
 
 def recipe_for(
-    aws: boto3.Session, release: component.Release, replay: component.Replay
+    aws: boto3.Session,
+    release: component.Release,
+    replay: component.Replay,
+    buckets: Buckets | None = None,
 ) -> dict[str, Any]:
-    """`component.recipe` with the two account-shaped values filled in.
+    """`component.recipe` with the two deployment-shaped values filled in.
 
     A thin seam, and it exists so that the pure builder never takes a session.
     The buckets and the endpoint are the only things in a recipe a checkout
-    cannot know, which is what keeps the recipe itself testable.
+    cannot know, which is what keeps the recipe itself testable. `buckets` is
+    `judge`'s argument, for its reason.
     """
     return component.recipe(
         release=release,
-        buckets=base.buckets(aws),
+        buckets=buckets if buckets is not None else _old_stack_buckets(aws),
         iot_endpoint=iot_endpoint(aws),
         replay=replay,
     )
+
+
+# ---------------------------------------------------------------------------
+# The old stack's entry points
+# ---------------------------------------------------------------------------
+#
+# `control.handler` and `reporting.launch` call these with a session and are
+# frozen, so the signatures they call stay. Each is the storage-backed function
+# above with the bucket resolved the way the old stack resolves it, and all of
+# them leave with that stack.
+
+
+def _old_stack_buckets(aws: boto3.Session) -> Buckets:
+    """The buckets as the old stack names them: composed from the AWS account.
+
+    A Lambda in the old stack has no storage configuration, so this is the only
+    name it can use. Nothing outside that stack reaches this function.
+    """
+    return base.buckets(aws)
+
+
+def _old_stack_store(aws: boto3.Session, bucket: str) -> ObjectStore:
+    return S3Store(bucket, aws.client("s3"))
+
+
+def stage_code(aws: boto3.Session, git_commit: str, code: bytes) -> str:
+    return upload_code(_old_stack_store(aws, _old_stack_buckets(aws).artifacts), git_commit, code)
+
+
+def sampled_frames(aws: boto3.Session, run_id: RunId, cycle: Cycle) -> tuple[ImageId, ...]:
+    return read_sampled_frames(
+        _old_stack_store(aws, _old_stack_buckets(aws).artifacts), run_id, cycle
+    )
+
+
+def records(aws: boto3.Session, run_id: RunId) -> list[dict[str, Any]]:
+    return read_records(_old_stack_store(aws, _old_stack_buckets(aws).telemetry), run_id)
 
 
 def describe(version: ModelVersion, buckets: Buckets) -> str:

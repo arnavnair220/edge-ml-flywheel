@@ -67,6 +67,8 @@ from edge_ml_flywheel.conventions import (
 )
 from edge_ml_flywheel.fleet import detect, telemetry
 from edge_ml_flywheel.scoring import detections
+from edge_ml_flywheel.storage import ObjectStore
+from edge_ml_flywheel.storage.s3 import S3Store
 
 log = logging.getLogger("edge_ml_flywheel.fleet.replay")
 
@@ -134,7 +136,7 @@ class Pass:
 
     session: Any
     feed: str
-    s3: Any
+    frames: ObjectStore
     iot: Any
     args: argparse.Namespace
     source: telemetry.Source
@@ -170,7 +172,7 @@ class Pass:
         seq = 0
 
         for index, image_id in enumerate(ids):
-            tensor = _fetch(self.s3, args.bucket, image_id, args.image_size)
+            tensor = _fetch(self.frames, image_id, args.image_size)
 
             began = time.perf_counter()
             output = self.session.run(None, {self.feed: tensor})[0]
@@ -286,7 +288,7 @@ def letterbox(image: Image.Image, size: int) -> NDArray[np.float32]:
     return np.ascontiguousarray(array.transpose(2, 0, 1)[None])
 
 
-def _fetch(s3: Any, bucket: str, image_id: ImageId, size: int) -> NDArray[np.float32]:
+def _fetch(frames: ObjectStore, image_id: ImageId, size: int) -> NDArray[np.float32]:
     """One frame, fetched and preprocessed.
 
     Deliberately outside the timed section in `scored`. What design section 4.3
@@ -294,7 +296,7 @@ def _fetch(s3: Any, bucket: str, image_id: ImageId, size: int) -> NDArray[np.flo
     over the public internet is a measurement of the network on the afternoon it
     ran.
     """
-    body = s3.get_object(Bucket=bucket, Key=raw_image_key(image_id, _SPLIT))["Body"].read()
+    body = frames.get(raw_image_key(image_id, _SPLIT))
     with Image.open(io.BytesIO(body)) as image:
         return letterbox(image.convert("RGB"), size)
 
@@ -351,7 +353,7 @@ def _run(args: argparse.Namespace) -> None:
     ids = frame_ids(args.frames)
     log.info("%s scoring %d frames with %s, start %d", args.thing, len(ids), version, started)
 
-    s3 = boto3.client("s3")
+    frames = S3Store.connect(args.bucket)
     iot = boto3.client("iot-data", endpoint_url=f"https://{args.endpoint}")
 
     # Cold start is the session plus the first inference, and deliberately not
@@ -371,7 +373,7 @@ def _run(args: argparse.Namespace) -> None:
     over = Pass(
         session=session,
         feed=feed,
-        s3=s3,
+        frames=frames,
         iot=iot,
         args=args,
         source=telemetry.Source(run_id=run_id, version=version, thing=args.thing),
@@ -385,7 +387,7 @@ def _run(args: argparse.Namespace) -> None:
     # is the evidence for the one after it: a reader that sees the summary can
     # open the detections, and an execution that is resumed can rank them. The
     # reverse order would resume a cycle onto a key that is still uploading.
-    s3.upload_file(str(parquet), args.detections_bucket, args.detections_key)
+    S3Store.connect(args.detections_bucket).upload(parquet, args.detections_key)
     log.info("wrote %d detections to s3://%s/%s", rows, args.detections_bucket, args.detections_key)
     parquet.unlink(missing_ok=True)
 

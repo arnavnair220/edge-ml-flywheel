@@ -25,28 +25,20 @@ import logging
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Final
+from typing import Final
 
-import boto3
-from botocore.config import Config
-
-from edge_ml_flywheel.conventions import Buckets
+from edge_ml_flywheel.storage import DATA_BUCKET, ObjectStore, bucket_name
+from edge_ml_flywheel.storage.s3 import S3Store
 
 log = logging.getLogger(__name__)
 
-# Threads, and the client's connection pool with them. A pool narrower than the
+# Threads, and the store's connection pool with them. A pool narrower than the
 # thread count serialises the threads behind connections and logs a warning per
 # wait, which is the failure this constant exists to keep impossible.
 #
 # 32 because that is what the buildspec asked `xargs` for, and the bottleneck it
 # hit was never this number.
 WORKERS: Final = 32
-
-# Retries inside botocore rather than a loop here. These are 13,000 small GETs
-# against one prefix, which is exactly the shape S3 answers with a 503 Slow Down,
-# and a build that fails on one throttle after staging 12,000 documents has
-# thrown away four minutes for a condition the SDK handles.
-_ATTEMPTS: Final = 5
 
 # How often the progress line is printed. Silence for two minutes in a build log
 # is indistinguishable from the hang this module was written to fix.
@@ -57,35 +49,22 @@ _EVERY: Final = 1_000
 _REPORTED: Final = 5
 
 
-def client(aws: boto3.Session, workers: int = WORKERS) -> Any:
-    """An S3 client sized for the pool that will share it.
+def data_store(workers: int = WORKERS) -> ObjectStore:
+    """The data bucket, behind a store sized for the pool that will share it.
 
-    One client across every thread rather than one per thread: botocore clients
-    are safe to call concurrently once built, and building 32 of them pays the
+    One store across every thread rather than one per thread: the client behind
+    it is safe to call concurrently once built, and building 32 of them pays the
     import and credential resolution this module exists to pay once.
+
+    The bucket is named by configuration rather than by a `--bucket` flag, for
+    the reason a flag would be wrong: it would be a second answer to a question
+    the deployment already answers, and the wrong answer is a job that reads a
+    bucket nobody else in the project writes.
     """
-    return aws.client(
-        "s3",
-        config=Config(
-            max_pool_connections=workers,
-            retries={"max_attempts": _ATTEMPTS, "mode": "standard"},
-        ),
-    )
+    return S3Store.connect(bucket_name(DATA_BUCKET), pool=workers)
 
 
-def data_bucket(aws: boto3.Session) -> str:
-    """The data bucket, composed from the caller's account.
-
-    The same arrangement `run.control.cycle_machine_arn` uses, and for its
-    reason: a `--bucket` flag would be a second answer to a question
-    `conventions.Buckets` already answers, and the wrong answer is a job that
-    reads a bucket nobody else in the project writes.
-    """
-    account = str(aws.client("sts").get_caller_identity()["Account"])
-    return Buckets.for_account(account).data
-
-
-def stage(s3: Any, bucket: str, keys: Sequence[str], stage_dir: Path) -> int:
+def stage(store: ObjectStore, keys: Sequence[str], stage_dir: Path) -> int:
     """Copy every key to `stage_dir / key`, and return how many landed.
 
     Every key is attempted before anything is raised. A partial stage is a failed
@@ -104,7 +83,7 @@ def stage(s3: Any, bucket: str, keys: Sequence[str], stage_dir: Path) -> int:
     landed = 0
 
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futures = {pool.submit(_get, s3, bucket, key, stage_dir): key for key in keys}
+        futures = {pool.submit(_get, store, key, stage_dir): key for key in keys}
         for done in as_completed(futures):
             try:
                 done.result()
@@ -127,12 +106,11 @@ def stage(s3: Any, bucket: str, keys: Sequence[str], stage_dir: Path) -> int:
     return landed
 
 
-def _get(s3: Any, bucket: str, key: str, stage_dir: Path) -> None:
+def _get(store: ObjectStore, key: str, stage_dir: Path) -> None:
     """One document, whole, in memory.
 
-    `get_object` rather than `download_file`: these are a few kilobytes each, and
-    the transfer manager behind `download_file` spins up its own threads to
-    multipart something that arrives in one response.
+    `get` rather than `download`: these are a few kilobytes each, and the
+    transfer manager behind `download` spins up its own threads to multipart
+    something that arrives in one response.
     """
-    body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
-    (stage_dir / key).write_bytes(body)
+    (stage_dir / key).write_bytes(store.get(key))

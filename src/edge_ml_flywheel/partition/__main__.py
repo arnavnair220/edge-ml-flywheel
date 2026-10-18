@@ -26,8 +26,6 @@ import logging
 import sys
 from pathlib import Path
 
-import boto3
-
 from edge_ml_flywheel.conventions import (
     MANIFEST_PREFIX,
     PARTITIONS,
@@ -167,8 +165,7 @@ def main(argv: list[str] | None = None) -> None:
         # `cohort_labels.label_key` only helps while the keys come from there.
         rows = assign.read_assignments(args.stage_dir, PartitionVersion(args.partition_version))
         needed = cohort_labels.keys(rows)
-        aws = boto3.Session()
-        fetch.stage(fetch.client(aws), fetch.data_bucket(aws), needed, args.stage_dir)
+        fetch.stage(fetch.data_store(), needed, args.stage_dir)
 
     elif args.command == "labels":
         rows = assign.read_assignments(args.stage_dir, PartitionVersion(args.partition_version))

@@ -27,6 +27,7 @@ import logging
 import sys
 from typing import Any
 
+from edge_ml_flywheel import storage
 from edge_ml_flywheel.conventions import (
     PROJECT,
     Cycle,
@@ -38,6 +39,7 @@ from edge_ml_flywheel.conventions import (
     parse_run_id,
 )
 from edge_ml_flywheel.fleet import component, deploy, telemetry
+from edge_ml_flywheel.storage.s3 import S3Store
 from edge_ml_flywheel.training import launch as base
 
 log = logging.getLogger("edge_ml_flywheel.fleet")
@@ -147,11 +149,13 @@ def _deploy(aws: Any, args: argparse.Namespace) -> str:
         confidence_floor=args.confidence_floor,
     )
 
-    deploy.sampled_frames(aws, run_id, cycle)
-    deploy.stage_code(aws, release.git_commit, deploy.checkout_archive())
-    deploy.publish_component(aws, deploy.recipe_for(aws, release, replay))
+    buckets = storage.buckets()
+    artifacts = S3Store.connect(buckets.artifacts)
+    deploy.read_sampled_frames(artifacts, run_id, cycle)
+    deploy.upload_code(artifacts, release.git_commit, deploy.checkout_archive())
+    deploy.publish_component(aws, deploy.recipe_for(aws, release, replay, buckets))
 
-    log.info("%s", deploy.describe(version, base.buckets(aws)))
+    log.info("%s", deploy.describe(version, buckets))
     return deploy.redeploy(aws, version, _target(aws), cycle=cycle)
 
 
@@ -171,7 +175,7 @@ def _canary(aws: Any, args: argparse.Namespace) -> bool:
     version: ModelVersion = parse_model_version(args.version)
     champion = parse_model_version(args.champion) if args.champion else None
 
-    verdict = deploy.judge(aws, run_id, version, champion)
+    verdict = deploy.judge(aws, run_id, version, champion, storage.buckets())
     print(
         json.dumps(
             {"passed": verdict.passed, "ranks": verdict.ranks, "reason": verdict.reason}, indent=2
@@ -190,7 +194,9 @@ def _status(aws: Any, run_id: RunId) -> None:
     reconciled by whichever is read.
     """
     intended = deploy.deployed(aws, run_id, _target(aws))
-    documents = deploy.records(aws, run_id)
+    documents = deploy.read_records(
+        S3Store.connect(storage.bucket_name(storage.TELEMETRY_BUCKET)), run_id
+    )
 
     reported: dict[str, Any] | None = None
     if intended is not None:
