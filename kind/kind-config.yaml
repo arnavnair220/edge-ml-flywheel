@@ -1,0 +1,23 @@
+# The local cluster: one control plane and one worker per pool. The pool labels
+# and the gpu taint match what every cluster provides. See docs/cluster.md.
+# The node image is set by the Makefile, so the kind version and its image are
+# pinned in one place.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      pool: services
+  # No GPU. The label and taint let GPU jobs schedule here as they would in the cloud.
+  - role: worker
+    labels:
+      pool: gpu
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          taints:
+            - key: nvidia.com/gpu
+              value: present
+              effect: NoSchedule
