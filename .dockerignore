@@ -1,0 +1,8 @@
+# Images copy only the package, the job entry points and the lockfile.
+*
+!src/
+!container/
+!pyproject.toml
+!uv.lock
+!README.md
+**/__pycache__

@@ -57,6 +57,8 @@ uv run ruff check . && uv run mypy src
 `--frozen` installs strictly from `uv.lock`, so the environment matches what CI resolved. The
 `ingest` group carries `pyarrow` and `pillow`, which the ingest and fleet modules import.
 
+`docker buildx bake` builds every job image. The images are specified in [images.md](images.md).
+
 ---
 
 ## Bootstrap, outside Terraform
