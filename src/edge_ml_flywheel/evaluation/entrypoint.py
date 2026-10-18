@@ -1,27 +1,29 @@
 """The evaluation job itself, as it runs inside the container.
 
-Started by `container/evaluate.py`, which is a three-line file at the root of the
-source archive for `container/score.py`'s reason: a Processing job has no script
-mode, so the file is there to be named by `job.container_entrypoint`.
+Started by `container/evaluate.py`, a three-line file at the root of the source
+archive beside `container/score.py`.
 
 The order of the steps is the order the failures are worth having in. The match
-cache is built and written before anything is compared, so a job that dies in the
-bootstrap still leaves the arrays -- which are the expensive half, and the half
-every later cycle reads back rather than recomputing. The gates come last,
+cache is built and uploaded before anything is compared, so a job that dies in
+the bootstrap still leaves the arrays -- which are the expensive half, and the
+half every later cycle reads back rather than recomputing. The gates come last,
 because a verdict is the one output that is worthless if any input to it was
 wrong.
 
 **This is where the two halves of the plane meet.** Scoring holds no label grant
 and wrote down what the model emitted; this reads those detections and the eval
 cohort's boxes together, which is the whole reason it is a second job under a
-second role. Nothing here runs a model: there is no checkpoint on any channel,
-so a detection that reaches the metric was produced by the scoring job under the
-`git_commit` this same archive records.
+second identity. Nothing here runs a model: no checkpoint is among its inputs,
+so a detection that reaches the metric was produced by the scoring job.
+
+**Inputs and outputs are objects.** `evaluation.inputs` fetches what this reads
+from the store at the keys `conventions` names, and every output is uploaded at
+its own key. The bucket names come from configuration (`docs/storage.md`).
 
 **A failed gate is a completed job.** The verdict is the product, so a challenger
 that does not clear the promotion rule is written to the report and the process
-exits zero. Only a job that could not reach a verdict -- a missing channel, an
-eval cohort that does not match the champion's -- fails.
+exits zero. Only a job that could not reach a verdict -- a missing input, an eval
+cohort that does not match the champion's -- fails.
 """
 
 import argparse
@@ -42,24 +44,20 @@ from edge_ml_flywheel.conventions import (
     GateResult,
     ImageId,
     ModelVersion,
+    PartitionVersion,
     Seed,
     eval_matches_key,
+    eval_metrics_key,
     eval_prefix,
+    gate_report_key,
+    model_version_cycle,
+    model_version_run_id,
     parse_model_version,
+    uri,
 )
-from edge_ml_flywheel.evaluation import coco
+from edge_ml_flywheel.evaluation import coco, inputs
 from edge_ml_flywheel.evaluation.bootstrap import PairedDelta, paired_delta
 from edge_ml_flywheel.evaluation.coco import ImageIndex
-from edge_ml_flywheel.evaluation.job import (
-    CHAMPION_CHANNEL,
-    EVAL_OUTPUT,
-    GATES_OUTPUT,
-    INT8_CHANNEL,
-    LABELS_CHANNEL,
-    MANIFEST_CHANNEL,
-    detections_channel,
-    output_names,
-)
 from edge_ml_flywheel.evaluation.match import (
     MatchCache,
     as_coco,
@@ -78,11 +76,16 @@ from edge_ml_flywheel.evaluation.metrics import (
 from edge_ml_flywheel.gates import DEFAULT, edge_gate, quality_gate
 from edge_ml_flywheel.ingest.labels import Box
 from edge_ml_flywheel.scoring import detections as detection_rows
-from edge_ml_flywheel.scoring.job import INPUT_ROOT, OUTPUT_ROOT
+from edge_ml_flywheel.storage import ARTIFACTS_BUCKET, DATA_BUCKET, ObjectStore, bucket_name
+from edge_ml_flywheel.storage.s3 import S3Store
 from edge_ml_flywheel.training import images
 from edge_ml_flywheel.training import labels as label_files
 
 log = logging.getLogger("edge_ml_flywheel.evaluation")
+
+# Where the inputs land and the outputs are written before upload. Local scratch
+# on the job's own volume; nothing here survives the job except what is uploaded.
+WORK: Final = Path("/tmp/evaluation")
 
 # The IoU everyone quotes, reported beside the COCO mean over all ten. One extra
 # read of the same cache, so it is free in the sense that matters: no second
@@ -95,9 +98,15 @@ _REPORTED: Final = 5
 
 
 def _parser() -> argparse.ArgumentParser:
-    """The flags `job.arguments` writes, underscored to match the other two."""
+    """Every flag as `--<key> <value>`, underscored to match the other two jobs."""
     parser = argparse.ArgumentParser(prog="evaluate.py")
     parser.add_argument("--version", required=True, help="The challenger being evaluated.")
+    parser.add_argument(
+        "--partition_version",
+        type=int,
+        required=True,
+        help="The partition the eval labels are read from, off the run registration.",
+    )
     parser.add_argument(
         "--seeds", type=int, nargs="+", required=True, help="Every seed this cycle trained."
     )
@@ -112,14 +121,10 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Size of the deployed seed's int8 artifact. Given, the edge gate runs over it and "
-            "the int8 detections channel; absent, the cycle reports no edge verdict."
+            "the int8 detections; absent, the cycle reports no edge verdict."
         ),
     )
     return parser
-
-
-def channel(name: str) -> Path:
-    return Path(INPUT_ROOT) / name
 
 
 def deployed_seed(seeds: Sequence[Seed]) -> Seed:
@@ -134,24 +139,17 @@ def deployed_seed(seeds: Sequence[Seed]) -> Seed:
     return min(seeds)
 
 
-def scored_images() -> ImageIndex:
+def scored_images(manifest: Path) -> ImageIndex:
     """The eval images this cycle put in front of the model.
 
-    Read off the manifest rather than off the detections, for `job.inputs`'
-    reason: a frame the model missed entirely produces no detection row, so an
-    index built from the detections would drop every miss and score the model on
-    its hits alone.
+    Read off the manifest rather than off the detections: a frame the model
+    missed entirely produces no detection row, so an index built from the
+    detections would drop every miss and score the model on its hits alone.
     """
-    found = sorted(channel(MANIFEST_CHANNEL).glob("*.manifest"))
-    if len(found) != 1:
-        raise SystemExit(
-            f"the {MANIFEST_CHANNEL} channel carries {len(found)} manifests, and exactly one "
-            f"document says which images were scored"
-        )
-    return ImageIndex.of(images.manifest_ids(found[0]))
+    return ImageIndex.of(images.manifest_ids(manifest))
 
 
-def eval_boxes(index: ImageIndex) -> dict[ImageId, tuple[Box, ...]]:
+def eval_boxes(root: Path, index: ImageIndex) -> dict[ImageId, tuple[Box, ...]]:
     """The ground truth for exactly the scored images.
 
     Read through `training.labels`, which is the reader of record for a label
@@ -164,12 +162,9 @@ def eval_boxes(index: ImageIndex) -> dict[ImageId, tuple[Box, ...]]:
     index. Narrowing the other way would score the unscored images as frames the
     model detected nothing in, which is a real verdict about an imaginary pass.
     """
-    root = channel(LABELS_CHANNEL)
     found = label_files.collect([root])
     if not found:
-        raise SystemExit(
-            f"the {LABELS_CHANNEL} channel carries no boxes, so there is nothing to match against"
-        )
+        raise SystemExit(f"{root} holds no boxes, so there is nothing to match against")
 
     missing = sorted(set(index.image_ids) - set(found))
     if missing:
@@ -183,7 +178,7 @@ def eval_boxes(index: ImageIndex) -> dict[ImageId, tuple[Box, ...]]:
 def pass_cache(root: Path, truth: COCO, index: ImageIndex, described: str) -> MatchCache:
     """One scoring pass, matched and kept in the form a resample reads.
 
-    Taken as a channel root rather than as a seed, because a cycle has two kinds
+    Taken as a directory rather than as a seed, because a cycle has two kinds
     of pass over the same cohort: one per seed at fp32, and one at int8 for the
     seed that ships. Both are matched against the same ground truth by the same
     greedy assignment, which is what makes the difference between their scores
@@ -207,13 +202,8 @@ def pass_cache(root: Path, truth: COCO, index: ImageIndex, described: str) -> Ma
     return cache
 
 
-def seed_cache(truth: COCO, index: ImageIndex, seed: Seed) -> MatchCache:
-    """One seed's fp32 pass, which is what every reported metric is computed from."""
-    return pass_cache(channel(detections_channel(seed)), truth, index, f"seed {seed}")
-
-
 def champion_caches(
-    champion: ModelVersion, seeds: Sequence[Seed], index: ImageIndex
+    root: Path, champion: ModelVersion, seeds: Sequence[Seed], index: ImageIndex
 ) -> dict[Seed, MatchCache]:
     """The champion's cached arrays, one per seed, read rather than recomputed.
 
@@ -224,10 +214,9 @@ def champion_caches(
 
     The cohort is checked here rather than left to the refusal downstream. Two
     caches over different eval sets is the one mismatch that produces arithmetic
-    instead of an error at every step but the last, and naming it as a channel
+    instead of an error at every step but the last, and naming it as an input
     problem is what sends someone to `max_images` rather than to the bootstrap.
     """
-    root = channel(CHAMPION_CHANNEL)
     prefix = eval_prefix(champion)
 
     caches: dict[Seed, MatchCache] = {}
@@ -337,10 +326,16 @@ def report_document(
     }
 
 
-def _write_json(document: Mapping[str, Any], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document, indent=2, sort_keys=True), encoding="utf-8")
-    log.info("wrote %s", path)
+def _upload(artifacts: ObjectStore, local: Path, key: str) -> None:
+    artifacts.upload(local, key)
+    log.info("wrote %s", uri(artifacts.bucket, key))
+
+
+def _write_json(artifacts: ObjectStore, document: Mapping[str, Any], local: Path, key: str) -> None:
+    """Write one document locally, then upload it to its key."""
+    local.parent.mkdir(parents=True, exist_ok=True)
+    local.write_text(json.dumps(document, indent=2, sort_keys=True), encoding="utf-8")
+    _upload(artifacts, local, key)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -350,28 +345,41 @@ def main(argv: list[str] | None = None) -> None:
     version = parse_model_version(args.version)
     champion = parse_model_version(args.champion) if args.champion else None
     seeds = tuple(Seed(seed) for seed in sorted(set(args.seeds)))
-    names = output_names(version, seeds)
 
-    index = scored_images()
+    data = S3Store.connect(bucket_name(DATA_BUCKET))
+    artifacts = S3Store.connect(bucket_name(ARTIFACTS_BUCKET))
+    comparison = inputs.Comparison(
+        version=version,
+        seeds=seeds,
+        partition_version=PartitionVersion(args.partition_version),
+        champion=champion,
+        gates_edge=args.artifact_bytes is not None,
+    )
+    staged = inputs.stage(data, artifacts, comparison, WORK / "input")
+    out = WORK / "output"
+
+    index = scored_images(staged.manifest)
     log.info("evaluating %s at seeds %s over %d images", version, list(seeds), len(index))
 
-    truth = as_coco(coco.ground_truth(eval_boxes(index), CLASS_SET, index))
+    truth = as_coco(coco.ground_truth(eval_boxes(staged.labels, index), CLASS_SET, index))
 
-    # The caches are written as they are built, before anything is compared, so a
-    # failure in the bootstrap leaves behind the expensive half of this job.
-    caches = {seed: seed_cache(truth, index, seed) for seed in seeds}
+    # The caches are uploaded as they are built, before anything is compared, so
+    # a failure in the bootstrap leaves behind the expensive half of this job.
+    caches = {
+        seed: pass_cache(staged.detections[seed], truth, index, f"seed {seed}") for seed in seeds
+    }
     for seed, cache in caches.items():
-        path = Path(OUTPUT_ROOT) / EVAL_OUTPUT / names[f"matches-{seed}"]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        save(cache, path)
-        log.info("cached seed %d matches at %s", seed, path)
+        local = out / f"matches-{seed}.npz"
+        local.parent.mkdir(parents=True, exist_ok=True)
+        save(cache, local)
+        _upload(artifacts, local, eval_matches_key(version, seed))
 
     metrics = metrics_document(version, index, caches)
-    _write_json(metrics, Path(OUTPUT_ROOT) / EVAL_OUTPUT / names["metrics"])
+    _write_json(artifacts, metrics, out / "metrics.json", eval_metrics_key(version))
 
     delta = (
-        paired_delta(champion_caches(champion, seeds, index), caches)
-        if champion is not None
+        paired_delta(champion_caches(staged.champion, champion, seeds, index), caches)
+        if champion is not None and staged.champion is not None
         else None
     )
     if delta is not None:
@@ -394,8 +402,8 @@ def main(argv: list[str] | None = None) -> None:
     # job as the quality gate rather than after it: both verdicts belong to one
     # report, and a cycle that gated them in two jobs would have two reports to
     # merge for the sake of skipping a CPU pass on a rejected challenger.
-    if args.artifact_bytes is not None:
-        quantized = pass_cache(channel(INT8_CHANNEL), truth, index, "int8")
+    if args.artifact_bytes is not None and staged.int8 is not None:
+        quantized = pass_cache(staged.int8, truth, index, "int8")
         verdicts.append(
             edge_gate(
                 fp32_map=average_precision(caches[shipped], rows, OVERALL),
@@ -415,7 +423,8 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     report = report_document(version, champion, seeds, verdicts, delta)
-    _write_json(report, Path(OUTPUT_ROOT) / GATES_OUTPUT / names["report"])
+    key = gate_report_key(model_version_run_id(version), model_version_cycle(version))
+    _write_json(artifacts, report, out / "report.json", key)
 
 
 if __name__ == "__main__":

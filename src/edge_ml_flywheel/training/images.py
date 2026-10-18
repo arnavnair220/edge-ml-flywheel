@@ -119,6 +119,45 @@ def manifest_ids(path: Path) -> tuple[ImageId, ...]:
     return found
 
 
+def manifest_keys(document: bytes, split: Split) -> tuple[str, ...]:
+    """The full keys a manifest names, refused unless they sit under `split`.
+
+    What a job fetches its images by. The prefix header is checked here where
+    `manifest_ids` drops it, because this reader's output is a list of keys a
+    job will read: a manifest naming another split's prefix is the one way a
+    training job could be handed `val` frames -- which is where `eval` lives --
+    and the check makes that a refusal before any request is made.
+
+    Only the key part of the header is compared. The bucket in it is whichever
+    one prepare wrote, and the job reads from the bucket its configuration
+    names.
+    """
+    entries = json.loads(document)
+    if not isinstance(entries, list) or len(entries) < _MIN_ENTRIES:
+        raise ValueError("not a manifest naming any image")
+
+    header = entries[0]
+    if not isinstance(header, dict) or "prefix" not in header:
+        raise ValueError(f"a manifest opens with its prefix, not {header!r}")
+    _, _, located = str(header["prefix"]).partition("://")
+    _, _, prefix = located.partition("/")
+
+    expected = prefix_of(split)
+    if prefix != expected:
+        raise ValueError(f"the manifest names {prefix!r}, and this job reads only {expected!r}")
+
+    # Each entry is a file name and nothing more, so `../` cannot walk a key out
+    # of the prefix the header was checked against.
+    keys: list[str] = []
+    for entry in entries[1:]:
+        name = str(entry)
+        if "/" in name:
+            raise ValueError(f"a manifest entry is a file name, not a path: {name!r}")
+        parse_image_id(Path(name).stem)
+        keys.append(f"{prefix}{name}")
+    return tuple(keys)
+
+
 def capped(image_ids: Sequence[ImageId], max_images: int) -> tuple[ImageId, ...]:
     """The first `max_images` of a labeled set, or all of them at 0.
 

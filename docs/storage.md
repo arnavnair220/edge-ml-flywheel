@@ -63,7 +63,36 @@ Credentials are not configured here. The SDK's default chain resolves them:
 | AWS (EKS) | Workload identity (IRSA) | unset |
 | GCP (GKE) | HMAC key for the job's service account | `https://storage.googleapis.com` |
 | Local (kind) | MinIO access key, as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` | the MinIO service URL |
+
+The local object store is MinIO, run from `cgr.dev/chainguard/minio` pinned by digest. MinIO is
+used because it enforces per-prefix bucket policies, which the local check of the `eval` label
+boundary requires.
 | Device | Greengrass token exchange role | unset |
+
+## Job inputs and outputs
+
+Every job reads its inputs from the store and writes its outputs to it. No job reads from a
+fixed local path. At startup a job fetches its inputs into a scratch directory, one subdirectory
+per input, with each object placed relative to its input's prefix. Each output is uploaded to the
+key `conventions` names for it as soon as it is written. Keys are derived from the job's
+arguments, never passed as paths.
+
+`storage.tree.fetch` copies many small objects with a thread pool and attempts every key before
+reporting failures, so a missing object and a denied prefix are distinguishable by count.
+
+| Job | Arguments that name its keys | Reads | Writes |
+|---|---|---|---|
+| Training | `--version`, `--partition_version` | Images named by `training_manifest_key`; `cohort=bootstrap` labels; the run's purchases; base weights | `model.pt`, `model.onnx` and `sha256sums` at `model_artifact_key` |
+| Scoring | `--version`, `--seed`, `--precision` | The model at `model_artifact_key` for the precision; images named by `scoring_manifest_key` | Detections at `detections_key` |
+| Evaluation | `--version`, `--seeds`, `--partition_version`, `--champion`, `--artifact_bytes` | The `eval` manifest; `cohort=eval` labels; each seed's detections; int8 detections when judged; the champion's `eval_prefix` | Match caches and metrics under `eval_prefix`; the gate report at `gate_report_key` |
+| Partition | `--partition-version` | Label documents for the labeled cohorts | Nothing; the build uploads its staged tree |
+
+The input modules (`training.inputs`, `scoring.inputs`, `evaluation.inputs`) hold the key
+derivation and import no GPU stack, so each job's reach into the store is tested directly.
+
+A manifest's entries are checked before anything is fetched: the prefix must be the split the
+job reads (`train` for training, the cohort's split for scoring), and every entry must be a file
+name. A manifest that names another split, or an entry such as `../`, is refused.
 
 ## Access boundaries
 
@@ -74,9 +103,14 @@ The store applies no access rule of its own. Two mechanisms enforce what a job m
   `labels/cohort=eval/`.
 - **Key construction.** Label keys are built only by `oracle.labels.label_key` and
   `partition.cohort_labels.label_key`, neither of which can produce a key under the split `eval` is
-  drawn from. A refused image produces no request.
+  drawn from. A refused image produces no request. Training and scoring fetch no `eval` label
+  prefix under any arguments; evaluation fetches only `cohort=eval`.
 
 ## Verification
+
+`tests/test_job_inputs.py` checks each job's fetched inputs against a bucket that also holds the
+labels the job is denied. `tests/test_evaluation_job.py` runs the evaluation job end to end
+against the store.
 
 `tests/test_storage.py` runs one contract suite against every backend:
 

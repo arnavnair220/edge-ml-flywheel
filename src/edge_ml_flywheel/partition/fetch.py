@@ -21,32 +21,15 @@ what lets `cohort_labels.read` find a document at `stage_dir / <key>` with no
 second path convention to keep in step.
 """
 
-import logging
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Final
 
-from edge_ml_flywheel.storage import DATA_BUCKET, ObjectStore, bucket_name
+from edge_ml_flywheel.storage import DATA_BUCKET, ObjectStore, bucket_name, tree
 from edge_ml_flywheel.storage.s3 import S3Store
 
-log = logging.getLogger(__name__)
-
-# Threads, and the store's connection pool with them. A pool narrower than the
-# thread count serialises the threads behind connections and logs a warning per
-# wait, which is the failure this constant exists to keep impossible.
-#
 # 32 because that is what the buildspec asked `xargs` for, and the bottleneck it
 # hit was never this number.
-WORKERS: Final = 32
-
-# How often the progress line is printed. Silence for two minutes in a build log
-# is indistinguishable from the hang this module was written to fix.
-_EVERY: Final = 1_000
-
-# Failures named in the error. The count is the number that matters; the first
-# few keys are what says whether it was one bad document or the whole prefix.
-_REPORTED: Final = 5
+WORKERS = tree.WORKERS
 
 
 def data_store(workers: int = WORKERS) -> ObjectStore:
@@ -67,50 +50,9 @@ def data_store(workers: int = WORKERS) -> ObjectStore:
 def stage(store: ObjectStore, keys: Sequence[str], stage_dir: Path) -> int:
     """Copy every key to `stage_dir / key`, and return how many landed.
 
-    Every key is attempted before anything is raised. A partial stage is a failed
-    build either way, and the count of what failed is the difference between "one
-    document is missing from the archive" and "this role cannot read the label
-    prefix at all" -- which are the two things that go wrong here and want
-    different fixes.
+    `storage.tree.fetch`, which attempts every key before raising: one document
+    missing from the archive and a role that cannot read the label prefix at all
+    are the two things that go wrong here, and the failure count tells them
+    apart.
     """
-    directories = {(stage_dir / key).parent for key in keys}
-    for directory in directories:
-        directory.mkdir(parents=True, exist_ok=True)
-
-    log.info("staging %d label documents into %d directories", len(keys), len(directories))
-
-    failures: list[tuple[str, Exception]] = []
-    landed = 0
-
-    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futures = {pool.submit(_get, store, key, stage_dir): key for key in keys}
-        for done in as_completed(futures):
-            try:
-                done.result()
-            except Exception as error:
-                failures.append((futures[done], error))
-                continue
-
-            landed += 1
-            if landed % _EVERY == 0:
-                log.info("staged %d of %d", landed, len(keys))
-
-    if failures:
-        named = ", ".join(f"{key} ({error})" for key, error in failures[:_REPORTED])
-        raise RuntimeError(
-            f"{len(failures)} of {len(keys)} label documents could not be staged, so the cohort "
-            f"files written from this tree would be short: {named}"
-        )
-
-    log.info("staged %d label documents", landed)
-    return landed
-
-
-def _get(store: ObjectStore, key: str, stage_dir: Path) -> None:
-    """One document, whole, in memory.
-
-    `get` rather than `download`: these are a few kilobytes each, and the
-    transfer manager behind `download` spins up its own threads to multipart
-    something that arrives in one response.
-    """
-    (stage_dir / key).write_bytes(store.get(key))
+    return tree.fetch(store, keys, stage_dir, what="label documents")
