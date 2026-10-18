@@ -49,7 +49,7 @@ from edge_ml_flywheel.fleet import component, telemetry
 from edge_ml_flywheel.gates.canary import canary_gate, detections_stand
 from edge_ml_flywheel.registry import launch as registry
 from edge_ml_flywheel.storage import ObjectStore
-from edge_ml_flywheel.storage.s3 import S3Store
+from edge_ml_flywheel.storage.filesystem import FsspecStore
 from edge_ml_flywheel.training import launch as base
 
 log = logging.getLogger(__name__)
@@ -367,7 +367,7 @@ def judge(
     """
     named = buckets if buckets is not None else _old_stack_buckets(aws)
     manifest = registry.read_manifest(aws, named.artifacts, version)
-    documents = read_records(S3Store.connect(named.telemetry), run_id)
+    documents = read_records(FsspecStore.connect(named.telemetry), run_id)
 
     try:
         report = telemetry.report(documents, version)
@@ -463,7 +463,7 @@ def _old_stack_buckets(aws: boto3.Session) -> Buckets:
 
 
 def _old_stack_store(aws: boto3.Session, bucket: str) -> ObjectStore:
-    return S3Store(bucket, aws.client("s3"))
+    return FsspecStore.from_session(aws, bucket)
 
 
 def stage_code(aws: boto3.Session, git_commit: str, code: bytes) -> str:

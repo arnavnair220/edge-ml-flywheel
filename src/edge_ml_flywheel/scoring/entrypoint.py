@@ -39,7 +39,7 @@ from edge_ml_flywheel.conventions import (
 )
 from edge_ml_flywheel.scoring import detections, inputs
 from edge_ml_flywheel.storage import ARTIFACTS_BUCKET, DATA_BUCKET, ObjectStore, bucket_name, tree
-from edge_ml_flywheel.storage.s3 import S3Store
+from edge_ml_flywheel.storage.filesystem import FsspecStore
 
 log = logging.getLogger("edge_ml_flywheel.scoring")
 
@@ -209,8 +209,8 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     args = _parser().parse_args(argv)
 
-    data = S3Store.connect(bucket_name(DATA_BUCKET), pool=tree.WORKERS)
-    artifacts = S3Store.connect(bucket_name(ARTIFACTS_BUCKET))
+    data = FsspecStore.connect(bucket_name(DATA_BUCKET), pool=tree.WORKERS)
+    artifacts = FsspecStore.connect(bucket_name(ARTIFACTS_BUCKET))
     scored = inputs.Pass(parse_model_version(args.version), Seed(args.seed), args.precision)
     staged = inputs.stage(data, artifacts, scored, WORK / "input")
     log.info(

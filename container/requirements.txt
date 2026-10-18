@@ -21,6 +21,10 @@ ultralytics==8.4.146
 # as. The same version the `ingest` dependency group resolves.
 pyarrow>=18
 
+# The object store every job reads its inputs from and writes its outputs to,
+# through `storage`. The version `uv.lock` resolves.
+s3fs==2026.9.0
+
 # The greedy IoU assignment the match cache is built from. Pinned to the version
 # `uv.lock` resolves, so the matching that produced a cached array in the
 # container is the matching the test suite checked on a laptop.

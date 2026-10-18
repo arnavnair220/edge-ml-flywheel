@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from edge_ml_flywheel.storage import DATA_BUCKET, ObjectStore, bucket_name, tree
-from edge_ml_flywheel.storage.s3 import S3Store
+from edge_ml_flywheel.storage.filesystem import FsspecStore
 
 # 32 because that is what the buildspec asked `xargs` for, and the bottleneck it
 # hit was never this number.
@@ -33,8 +33,8 @@ WORKERS = tree.WORKERS
 def data_store(workers: int = WORKERS) -> ObjectStore:
     """The data bucket, behind a store sized for the pool that will share it.
 
-    One store across every thread rather than one per thread: the client behind
-    it is safe to call concurrently once built, and building 32 of them pays the
+    One store across every thread rather than one per thread: the filesystem
+    behind it is safe to call concurrently once built, and building 32 of them pays the
     import and credential resolution this module exists to pay once.
 
     The bucket is named by configuration rather than by a `--bucket` flag, for
@@ -42,7 +42,7 @@ def data_store(workers: int = WORKERS) -> ObjectStore:
     the deployment already answers, and the wrong answer is a job that reads a
     bucket nobody else in the project writes.
     """
-    return S3Store.connect(bucket_name(DATA_BUCKET), pool=workers)
+    return FsspecStore.connect(bucket_name(DATA_BUCKET), pool=workers)
 
 
 def stage(store: ObjectStore, keys: Sequence[str], stage_dir: Path) -> int:

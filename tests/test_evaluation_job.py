@@ -20,14 +20,13 @@ for.
 """
 
 import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
-from moto import mock_aws
 
 from edge_ml_flywheel import storage
 from edge_ml_flywheel.conventions import (
@@ -62,7 +61,7 @@ from edge_ml_flywheel.ingest.labels import Box
 from edge_ml_flywheel.partition import cohort_labels
 from edge_ml_flywheel.scoring import detections as detection_rows
 from edge_ml_flywheel.storage import StorageConfig
-from edge_ml_flywheel.storage.s3 import S3Store, client
+from edge_ml_flywheel.storage.filesystem import FsspecStore
 from edge_ml_flywheel.training import images
 from edge_ml_flywheel.training import job as training
 
@@ -420,11 +419,11 @@ def found_boxes(image_id: ImageId, found: int) -> list[Box]:
 class Stores:
     """The two buckets the job reads and writes, and scratch for fixtures."""
 
-    data: S3Store
-    artifacts: S3Store
+    data: FsspecStore
+    artifacts: FsspecStore
     scratch: Path
 
-    def put(self, store: S3Store, local: Path, key: str) -> None:
+    def put(self, store: FsspecStore, local: Path, key: str) -> None:
         store.upload(local, key)
 
     def json(self, key: str) -> dict[str, Any]:
@@ -432,33 +431,19 @@ class Stores:
 
 
 @pytest.fixture
-def stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Stores]:
-    """Both buckets in moto, configured the way a cluster configures the job.
-
-    The credentials are fake for `test_base_weights`' reason: a test whose mock
-    failed to engage would otherwise reach a real account.
-    """
-    for name, value in (
-        ("AWS_ACCESS_KEY_ID", "testing"),
-        ("AWS_SECRET_ACCESS_KEY", "testing"),
-        ("AWS_DEFAULT_REGION", REGION),
-        (storage.DATA_BUCKET, BUCKETS.data),
-        (storage.ARTIFACTS_BUCKET, BUCKETS.artifacts),
-    ):
-        monkeypatch.setenv(name, value)
-    monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
-    monkeypatch.delenv(storage.ENDPOINT_URL, raising=False)
+def stores(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, memory_storage: StorageConfig
+) -> Stores:
+    """Both buckets in the in-memory store, named the way a cluster names them for the job."""
+    monkeypatch.setenv(storage.DATA_BUCKET, BUCKETS.data)
+    monkeypatch.setenv(storage.ARTIFACTS_BUCKET, BUCKETS.artifacts)
     monkeypatch.setattr(entrypoint, "WORK", tmp_path / "work")
 
-    with mock_aws():
-        config = StorageConfig(region=REGION)
-        for bucket in (BUCKETS.data, BUCKETS.artifacts):
-            client(config).create_bucket(Bucket=bucket)
-        yield Stores(
-            data=S3Store.connect(BUCKETS.data, config),
-            artifacts=S3Store.connect(BUCKETS.artifacts, config),
-            scratch=tmp_path / "fixtures",
-        )
+    return Stores(
+        data=FsspecStore.connect(BUCKETS.data, memory_storage),
+        artifacts=FsspecStore.connect(BUCKETS.artifacts, memory_storage),
+        scratch=tmp_path / "fixtures",
+    )
 
 
 def write_channels(

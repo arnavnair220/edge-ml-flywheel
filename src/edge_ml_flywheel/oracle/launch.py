@@ -101,7 +101,7 @@ def purchase(aws: boto3.Session, run_id: RunId, cycle: Cycle) -> Purchased:
             resource=aws.resource("dynamodb"),
             run=run,
             cohorts=cohorts,
-            fetch=sold.s3_fetch(aws.client("s3"), buckets.data, cohorts),
+            fetch=sold.session_fetch(aws, buckets.data, cohorts),
         )
         receipt, labels = oracle.purchase(cycle, batch.images)
 

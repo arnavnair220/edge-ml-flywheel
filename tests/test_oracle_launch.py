@@ -22,6 +22,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from edge_ml_flywheel import storage
 from edge_ml_flywheel.conventions import (
     AssignmentRow,
     Buckets,
@@ -93,18 +94,24 @@ def a_label_document(image_id: ImageId) -> dict[str, Any]:
 
 
 @pytest.fixture
-def aws(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[boto3.Session]:
+def aws(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, moto_server: str
+) -> Iterator[boto3.Session]:
     """An account with both buckets, all three tables, the partition and the labels.
 
     Every cohort gets a label object in the bucket, `eval` included. The gate has
     to be what refuses it -- a missing file would make a removed check still look
     like a pass here and fail only in production.
+
+    The label fetch reads through the object store, which reaches the same
+    buckets over `moto_server`.
     """
     for name, value in (
         ("AWS_ACCESS_KEY_ID", "testing"),
         ("AWS_SECRET_ACCESS_KEY", "testing"),
         ("AWS_SESSION_TOKEN", "testing"),
         ("AWS_DEFAULT_REGION", REGION),
+        (storage.ENDPOINT_URL, moto_server),
     ):
         monkeypatch.setenv(name, value)
 
@@ -379,14 +386,14 @@ class TestTheLabelRead:
         self, aws: boto3.Session, tmp_path: Path
     ) -> None:
         cohorts = gate.Cohorts(partition_version=PARTITION, of_image=ASSIGNED)
-        fetch = sold.s3_fetch(aws.client("s3"), BUCKETS.data, cohorts)
+        fetch = sold.session_fetch(aws, BUCKETS.data, cohorts)
 
         assert fetch(POOL[0]).boxes == (BOX,)
 
     def test_the_fetch_refuses_an_eval_image_without_a_request(self, aws: boto3.Session) -> None:
         """The eval object exists in the bucket, so this can only be the gate."""
         cohorts = gate.Cohorts(partition_version=PARTITION, of_image=ASSIGNED)
-        fetch = sold.s3_fetch(aws.client("s3"), BUCKETS.data, cohorts)
+        fetch = sold.session_fetch(aws, BUCKETS.data, cohorts)
 
         with pytest.raises(gate.NotPurchasableError, match="in eval"):
             fetch(EVAL)

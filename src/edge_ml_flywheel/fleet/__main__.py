@@ -39,7 +39,7 @@ from edge_ml_flywheel.conventions import (
     parse_run_id,
 )
 from edge_ml_flywheel.fleet import component, deploy, telemetry
-from edge_ml_flywheel.storage.s3 import S3Store
+from edge_ml_flywheel.storage.filesystem import FsspecStore
 from edge_ml_flywheel.training import launch as base
 
 log = logging.getLogger("edge_ml_flywheel.fleet")
@@ -150,7 +150,7 @@ def _deploy(aws: Any, args: argparse.Namespace) -> str:
     )
 
     buckets = storage.buckets()
-    artifacts = S3Store.connect(buckets.artifacts)
+    artifacts = FsspecStore.connect(buckets.artifacts)
     deploy.read_sampled_frames(artifacts, run_id, cycle)
     deploy.upload_code(artifacts, release.git_commit, deploy.checkout_archive())
     deploy.publish_component(aws, deploy.recipe_for(aws, release, replay, buckets))
@@ -195,7 +195,7 @@ def _status(aws: Any, run_id: RunId) -> None:
     """
     intended = deploy.deployed(aws, run_id, _target(aws))
     documents = deploy.read_records(
-        S3Store.connect(storage.bucket_name(storage.TELEMETRY_BUCKET)), run_id
+        FsspecStore.connect(storage.bucket_name(storage.TELEMETRY_BUCKET)), run_id
     )
 
     reported: dict[str, Any] | None = None

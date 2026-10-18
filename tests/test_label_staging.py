@@ -16,12 +16,9 @@ the one the buildspec prints.
 """
 
 import json
-from collections.abc import Iterator
 from pathlib import Path
 
-import boto3
 import pytest
-from moto import mock_aws
 
 from edge_ml_flywheel import storage
 from edge_ml_flywheel.conventions import (
@@ -36,8 +33,8 @@ from edge_ml_flywheel.conventions import (
 )
 from edge_ml_flywheel.partition import assign, cohort_labels, fetch
 from edge_ml_flywheel.partition.__main__ import main
-
-REGION = "us-east-1"
+from edge_ml_flywheel.storage import StorageConfig
+from edge_ml_flywheel.storage.filesystem import FsspecStore
 
 # Any name: the bucket comes from configuration, so nothing here depends on it
 # matching an account.
@@ -82,38 +79,19 @@ def a_document(image_id: ImageId) -> bytes:
 
 
 @pytest.fixture
-def data(monkeypatch: pytest.MonkeyPatch) -> Iterator[boto3.Session]:
+def data(monkeypatch: pytest.MonkeyPatch, memory_storage: StorageConfig) -> FsspecStore:
     """A data bucket holding a label document for **every** cohort.
 
     The unlabeled ones are present here and absent from `test_cohort_labels`'
     staged tree, and the difference is the point: there a `pool` read fails as a
     missing file, and here it would succeed. What the CLI test asserts is that
     nothing reached for one anyway.
-
-    The credentials are fake for `test_base_weights`' reason: a test whose mock
-    failed to engage would otherwise reach a real account.
     """
-    for name, value in (
-        ("AWS_ACCESS_KEY_ID", "testing"),
-        ("AWS_SECRET_ACCESS_KEY", "testing"),
-        ("AWS_SESSION_TOKEN", "testing"),
-        ("AWS_DEFAULT_REGION", REGION),
-        (storage.DATA_BUCKET, BUCKET),
-    ):
-        monkeypatch.setenv(name, value)
-    monkeypatch.delenv(storage.ENDPOINT_URL, raising=False)
-
-    with mock_aws():
-        session = boto3.Session(region_name=REGION)
-        s3 = session.client("s3")
-        s3.create_bucket(Bucket=BUCKET)
-        for row in assignments():
-            s3.put_object(
-                Bucket=BUCKET,
-                Key=raw_label_key(row.image_id, COHORT_SPLIT[row.cohort]),
-                Body=a_document(row.image_id),
-            )
-        yield session
+    monkeypatch.setenv(storage.DATA_BUCKET, BUCKET)
+    store = FsspecStore.connect(BUCKET, memory_storage)
+    for row in assignments():
+        store.put(raw_label_key(row.image_id, COHORT_SPLIT[row.cohort]), a_document(row.image_id))
+    return store
 
 
 def staged(root: Path) -> set[str]:
@@ -122,7 +100,7 @@ def staged(root: Path) -> set[str]:
 
 
 class TestStage:
-    def test_every_key_lands_at_its_own_path(self, data: boto3.Session, tmp_path: Path) -> None:
+    def test_every_key_lands_at_its_own_path(self, data: FsspecStore, tmp_path: Path) -> None:
         keys = [raw_label_key(an_image_id(0), COHORT_SPLIT[Cohort.BOOTSTRAP])]
 
         landed = fetch.stage(fetch.data_store(), keys, tmp_path)
@@ -131,7 +109,7 @@ class TestStage:
         assert (tmp_path / keys[0]).read_bytes() == a_document(an_image_id(0))
 
     def test_the_whole_list_is_attempted_before_a_failure_is_raised(
-        self, data: boto3.Session, tmp_path: Path
+        self, data: FsspecStore, tmp_path: Path
     ) -> None:
         """A partial stage fails the build, and says how partial.
 
@@ -148,11 +126,11 @@ class TestStage:
 
         assert (tmp_path / present).is_file()
 
-    def test_the_bucket_comes_from_configuration(self, data: boto3.Session) -> None:
+    def test_the_bucket_comes_from_configuration(self, data: FsspecStore) -> None:
         assert fetch.data_store().bucket == BUCKET
 
     def test_an_unconfigured_bucket_is_refused_by_name(
-        self, data: boto3.Session, monkeypatch: pytest.MonkeyPatch
+        self, data: FsspecStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv(storage.DATA_BUCKET)
 
@@ -162,7 +140,7 @@ class TestStage:
 
 class TestStageLabelsCommand:
     def test_it_stages_the_labeled_cohorts_and_nothing_else(
-        self, data: boto3.Session, tmp_path: Path
+        self, data: FsspecStore, tmp_path: Path
     ) -> None:
         rows = assignments()
         assign.write_parquet(rows, tmp_path / assignments_key(V0))
@@ -176,7 +154,7 @@ class TestStageLabelsCommand:
         }
 
     def test_what_it_stages_is_what_the_labels_step_reads(
-        self, data: boto3.Session, tmp_path: Path
+        self, data: FsspecStore, tmp_path: Path
     ) -> None:
         """The staged tree and `cohort_labels.read` agree on where a document is.
 

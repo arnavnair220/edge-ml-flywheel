@@ -12,12 +12,11 @@ withheld labels beside the permitted ones, so reaching for them would succeed.
 """
 
 import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from moto import mock_aws
 
 from edge_ml_flywheel.conventions import (
     Buckets,
@@ -45,11 +44,10 @@ from edge_ml_flywheel.conventions import (
 from edge_ml_flywheel.evaluation import inputs as evaluation
 from edge_ml_flywheel.scoring import inputs as scoring
 from edge_ml_flywheel.storage import StorageConfig, tree
-from edge_ml_flywheel.storage.s3 import S3Store, client
+from edge_ml_flywheel.storage.filesystem import FsspecStore
 from edge_ml_flywheel.training import images
 from edge_ml_flywheel.training import inputs as training
 
-REGION = "us-east-1"
 BUCKETS = Buckets(data="inputs-data", artifacts="inputs-artifacts", telemetry="inputs-telemetry")
 RUN = RunId("20260812t143355z-v1-uncertainty")
 V0 = PartitionVersion(0)
@@ -68,24 +66,17 @@ def an_image_id(index: int) -> ImageId:
 
 @dataclass(frozen=True, slots=True)
 class Stores:
-    data: S3Store
-    artifacts: S3Store
+    data: FsspecStore
+    artifacts: FsspecStore
 
 
 @pytest.fixture
-def stores(monkeypatch: pytest.MonkeyPatch) -> Iterator[Stores]:
-    """Both buckets in moto, with fake credentials for `test_base_weights`' reason."""
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
-    monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
-    with mock_aws():
-        config = StorageConfig(region=REGION)
-        for bucket in (BUCKETS.data, BUCKETS.artifacts):
-            client(config).create_bucket(Bucket=bucket)
-        yield Stores(
-            data=S3Store.connect(BUCKETS.data, config),
-            artifacts=S3Store.connect(BUCKETS.artifacts, config),
-        )
+def stores(memory_storage: StorageConfig) -> Stores:
+    """Both buckets in the in-memory store."""
+    return Stores(
+        data=FsspecStore.connect(BUCKETS.data, memory_storage),
+        artifacts=FsspecStore.connect(BUCKETS.artifacts, memory_storage),
+    )
 
 
 def manifest(image_ids: Sequence[ImageId], split: Split) -> bytes:

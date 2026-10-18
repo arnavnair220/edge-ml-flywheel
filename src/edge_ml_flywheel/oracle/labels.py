@@ -27,7 +27,7 @@ from edge_ml_flywheel.conventions import ImageId, parse_image_id, raw_label_key
 from edge_ml_flywheel.ingest.labels import Box, parse_label
 from edge_ml_flywheel.oracle.cohorts import Cohorts, purchasable_split
 from edge_ml_flywheel.storage import ObjectStore
-from edge_ml_flywheel.storage.s3 import S3Store
+from edge_ml_flywheel.storage.filesystem import FsspecStore
 
 log = logging.getLogger(__name__)
 
@@ -165,9 +165,9 @@ def store_fetch(store: ObjectStore, cohorts: Cohorts) -> Fetch:
     return fetch
 
 
-def s3_fetch(client: Any, bucket: str, cohorts: Cohorts) -> Fetch:
-    """`store_fetch` over an existing S3 client, for callers that hold one."""
-    return store_fetch(S3Store(bucket, client), cohorts)
+def session_fetch(aws: Any, bucket: str, cohorts: Cohorts) -> Fetch:
+    """`store_fetch` under a boto3 session, for callers that hold one."""
+    return store_fetch(FsspecStore.from_session(aws, bucket), cohorts)
 
 
 def write_parquet(labels: Sequence[SoldLabel], path: Path) -> int:

@@ -53,7 +53,7 @@ from edge_ml_flywheel.conventions import (
     uri,
 )
 from edge_ml_flywheel.storage import ARTIFACTS_BUCKET, DATA_BUCKET, ObjectStore, bucket_name, tree
-from edge_ml_flywheel.storage.s3 import S3Store
+from edge_ml_flywheel.storage.filesystem import FsspecStore
 from edge_ml_flywheel.training import dataset, export, images, inputs, labels
 
 log = logging.getLogger("edge_ml_flywheel.training")
@@ -286,8 +286,8 @@ def main(argv: list[str] | None = None) -> None:
 
     seed_everything(Seed(args.seed))
 
-    data = S3Store.connect(bucket_name(DATA_BUCKET), pool=tree.WORKERS)
-    artifacts = S3Store.connect(bucket_name(ARTIFACTS_BUCKET))
+    data = FsspecStore.connect(bucket_name(DATA_BUCKET), pool=tree.WORKERS)
+    artifacts = FsspecStore.connect(bucket_name(ARTIFACTS_BUCKET))
 
     started = time.monotonic()
     staged = inputs.stage(

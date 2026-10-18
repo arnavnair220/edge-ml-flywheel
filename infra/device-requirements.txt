@@ -27,11 +27,17 @@ pillow==11.3.0
 # onnxruntime hands back. The major tracks the project lockfile's.
 numpy==2.5.2
 
-# Fetches the frames from the data bucket, writes the detections parquet to the
-# artifacts bucket, and publishes to IoT Core. Greengrass sets the
-# container-credentials variables for a component, so this picks up the token
-# exchange role with no configuration.
-boto3==1.42.0
+# Publishes to IoT Core. Greengrass sets the container-credentials variables for
+# a component, so this and `s3fs` below pick up the token exchange role with no
+# configuration.
+boto3==1.43.78
+
+# Fetches the frames from the data bucket and writes the detections parquet to
+# the artifacts bucket, through `storage`. `aiobotocore`, which `s3fs` brings,
+# accepts only a narrow `botocore` range, so `botocore` is pinned to the version
+# `uv.lock` resolves for both.
+s3fs==2026.9.0
+botocore==1.43.106
 
 # Writes the cycle's detections in the schema every other reader already opens.
 # The device reuses `scoring.detections`, so the file a device produces and the
