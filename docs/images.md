@@ -38,6 +38,12 @@ Every image is built in two stages.
 2. **Runtime stage.** `/opt/venv` and the job's entry point are copied onto a clean base. No
    build tools, uv, or source tree are present.
 
+`train` and `score` split this differently, because their dependencies include several gigabytes
+of CUDA libraries. A `deps` stage installs only the dependencies, and a separate `wheel` stage
+builds the project with `uv build --wheel`. The runtime stage copies `/opt/venv` from `deps`, then
+installs the wheel with `--no-deps` as its own layer. A source-only change rebuilds that small
+layer and reuses the dependency layer.
+
 | Property | Value |
 |---|---|
 | Base | `python:3.12-slim-bookworm`, pinned by digest |
