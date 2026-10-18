@@ -1,21 +1,23 @@
 """The training job itself, as it runs inside the container.
 
-Started by `container/train.py`, which is a three-line file at the root of the
-source archive because SageMaker requires the entry point there. Everything it
-does is here instead, where ruff and mypy see it and the pure parts have tests.
+Started by `container/train.py`, a three-line file at the root of the source
+archive. Everything it does is here instead, where ruff and mypy see it and the
+pure parts have tests.
 
 The order of the steps is the order the failures are worth having in. Seeding
 comes first, so nothing has drawn a random number before the seed is set. The
-channel inventory comes before the work, so a job that dies later still leaves
-the download measurement design section 11 asks every job to record. The dataset
-is built and asserted before the model is loaded, so a mismatch between the
-manifest and the labels costs seconds of GPU rather than an epoch of it.
+inputs are fetched from the store and inventoried before the work, so a job that
+dies later still leaves the download measurement design section 11 asks every job
+to record. The dataset is built and asserted before the model is loaded, so a
+mismatch between the manifest and the labels costs seconds of GPU rather than an
+epoch of it.
 
-**What this job writes.** SageMaker collects `/opt/ml/model` into a
-`model.tar.gz`, which is the form the scoring job and the model registry consume.
-The device and the model manifest want the loose files and their digests at the
-keys `conventions.model_artifact_key` names. Same bytes, hashed once, where they
-were produced -- a digest computed anywhere else is a digest of a copy.
+**What this job reads and writes.** Every input comes from the store, at keys
+`training.inputs` derives from the model version and the partition version; the
+bucket names come from configuration (`docs/storage.md`). The outputs are the
+loose model files and their digests, at the keys
+`conventions.model_artifact_key` names. Same bytes, hashed once, where they were
+produced -- a digest computed anywhere else is a digest of a copy.
 
 Two of those files are models. `model.pt` is the checkpoint, and `model.onnx` is
 the int8 graph an ARM CPU can run, which is what the fleet loads and what the
@@ -36,7 +38,6 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
-import boto3
 import numpy as np
 import torch
 from ultralytics import YOLO
@@ -44,26 +45,22 @@ from ultralytics import YOLO
 from edge_ml_flywheel.conventions import (
     CLASS_SET,
     ModelArtifact,
+    PartitionVersion,
     Seed,
     model_artifact_key,
     parse_model_version,
     sha256sums_document,
     uri,
 )
-from edge_ml_flywheel.training import dataset, export, images, labels
-from edge_ml_flywheel.training.job import (
-    BASE_CHANNEL,
-    BOOTSTRAP_CHANNEL,
-    CHANNEL_ROOT,
-    IMAGES_CHANNEL,
-    MODEL_DIR,
-    PURCHASES_CHANNEL,
-)
+from edge_ml_flywheel.storage import ARTIFACTS_BUCKET, DATA_BUCKET, ObjectStore, bucket_name, tree
+from edge_ml_flywheel.storage.s3 import S3Store
+from edge_ml_flywheel.training import dataset, export, images, inputs, labels
 
 log = logging.getLogger("edge_ml_flywheel.training")
 
-# Where the conversion and the run happen. Local scratch on the job's own volume;
-# nothing here survives the job except what is uploaded.
+# Where the inputs land, and where the conversion and the run happen. Local
+# scratch on the job's own volume; nothing here survives the job except what is
+# uploaded.
 WORK: Final = Path("/tmp/training")
 
 # Ultralytics writes `last.pt` and `best.pt`. `last.pt` is what ships, and the
@@ -78,17 +75,20 @@ _CHUNK: Final = 1024 * 1024
 
 
 def _parser() -> argparse.ArgumentParser:
-    """SageMaker passes every hyperparameter as `--<key> <value>`, verbatim.
+    """Every flag as `--<key> <value>`, underscored to match the other two jobs.
 
-    So the flags are spelled with underscores rather than hyphens: the key in
-    `job.hyperparameters` is the flag, and a hyphenated flag here would be a job
-    that starts, downloads its channels and then exits on an unrecognized
-    argument. `parse_known_args` covers the other direction -- the toolkit's own
-    `sagemaker_*` parameters are meant to be filtered out before the script is
-    called, and a job should not die if one arrives anyway.
+    `parse_known_args` in `main` rather than `parse_args`: a flag this job does
+    not read is logged and ignored, so a workflow that passes one more parameter
+    than this version knows does not fail a GPU job at startup.
     """
     parser = argparse.ArgumentParser(prog="train.py")
     parser.add_argument("--version", required=True, help="The model version this job produces.")
+    parser.add_argument(
+        "--partition_version",
+        type=int,
+        required=True,
+        help="The partition the bootstrap labels are read from, off the run registration.",
+    )
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--epochs", type=int, required=True)
     parser.add_argument("--image_size", type=int, required=True)
@@ -100,32 +100,24 @@ def _parser() -> argparse.ArgumentParser:
     # bought if the hyperparameter were ever dropped -- which is the failure this
     # argument exists to end, not one to leave a quiet path back to.
     parser.add_argument("--max_images", type=int, required=True)
-    parser.add_argument("--artifacts_bucket", required=True)
     return parser
 
 
-def channel(name: str) -> Path:
-    return Path(CHANNEL_ROOT) / name
+def inventory(roots: Sequence[Path]) -> None:
+    """Log what arrived under each input, in files and in bytes.
 
-
-def inventory(names: Sequence[str]) -> None:
-    """Log what arrived on each channel, in files and in bytes.
-
-    This is the measurement design section 11 leaves open: `File` mode copies the
-    channel before the first step at a cost driven by object count rather than
-    bytes, and whether 8,000 images rising to 16,000 makes that copy slow enough
-    to pack into shards is a number rather than an argument. The download
-    *duration* is a SageMaker secondary status and is reported by the launcher;
-    what only the container can say is how many objects that duration was for.
+    This is the measurement design section 11 leaves open: fetching the inputs
+    costs a time driven by object count rather than bytes, and whether 8,000
+    images rising to 16,000 makes that copy slow enough to pack into shards is a
+    number rather than an argument.
     """
-    for name in names:
-        root = channel(name)
+    for root in roots:
         if not root.is_dir():
-            log.info("channel %s: absent", name)
+            log.info("%s: absent", root)
             continue
         files = [path for path in root.rglob("*") if path.is_file()]
         size = sum(path.stat().st_size for path in files)
-        log.info("channel %s: %d files, %.1f MB", name, len(files), size / 1024 / 1024)
+        log.info("%s: %d files, %.1f MB", root, len(files), size / 1024 / 1024)
 
 
 def seed_everything(seed: Seed) -> None:
@@ -159,8 +151,8 @@ def digest(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def build_dataset(max_images: int = 0) -> Path:
-    """Channels in, a YOLO dataset directory out.
+def build_dataset(staged: inputs.Staged, max_images: int = 0) -> Path:
+    """Staged inputs in, a YOLO dataset directory out.
 
     `max_images` caps the labels to the same images the manifest names, and the
     arithmetic is `images.capped_labels` rather than anything written here: the
@@ -171,7 +163,7 @@ def build_dataset(max_images: int = 0) -> Path:
     the pair if the two ever disagree.
     """
     started = time.monotonic()
-    collected = labels.collect([channel(BOOTSTRAP_CHANNEL), channel(PURCHASES_CHANNEL)])
+    collected = labels.collect(staged.labels)
     log.info(
         "labeled set: %d images and %d boxes before the class filter",
         len(collected),
@@ -183,7 +175,7 @@ def build_dataset(max_images: int = 0) -> Path:
         log.info("capped the labels to %d images, matching the manifest", len(labeled))
 
     root = WORK / "dataset"
-    dataset.write(root, channel(IMAGES_CHANNEL), labeled, CLASS_SET)
+    dataset.write(root, staged.images, labeled, CLASS_SET)
     log.info("dataset built in %.1fs", time.monotonic() - started)
     return root
 
@@ -227,12 +219,11 @@ def train(root: Path, base: Path, args: argparse.Namespace) -> Path:
     return checkpoint
 
 
-def publish(checkpoint: Path, root: Path, args: argparse.Namespace) -> None:
+def publish(checkpoint: Path, root: Path, args: argparse.Namespace, artifacts: ObjectStore) -> None:
     """Put the model where all of its readers look, and prove what landed.
 
-    Two artifacts, not one. `model.pt` is what the scoring job loads and what
-    SageMaker collects into `model.tar.gz` for the registry; `model.onnx` is the
-    int8 graph the fleet runs, and the digest the manifest carries. Both are
+    Two artifacts, not one. `model.pt` is what the scoring job loads; `model.onnx`
+    is the int8 graph the fleet runs, and the digest the manifest carries. Both are
     hashed here, where the bytes were produced -- a digest taken anywhere else is
     a digest of a copy.
 
@@ -242,15 +233,14 @@ def publish(checkpoint: Path, root: Path, args: argparse.Namespace) -> None:
     function to produce them.
 
     The read-back is the partitioner's and the registration's arrangement: the
-    job does not report success on the strength of a `put_object` that returned.
-    A truncated upload is exactly the failure the device's digest check is meant
-    to catch at the far end, and catching it here costs one GET per artifact.
+    job does not report success on the strength of an upload that returned. A
+    truncated upload is exactly the failure the device's digest check is meant to
+    catch at the far end, and catching it here costs one GET per artifact.
     """
     version = parse_model_version(args.version)
     seed = Seed(args.seed)
-    bucket = args.artifacts_bucket
 
-    model_dir = Path(MODEL_DIR)
+    model_dir = WORK / "model"
     model_dir.mkdir(parents=True, exist_ok=True)
 
     local = {ModelArtifact.TORCH: model_dir / ModelArtifact.TORCH.value}
@@ -271,18 +261,17 @@ def publish(checkpoint: Path, root: Path, args: argparse.Namespace) -> None:
     local_sha = model_dir / ModelArtifact.SHA256.value
     local_sha.write_text(sha256sums_document(digests), encoding="utf-8")
 
-    client = boto3.client("s3")
     for artifact, path in (*local.items(), (ModelArtifact.SHA256, local_sha)):
         key = model_artifact_key(version, seed, artifact)
-        client.upload_file(str(path), bucket, key)
-        log.info("wrote %s", uri(bucket, key))
+        artifacts.upload(path, key)
+        log.info("wrote %s", uri(artifacts.bucket, key))
 
     for artifact, sha256 in digests.items():
         landed = WORK / f"readback-{artifact.value}"
-        client.download_file(bucket, model_artifact_key(version, seed, artifact), str(landed))
+        artifacts.download(model_artifact_key(version, seed, artifact), landed)
         if digest(landed) != sha256:
             raise SystemExit(
-                f"{artifact.value} read back from S3 does not match what was uploaded: "
+                f"{artifact.value} read back from the store does not match what was uploaded: "
                 f"{sha256} written, {digest(landed)} read"
             )
         landed.unlink()
@@ -296,15 +285,23 @@ def main(argv: list[str] | None = None) -> None:
         log.info("ignoring arguments this job does not read: %s", unknown)
 
     seed_everything(Seed(args.seed))
-    inventory([IMAGES_CHANNEL, BOOTSTRAP_CHANNEL, PURCHASES_CHANNEL, BASE_CHANNEL])
 
-    root = build_dataset(args.max_images)
+    data = S3Store.connect(bucket_name(DATA_BUCKET), pool=tree.WORKERS)
+    artifacts = S3Store.connect(bucket_name(ARTIFACTS_BUCKET))
 
-    base = next(iter(sorted(channel(BASE_CHANNEL).glob("*.pt"))), None)
-    if base is None:
-        raise SystemExit(f"the {BASE_CHANNEL} channel carries no checkpoint to fine-tune from")
+    started = time.monotonic()
+    staged = inputs.stage(
+        data,
+        artifacts,
+        parse_model_version(args.version),
+        PartitionVersion(args.partition_version),
+        WORK / "input",
+    )
+    log.info("inputs fetched in %.1fs", time.monotonic() - started)
+    inventory([staged.images, *staged.labels])
 
-    publish(train(root, base, args), root, args)
+    root = build_dataset(staged, args.max_images)
+    publish(train(root, staged.base, args), root, args, artifacts)
 
 
 if __name__ == "__main__":

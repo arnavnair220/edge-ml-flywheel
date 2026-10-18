@@ -26,6 +26,8 @@ import pyarrow.parquet as pq
 from edge_ml_flywheel.conventions import ImageId, parse_image_id, raw_label_key
 from edge_ml_flywheel.ingest.labels import Box, parse_label
 from edge_ml_flywheel.oracle.cohorts import Cohorts, purchasable_split
+from edge_ml_flywheel.storage import ObjectStore
+from edge_ml_flywheel.storage.s3 import S3Store
 
 log = logging.getLogger(__name__)
 
@@ -140,15 +142,15 @@ def local_fetch(root: Path, cohorts: Cohorts) -> Fetch:
     return fetch
 
 
-def s3_fetch(client: Any, bucket: str, cohorts: Cohorts) -> Fetch:
-    """Bind a bucket and a cohort index into a `Fetch`.
+def store_fetch(store: ObjectStore, cohorts: Cohorts) -> Fetch:
+    """Bind the data bucket and a cohort index into a `Fetch`.
 
     The other half of `local_fetch`, and deliberately the same three lines in a
     different order: the key comes from `label_key`, which routes through the
-    gate, so this reaches S3 only for an image the gate has already admitted. A
-    refused image produces no `GetObject` at all -- which is what makes "unread
-    rather than merely unsold" a statement about the network and not only about
-    the code.
+    gate, so this reaches the store only for an image the gate has already
+    admitted. A refused image produces no read at all -- which is what makes
+    "unread rather than merely unsold" a statement about the network and not
+    only about the code.
 
     One object per image rather than a prefix download. A batch is a thousand
     scattered keys out of 80,000, so there is no prefix that names them; and the
@@ -156,12 +158,16 @@ def s3_fetch(client: Any, bucket: str, cohorts: Cohorts) -> Fetch:
     """
 
     def fetch(image_id: ImageId) -> SoldLabel:
-        key = label_key(cohorts, image_id)
-        body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+        body = store.get(label_key(cohorts, image_id))
         parsed = parse_label(json.loads(body), image_id)
         return SoldLabel(image_id=image_id, boxes=parsed.boxes)
 
     return fetch
+
+
+def s3_fetch(client: Any, bucket: str, cohorts: Cohorts) -> Fetch:
+    """`store_fetch` over an existing S3 client, for callers that hold one."""
+    return store_fetch(S3Store(bucket, client), cohorts)
 
 
 def write_parquet(labels: Sequence[SoldLabel], path: Path) -> int:

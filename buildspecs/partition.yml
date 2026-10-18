@@ -105,7 +105,10 @@ phases:
       # that file, so nothing in the build can hand the downloader a key the
       # partition did not name. A document that fails to land fails the build,
       # rather than becoming a short label file below.
-      - uv run python -m edge_ml_flywheel.partition stage-labels --stage-dir "$WORK/stage" --partition-version "$PARTITION_VERSION"
+      #
+      # The package reads its bucket from `STORAGE_DATA_BUCKET` (docs/storage.md),
+      # which is the bucket this file already copies from.
+      - STORAGE_DATA_BUCKET="$DATA_BUCKET" uv run python -m edge_ml_flywheel.partition stage-labels --stage-dir "$WORK/stage" --partition-version "$PARTITION_VERSION"
 
       # Asserts each cohort's file holds exactly that cohort's images before
       # writing it. Same ordering as the draw above: nothing is uploaded by a run

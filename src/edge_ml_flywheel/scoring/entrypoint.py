@@ -1,23 +1,19 @@
 """The scoring job itself, as it runs inside the container.
 
-Started by `container/score.py`, which is a three-line file at the root of the
-source archive for `container/train.py`'s reason -- though not for its cause. A
-training job gets script mode and an entry point SageMaker finds; a Processing
-job gets whatever `job.container_entrypoint` names and nothing else, so the file
-is there to be named.
+Started by `container/score.py`, a three-line file at the root of the source
+archive beside `container/train.py`.
 
 The order of the steps is the order the failures are worth having in. The model
-is loaded before any channel is walked, so a missing or unreadable checkpoint
-costs seconds rather than a pass over 62,000 frames. Each cohort is then scored
-and written before the next begins, so a job that dies on the pool still leaves
-the eval detections -- which are the expensive half to regenerate, since they are
-the ones every later cycle compares against.
+is fetched and loaded before any image is scored, so a missing or unreadable
+checkpoint costs seconds rather than a pass over 5,000 frames. Each cohort is
+then scored and uploaded before the next begins, so a job that dies partway
+leaves the cohorts before the failure in the store.
 
-**No label is read, and there is nowhere to read one from.** Two image channels
-and a checkpoint arrive; ground truth is matched against these detections in the
-step after this one, under a role that is allowed to hold it. That division is
-what lets the scoring role be denied every label prefix outright rather than
-trusted to stay away from one.
+**No label is read, and there is nowhere to read one from.** A checkpoint and the
+images `scoring.inputs` names arrive; ground truth is matched against these
+detections in the step after this one, under an identity that is allowed to hold
+it. That division is what lets the scoring identity be denied every label prefix
+outright rather than trusted to stay away from one.
 """
 
 import argparse
@@ -34,22 +30,23 @@ from edge_ml_flywheel.conventions import (
     Cohort,
     DetectionRow,
     ImageId,
-    ModelArtifact,
     Precision,
     Seed,
     detections_key,
     parse_image_id,
     parse_model_version,
+    uri,
 )
-from edge_ml_flywheel.scoring import detections
-from edge_ml_flywheel.scoring.job import (
-    COHORTS,
-    INPUT_ROOT,
-    MODEL_CHANNEL,
-    OUTPUT_ROOT,
-)
+from edge_ml_flywheel.scoring import detections, inputs
+from edge_ml_flywheel.storage import ARTIFACTS_BUCKET, DATA_BUCKET, ObjectStore, bucket_name, tree
+from edge_ml_flywheel.storage.s3 import S3Store
 
 log = logging.getLogger("edge_ml_flywheel.scoring")
+
+# Where the inputs land and the detections are written before upload. Local
+# scratch on the job's own volume; nothing here survives the job except what is
+# uploaded.
+WORK: Final = Path("/tmp/scoring")
 
 # Images per forward pass arrive as `--batch` rather than being declared here.
 # The two passes need different values -- the int8 graph's batch axis is fixed at
@@ -85,46 +82,6 @@ def _parser() -> argparse.ArgumentParser:
     # container that quietly batches the artifact that ships.
     parser.add_argument("--batch", type=int, required=True)
     return parser
-
-
-def channel(name: str) -> Path:
-    return Path(INPUT_ROOT) / name
-
-
-def checkpoint(precision: Precision) -> Path:
-    """The model this job scores with.
-
-    Named rather than globbed, because the channel is a single-object prefix and
-    a glob that found two files would pick one of them silently. Which name is
-    the precision's: the fp32 pass loads the checkpoint, and the int8 pass loads
-    the quantized graph that ships. Ultralytics runs either, and applies NMS
-    itself over the ONNX graph's raw outputs exactly as it does over the
-    checkpoint's -- which is why the export leaves NMS out.
-    """
-    artifact = ModelArtifact.ONNX if precision is Precision.INT8 else ModelArtifact.TORCH
-    path = channel(MODEL_CHANNEL) / artifact.value
-    if not path.is_file():
-        raise SystemExit(f"the {MODEL_CHANNEL} channel carries no {artifact.value}")
-    return path
-
-
-def cohort_images(cohort: Cohort) -> list[Path]:
-    """Every image on one cohort's channel, in a fixed order.
-
-    `rglob` rather than a flat glob, and the difference is a failure mode rather
-    than a preference: a manifest channel lands its objects flat today, and if
-    that ever changed a flat glob would find nothing, write an empty detections
-    file and report it as a model that saw nothing -- which is a verdict design
-    section 4.2 acts on. Finding the images either way makes the empty file mean
-    what it says.
-    """
-    root = channel(cohort.value)
-    found = sorted(path for path in root.rglob(f"*{_IMAGE_SUFFIX}") if path.is_file())
-    if not found:
-        raise SystemExit(
-            f"the {cohort.value} channel carries no images, so there is nothing to score"
-        )
-    return found
 
 
 def _chunks(paths: Sequence[Path], size: int) -> Iterator[Sequence[Path]]:
@@ -214,24 +171,19 @@ def detect(
 
 
 def score_cohort(
-    model: Any, cohort: Cohort, names: dict[int, str], args: argparse.Namespace
-) -> None:
-    """Score one cohort and write its detections where the output channel expects.
+    model: Any,
+    cohort: Cohort,
+    paths: Sequence[Path],
+    names: dict[int, str],
+    args: argparse.Namespace,
+) -> Path:
+    """Score one cohort and return the detections file it wrote."""
+    if not paths:
+        raise SystemExit(f"the {cohort.value} manifest names no images, so nothing to score")
 
-    The file name is derived from `detections_key` rather than spelled, because
-    the output channel uploads this directory's contents under
-    `detections_prefix` and the two halves of that key have to agree. A name
-    invented here would produce a job that succeeds and an object nothing looks
-    for.
-    """
-    version = parse_model_version(args.version)
-    paths = cohort_images(cohort)
     log.info("%s: scoring %d images", cohort.value, len(paths))
-
-    name = Path(detections_key(version, Seed(args.seed), cohort)).name
-    written = detections.write(
-        detect(model, paths, names, args), Path(OUTPUT_ROOT) / cohort.value / name
-    )
+    local = WORK / "output" / f"{cohort.value}.parquet"
+    written = detections.write(detect(model, paths, names, args), local)
     log.info(
         "%s: %d detections over %d images, %.1f per image",
         cohort.value,
@@ -239,25 +191,41 @@ def score_cohort(
         len(paths),
         written / len(paths),
     )
+    return local
+
+
+def publish(artifacts: ObjectStore, local: Path, cohort: Cohort, args: argparse.Namespace) -> None:
+    """Upload one cohort's detections to the key their readers walk.
+
+    `detections_key` for this precision, so the file a reader finds under
+    `detections_prefix` is the one this job wrote.
+    """
+    key = detections_key(parse_model_version(args.version), Seed(args.seed), cohort, args.precision)
+    artifacts.upload(local, key)
+    log.info("wrote %s", uri(artifacts.bucket, key))
 
 
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     args = _parser().parse_args(argv)
 
-    base = checkpoint(args.precision)
-    log.info("scoring %s seed %d at %s from %s", args.version, args.seed, args.precision, base)
+    data = S3Store.connect(bucket_name(DATA_BUCKET), pool=tree.WORKERS)
+    artifacts = S3Store.connect(bucket_name(ARTIFACTS_BUCKET))
+    scored = inputs.Pass(parse_model_version(args.version), Seed(args.seed), args.precision)
+    staged = inputs.stage(data, artifacts, scored, WORK / "input")
+    log.info(
+        "scoring %s seed %d at %s from %s", args.version, args.seed, args.precision, staged.model
+    )
 
-    model = YOLO(str(base))
+    model = YOLO(str(staged.model))
     names = _class_names(model)
 
-    # Sorted for `job.inputs`' reason, and it decides something here that it does
-    # not there: a job that dies partway leaves the cohorts before the failure
-    # written, so the order is the order they are worth having. One cohort makes
-    # that moot today and the loop stays, because what this walks is whatever
-    # channels the request gave it.
-    for cohort in sorted(COHORTS):
-        score_cohort(model, cohort, names, args)
+    # Sorted, so a job that dies partway leaves the cohorts before the failure
+    # uploaded in a fixed order. One cohort makes that moot today and the loop
+    # stays, because what this walks is whatever cohorts `inputs` staged.
+    for cohort in sorted(staged.images):
+        written = score_cohort(model, cohort, staged.images[cohort], names, args)
+        publish(artifacts, written, cohort, args)
 
 
 if __name__ == "__main__":

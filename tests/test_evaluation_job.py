@@ -9,23 +9,27 @@ a role with one label grant is the role somebody widens. An absence is exactly
 the kind of property that survives being written down and then quietly stops
 holding.
 
-`TestTheJobEndToEnd` runs `entrypoint.main` against a channel tree on disk. Every
-piece it calls is already tested on its own, so what this adds is the wiring the
-unit tests cannot reach: that the files land at the names the output channels
-upload from, that a cycle with no champion reaches a verdict, and that a cycle
+`TestTheJobEndToEnd` runs `entrypoint.main` against two buckets in moto, with its
+inputs at the keys a cycle writes them to. Every piece it calls is already tested
+on its own, so what this adds is the wiring the unit tests cannot reach: that the
+job finds its inputs in the store, that the outputs land at the keys their
+readers use, that a cycle with no champion reaches a verdict, and that a cycle
 with one produces a delta with the sign the fixture was built to have. Those are
 the failures that otherwise appear as a green job and an object nothing looks
 for.
 """
 
 import json
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from moto import mock_aws
 
+from edge_ml_flywheel import storage
 from edge_ml_flywheel.conventions import (
     CLASS_SET,
     COHORT_SPLIT,
@@ -40,12 +44,14 @@ from edge_ml_flywheel.conventions import (
     RunId,
     Seed,
     cohort_labels_prefix,
+    detections_key,
     detections_prefix,
     eval_matches_key,
     eval_metrics_key,
     eval_prefix,
     gate_report_key,
     gate_report_prefix,
+    model_version_cycle,
     new_model_version,
     scoring_manifest_key,
     training_code_key,
@@ -55,7 +61,8 @@ from edge_ml_flywheel.gates import Gate
 from edge_ml_flywheel.ingest.labels import Box
 from edge_ml_flywheel.partition import cohort_labels
 from edge_ml_flywheel.scoring import detections as detection_rows
-from edge_ml_flywheel.scoring.job import INPUT_ROOT, OUTPUT_ROOT
+from edge_ml_flywheel.storage import StorageConfig
+from edge_ml_flywheel.storage.s3 import S3Store, client
 from edge_ml_flywheel.training import images
 from edge_ml_flywheel.training import job as training
 
@@ -409,14 +416,60 @@ def found_boxes(image_id: ImageId, found: int) -> list[Box]:
     return kept
 
 
+@dataclass(frozen=True, slots=True)
+class Stores:
+    """The two buckets the job reads and writes, and scratch for fixtures."""
+
+    data: S3Store
+    artifacts: S3Store
+    scratch: Path
+
+    def put(self, store: S3Store, local: Path, key: str) -> None:
+        store.upload(local, key)
+
+    def json(self, key: str) -> dict[str, Any]:
+        return dict(json.loads(self.artifacts.get(key)))
+
+
+@pytest.fixture
+def stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Stores]:
+    """Both buckets in moto, configured the way a cluster configures the job.
+
+    The credentials are fake for `test_base_weights`' reason: a test whose mock
+    failed to engage would otherwise reach a real account.
+    """
+    for name, value in (
+        ("AWS_ACCESS_KEY_ID", "testing"),
+        ("AWS_SECRET_ACCESS_KEY", "testing"),
+        ("AWS_DEFAULT_REGION", REGION),
+        (storage.DATA_BUCKET, BUCKETS.data),
+        (storage.ARTIFACTS_BUCKET, BUCKETS.artifacts),
+    ):
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
+    monkeypatch.delenv(storage.ENDPOINT_URL, raising=False)
+    monkeypatch.setattr(entrypoint, "WORK", tmp_path / "work")
+
+    with mock_aws():
+        config = StorageConfig(region=REGION)
+        for bucket in (BUCKETS.data, BUCKETS.artifacts):
+            client(config).create_bucket(Bucket=bucket)
+        yield Stores(
+            data=S3Store.connect(BUCKETS.data, config),
+            artifacts=S3Store.connect(BUCKETS.artifacts, config),
+            scratch=tmp_path / "fixtures",
+        )
+
+
 def write_channels(
-    root: Path,
+    stores: Stores,
     *,
     found: int,
     seeds: tuple[Seed, ...] = (Seed(1),),
     named: Sequence[ImageId] | None = None,
+    version: ModelVersion = CHALLENGER,
 ) -> None:
-    """A channel tree laid out where `entrypoint` looks for one.
+    """Everything one evaluation reads, in the buckets at the keys it reads them from.
 
     `found` is how many boxes of each class the model detected, which is what
     makes the sign of a delta known by construction: a challenger that finds more
@@ -432,26 +485,36 @@ def write_channels(
     The labels always cover every image, because the cohort file is the whole
     frozen 5,000 whatever a cycle scored.
     """
-    inputs = root / Path(INPUT_ROOT).relative_to("/")
     scored = sorted(LABELS) if named is None else sorted(named)
+    local = stores.scratch / f"c{model_version_cycle(version)}"
 
-    manifest = inputs / job.MANIFEST_CHANNEL / "images-eval.manifest"
-    manifest.parent.mkdir(parents=True, exist_ok=True)
-    images.write(manifest, BUCKETS.data, scored, COHORT_SPLIT[Cohort.EVAL])
+    images.write(local / "manifest.json", BUCKETS.data, scored, COHORT_SPLIT[Cohort.EVAL])
+    stores.put(
+        stores.artifacts,
+        local / "manifest.json",
+        scoring_manifest_key(RUN, model_version_cycle(version), Cohort.EVAL),
+    )
 
     cohort_labels.write_parquet(
         [
             cohort_labels.CohortLabel(image_id=image_id, boxes=tuple(boxes))
             for image_id, boxes in sorted(LABELS.items())
         ],
-        inputs / job.LABELS_CHANNEL / "part-00000.parquet",
+        local / "labels.parquet",
+    )
+    stores.put(
+        stores.data,
+        local / "labels.parquet",
+        f"{cohort_labels_prefix(V0, Cohort.EVAL)}part-00000.parquet",
     )
 
     for seed in seeds:
-        _write_detections(inputs / job.detections_channel(seed), scored, found)
+        path = local / f"detections-{seed}.parquet"
+        _write_detections(path, scored, found)
+        stores.put(stores.artifacts, path, detections_key(version, seed, Cohort.EVAL))
 
 
-def _write_detections(directory: Path, scored: Sequence[ImageId], found: int) -> None:
+def _write_detections(path: Path, scored: Sequence[ImageId], found: int) -> None:
     """One detections parquet, placed exactly on the boxes the model found.
 
     Exactly on the box, so it matches at every IoU threshold and what moves
@@ -471,194 +534,163 @@ def _write_detections(directory: Path, scored: Sequence[ImageId], found: int) ->
             for image_id in scored
             for box in found_boxes(image_id, found)
         ],
-        directory / "part-00000.parquet",
+        path,
     )
 
 
 def run_container(
-    monkeypatch: pytest.MonkeyPatch,
-    root: Path,
     version: ModelVersion,
     seeds: tuple[Seed, ...],
     champion: ModelVersion | None = None,
 ) -> None:
-    """`entrypoint.main` with the container's two fixed roots pointed at `root`.
-
-    The roots are SageMaker's convention and absolute, so the only way to run the
-    container's own code against a tree on disk is to rebase them -- which is
-    what these two `setattr` calls do, at the module attributes `entrypoint`
-    reads on every call rather than binds at import.
-    """
-    monkeypatch.setattr(entrypoint, "INPUT_ROOT", str(root / Path(INPUT_ROOT).relative_to("/")))
-    monkeypatch.setattr(entrypoint, "OUTPUT_ROOT", str(root / Path(OUTPUT_ROOT).relative_to("/")))
-
-    argv = ["--version", str(version), "--seeds", *(str(seed) for seed in seeds)]
+    """`entrypoint.main`, reading from and writing to the `stores` buckets."""
+    argv = [
+        "--version",
+        str(version),
+        "--partition_version",
+        str(V0),
+        "--seeds",
+        *(str(seed) for seed in seeds),
+    ]
     if champion is not None:
         argv.extend(("--champion", str(champion)))
     entrypoint.main(argv)
 
 
-def stage_champion(
-    monkeypatch: pytest.MonkeyPatch, root: Path, found: int, seeds: tuple[Seed, ...]
-) -> None:
-    """Run the job once for the champion, and put its caches on the challenger's
-    champion channel.
+def stage_champion(stores: Stores, found: int, seeds: tuple[Seed, ...]) -> None:
+    """Run the job once for the champion, which leaves its caches in the bucket.
 
     Built by the entry point rather than by hand, because that is what a real
     champion's cache is: the previous cycle's output of this same code. A fixture
     assembled another way would be testing the comparison against something no
     cycle ever writes.
-
-    The relative layout under `eval_prefix` is the same whichever version wrote
-    it, which is why the produced directory can be copied across unchanged.
     """
-    previous = root / "champion-cycle"
-    write_channels(previous, found=found, seeds=seeds)
-    run_container(monkeypatch, previous, CHAMPION, seeds)
-
-    produced = previous / Path(OUTPUT_ROOT).relative_to("/") / job.EVAL_OUTPUT
-    destination = root / Path(INPUT_ROOT).relative_to("/") / job.CHAMPION_CHANNEL
-    for path in produced.rglob("*"):
-        if path.is_file():
-            target = destination / path.relative_to(produced)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(path.read_bytes())
+    write_channels(stores, found=found, seeds=seeds, version=CHAMPION)
+    run_container(CHAMPION, seeds)
 
 
 class TestTheJobEndToEnd:
-    def _produced(self, root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-        out = root / Path(OUTPUT_ROOT).relative_to("/")
-        names = job.output_names(CHALLENGER, [Seed(1)])
-        metrics = json.loads((out / job.EVAL_OUTPUT / names["metrics"]).read_text(encoding="utf-8"))
-        report = json.loads((out / job.GATES_OUTPUT / names["report"]).read_text(encoding="utf-8"))
-        return dict(metrics), dict(report)
+    def _produced(self, stores: Stores) -> tuple[dict[str, Any], dict[str, Any]]:
+        metrics = stores.json(eval_metrics_key(CHALLENGER))
+        report = stores.json(gate_report_key(RUN, model_version_cycle(CHALLENGER)))
+        return metrics, report
 
-    def test_a_first_cycle_caches_its_arrays_and_reaches_a_verdict(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_a_first_cycle_caches_its_arrays_and_reaches_a_verdict(self, stores: Stores) -> None:
         """No champion, so the verdict is the collapse check and the cache is the
         thing the next cycle will compare against."""
-        write_channels(tmp_path, found=2)
-        run_container(monkeypatch, tmp_path, CHALLENGER, (Seed(1),))
+        write_channels(stores, found=2)
+        run_container(CHALLENGER, (Seed(1),))
 
-        names = job.output_names(CHALLENGER, [Seed(1)])
-        out = tmp_path / Path(OUTPUT_ROOT).relative_to("/")
-        assert (out / job.EVAL_OUTPUT / names["matches-1"]).is_file()
+        assert stores.artifacts.exists(eval_matches_key(CHALLENGER, Seed(1)))
 
-        metrics, report = self._produced(tmp_path)
+        metrics, report = self._produced(stores)
         assert metrics["images"] == IMAGES
         assert set(metrics["seeds"]) == {"1"}
         assert report["champion"] is None
         assert report["delta"] is None
         assert report["passed"]
 
-    def test_the_files_land_at_the_names_their_keys_say(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_the_files_land_at_the_keys_their_readers_use(self, stores: Stores) -> None:
         """The failure this catches is a job that succeeds and an object nothing
         looks for, which no unit test of either half can see."""
-        write_channels(tmp_path, found=2)
-        run_container(monkeypatch, tmp_path, CHALLENGER, (Seed(1),))
+        write_channels(stores, found=2)
+        run_container(CHALLENGER, (Seed(1),))
 
-        out = tmp_path / Path(OUTPUT_ROOT).relative_to("/")
-        produced = {
-            path.relative_to(out / job.EVAL_OUTPUT).as_posix()
-            for path in (out / job.EVAL_OUTPUT).rglob("*")
-            if path.is_file()
+        assert set(stores.artifacts.keys(eval_prefix(CHALLENGER))) == {
+            eval_metrics_key(CHALLENGER),
+            eval_matches_key(CHALLENGER, Seed(1)),
         }
-        root = eval_prefix(CHALLENGER)
-        assert produced == {
-            eval_metrics_key(CHALLENGER).removeprefix(root),
-            eval_matches_key(CHALLENGER, Seed(1)).removeprefix(root),
+        assert set(stores.artifacts.keys(gate_report_prefix(RUN, Cycle(2)))) == {
+            gate_report_key(RUN, Cycle(2))
         }
 
-    def test_the_verdict_records_the_thresholds_it_applied(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_the_verdict_records_the_thresholds_it_applied(self, stores: Stores) -> None:
         """A verdict without the numbers behind it is not checkable six weeks
         later without a git checkout."""
-        write_channels(tmp_path, found=2)
-        run_container(monkeypatch, tmp_path, CHALLENGER, (Seed(1),))
+        write_channels(stores, found=2)
+        run_container(CHALLENGER, (Seed(1),))
 
-        _, report = self._produced(tmp_path)
+        _, report = self._produced(stores)
         assert report["thresholds"]["min_mean_delta"] == 0.005
         assert [gate["gate"] for gate in report["gates"]] == [Gate.QUALITY.value]
 
-    def test_the_two_unimplemented_gates_are_absent_rather_than_green(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_the_two_unimplemented_gates_are_absent_rather_than_green(self, stores: Stores) -> None:
         """`edge` and `canary` read measurements nothing produces yet. A pass
         recorded for a check that never ran is the one entry in this document
         that would be a lie."""
-        write_channels(tmp_path, found=2)
-        run_container(monkeypatch, tmp_path, CHALLENGER, (Seed(1),))
+        write_channels(stores, found=2)
+        run_container(CHALLENGER, (Seed(1),))
 
-        _, report = self._produced(tmp_path)
+        _, report = self._produced(stores)
         reported = {gate["gate"] for gate in report["gates"]}
         assert Gate.EDGE.value not in reported
         assert Gate.CANARY.value not in reported
 
-    def test_a_better_challenger_clears_the_band(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_a_better_challenger_clears_the_band(self, stores: Stores) -> None:
         """The champion finds one box per image and the challenger finds three,
         so the sign is known by construction."""
-        write_channels(tmp_path, found=3)
-        stage_champion(monkeypatch, tmp_path, found=1, seeds=(Seed(1),))
-        run_container(monkeypatch, tmp_path, CHALLENGER, (Seed(1),), CHAMPION)
+        write_channels(stores, found=3)
+        stage_champion(stores, found=1, seeds=(Seed(1),))
+        run_container(CHALLENGER, (Seed(1),), CHAMPION)
 
-        _, report = self._produced(tmp_path)
+        _, report = self._produced(stores)
         assert report["delta"]["observed"] > 0
         assert report["delta"]["lower"] > 0
         assert report["passed"]
 
-    def test_an_identical_challenger_does_not_promote(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_an_identical_challenger_does_not_promote(self, stores: Stores) -> None:
         """The A/A test's expected verdict, at the smallest scale that produces
         it: the same detections on both sides cancel exactly on every resample,
         so the delta is zero and a gate that promoted it would have a false
         positive."""
-        write_channels(tmp_path, found=2)
-        stage_champion(monkeypatch, tmp_path, found=2, seeds=(Seed(1),))
-        run_container(monkeypatch, tmp_path, CHALLENGER, (Seed(1),), CHAMPION)
+        write_channels(stores, found=2)
+        stage_champion(stores, found=2, seeds=(Seed(1),))
+        run_container(CHALLENGER, (Seed(1),), CHAMPION)
 
-        _, report = self._produced(tmp_path)
+        _, report = self._produced(stores)
         assert report["delta"]["observed"] == pytest.approx(0.0)
         assert not report["passed"]
         assert "under the promotion threshold" in report["gates"][0]["reason"]
 
-    def test_a_model_that_detects_nothing_fails_rather_than_raising(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_a_model_that_detects_nothing_fails_rather_than_raising(self, stores: Stores) -> None:
         """Design section 4.2 hard fails a challenger whose classes collapse, and
         the gate can only report it if the job does not die first."""
-        write_channels(tmp_path, found=0)
-        run_container(monkeypatch, tmp_path, CHALLENGER, (Seed(1),))
+        write_channels(stores, found=0)
+        run_container(CHALLENGER, (Seed(1),))
 
-        _, report = self._produced(tmp_path)
+        _, report = self._produced(stores)
         assert not report["passed"]
         assert "scored zero AP" in report["gates"][0]["reason"]
 
-    def test_a_champion_scored_over_another_cohort_is_refused(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_a_champion_scored_over_another_cohort_is_refused(self, stores: Stores) -> None:
         """Two caches over different eval sets is the one mismatch that produces
         arithmetic instead of an error at every step but the last, so it is named
-        as the channel problem it is rather than left to the bootstrap."""
-        stage_champion(monkeypatch, tmp_path, found=1, seeds=(Seed(1),))
-        write_channels(tmp_path, found=3, named=sorted(LABELS)[:-1])
+        as the input problem it is rather than left to the bootstrap."""
+        stage_champion(stores, found=1, seeds=(Seed(1),))
+        write_channels(stores, found=3, named=sorted(LABELS)[:-1])
 
         with pytest.raises(SystemExit, match="eval images"):
-            run_container(monkeypatch, tmp_path, CHALLENGER, (Seed(1),), CHAMPION)
+            run_container(CHALLENGER, (Seed(1),), CHAMPION)
 
-    def test_a_seed_the_champion_never_ran_is_refused(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_a_seed_the_champion_never_ran_is_refused(self, stores: Stores) -> None:
         """A paired delta compares matching seeds. Dropping the unmatched one
         would compare a two-seed mean against a one-seed one."""
-        write_channels(tmp_path, found=3, seeds=(Seed(1), Seed(2)))
-        stage_champion(monkeypatch, tmp_path, found=1, seeds=(Seed(1),))
+        write_channels(stores, found=3, seeds=(Seed(1), Seed(2)))
+        stage_champion(stores, found=1, seeds=(Seed(1),))
 
         with pytest.raises(SystemExit, match="no cached matches for seed 2"):
-            run_container(monkeypatch, tmp_path, CHALLENGER, (Seed(1), Seed(2)), CHAMPION)
+            run_container(CHALLENGER, (Seed(1), Seed(2)), CHAMPION)
+
+    def test_no_label_outside_the_eval_cohort_is_read(self, stores: Stores) -> None:
+        """The eval wall from the job's side. The bootstrap labels sit beside the
+        eval labels in the bucket, so a job that reached for them would find them
+        -- and nothing it fetched holds their bytes."""
+        withheld = b"bootstrap labels, which this job must never fetch"
+        stores.data.put(f"{cohort_labels_prefix(V0, Cohort.BOOTSTRAP)}part-00000.parquet", withheld)
+        write_channels(stores, found=2)
+
+        run_container(CHALLENGER, (Seed(1),))
+
+        fetched = [path for path in entrypoint.WORK.rglob("*") if path.is_file()]
+        assert fetched
+        assert all(path.read_bytes() != withheld for path in fetched)
