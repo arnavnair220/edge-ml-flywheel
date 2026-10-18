@@ -20,7 +20,7 @@ from edge_ml_flywheel.ingest import manifest, provenance
 from edge_ml_flywheel.ingest.source import ARCHIVES
 from edge_ml_flywheel.ingest.stage import stage
 from edge_ml_flywheel.storage import DATA_BUCKET, ObjectStore, bucket_name, tree
-from edge_ml_flywheel.storage.s3 import S3Store
+from edge_ml_flywheel.storage.filesystem import FsspecStore
 
 log = logging.getLogger("edge_ml_flywheel.ingest")
 
@@ -101,7 +101,7 @@ def _staged_keys(stage_dir: Path) -> set[str]:
 
 def _data_store() -> ObjectStore:
     """The data bucket, behind a store sized for the upload's thread pool."""
-    return S3Store.connect(bucket_name(DATA_BUCKET), pool=tree.WORKERS)
+    return FsspecStore.connect(bucket_name(DATA_BUCKET), pool=tree.WORKERS)
 
 
 def _upload(store: ObjectStore, stage_dir: Path) -> None:

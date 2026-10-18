@@ -77,7 +77,7 @@ from edge_ml_flywheel.gates import DEFAULT, edge_gate, quality_gate
 from edge_ml_flywheel.ingest.labels import Box
 from edge_ml_flywheel.scoring import detections as detection_rows
 from edge_ml_flywheel.storage import ARTIFACTS_BUCKET, DATA_BUCKET, ObjectStore, bucket_name
-from edge_ml_flywheel.storage.s3 import S3Store
+from edge_ml_flywheel.storage.filesystem import FsspecStore
 from edge_ml_flywheel.training import images
 from edge_ml_flywheel.training import labels as label_files
 
@@ -346,8 +346,8 @@ def main(argv: list[str] | None = None) -> None:
     champion = parse_model_version(args.champion) if args.champion else None
     seeds = tuple(Seed(seed) for seed in sorted(set(args.seeds)))
 
-    data = S3Store.connect(bucket_name(DATA_BUCKET))
-    artifacts = S3Store.connect(bucket_name(ARTIFACTS_BUCKET))
+    data = FsspecStore.connect(bucket_name(DATA_BUCKET))
+    artifacts = FsspecStore.connect(bucket_name(ARTIFACTS_BUCKET))
     comparison = inputs.Comparison(
         version=version,
         seeds=seeds,

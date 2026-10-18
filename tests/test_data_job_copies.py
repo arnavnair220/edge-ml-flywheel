@@ -17,13 +17,10 @@ not write back.
 """
 
 import json
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-import boto3
 import pytest
-from moto import mock_aws
 
 from edge_ml_flywheel import storage
 from edge_ml_flywheel.conventions import (
@@ -43,8 +40,9 @@ from edge_ml_flywheel.conventions import (
 from edge_ml_flywheel.ingest.__main__ import main as ingest
 from edge_ml_flywheel.partition import assign
 from edge_ml_flywheel.partition.__main__ import main as partition
+from edge_ml_flywheel.storage import StorageConfig
+from edge_ml_flywheel.storage.filesystem import FsspecStore
 
-REGION = "us-east-1"
 BUCKET = "edge-ml-flywheel-data-test"
 
 V0 = PartitionVersion(0)
@@ -54,36 +52,14 @@ OTHER = ImageId("00054602-3bf57337")
 
 
 @pytest.fixture
-def s3(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
-    """An empty data bucket, named by configuration.
-
-    The credentials are fake for `test_base_weights`' reason: a test whose mock
-    failed to engage would otherwise reach a real account.
-    """
-    for name, value in (
-        ("AWS_ACCESS_KEY_ID", "testing"),
-        ("AWS_SECRET_ACCESS_KEY", "testing"),
-        ("AWS_SESSION_TOKEN", "testing"),
-        ("AWS_DEFAULT_REGION", REGION),
-        (storage.DATA_BUCKET, BUCKET),
-    ):
-        monkeypatch.setenv(name, value)
-    monkeypatch.delenv(storage.ENDPOINT_URL, raising=False)
-
-    with mock_aws():
-        client = boto3.Session(region_name=REGION).client("s3")
-        client.create_bucket(Bucket=BUCKET)
-        yield client
+def data(monkeypatch: pytest.MonkeyPatch, memory_storage: StorageConfig) -> FsspecStore:
+    """An empty data bucket in the in-memory store, named by configuration."""
+    monkeypatch.setenv(storage.DATA_BUCKET, BUCKET)
+    return FsspecStore.connect(BUCKET, memory_storage)
 
 
-def bucket_keys(s3: Any) -> set[str]:
-    pages = s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET)
-    return {entry["Key"] for page in pages for entry in page.get("Contents", ())}
-
-
-def body(s3: Any, key: str) -> bytes:
-    data: bytes = s3.get_object(Bucket=BUCKET, Key=key)["Body"].read()
-    return data
+def bucket_keys(data: FsspecStore) -> set[str]:
+    return set(data.keys(""))
 
 
 def stage_file(root: Path, key: str, data: bytes | None = None) -> bytes:
@@ -111,40 +87,44 @@ def an_ingest_stage(root: Path) -> dict[str, bytes]:
 
 
 class TestIngestUpload:
-    def test_every_staged_file_lands_at_its_relative_path(self, s3: Any, tmp_path: Path) -> None:
+    def test_every_staged_file_lands_at_its_relative_path(
+        self, data: FsspecStore, tmp_path: Path
+    ) -> None:
         staged = an_ingest_stage(tmp_path)
 
         ingest(["upload", "--stage-dir", str(tmp_path)])
 
-        assert bucket_keys(s3) == set(staged)
+        assert bucket_keys(data) == set(staged)
         for key, contents in staged.items():
-            assert body(s3, key) == contents
+            assert data.get(key) == contents
 
 
 class TestVerifyUpload:
-    def test_a_complete_upload_passes(self, s3: Any, tmp_path: Path) -> None:
+    def test_a_complete_upload_passes(self, data: FsspecStore, tmp_path: Path) -> None:
         an_ingest_stage(tmp_path)
         ingest(["upload", "--stage-dir", str(tmp_path)])
 
         ingest(["verify-upload", "--stage-dir", str(tmp_path)])
 
-    def test_a_missing_key_is_reported(self, s3: Any, tmp_path: Path) -> None:
+    def test_a_missing_key_is_reported(self, data: FsspecStore, tmp_path: Path) -> None:
         staged = an_ingest_stage(tmp_path)
         for key in staged:
             if key != raw_label_key(IMAGE, Split.TRAIN):
-                s3.put_object(Bucket=BUCKET, Key=key, Body=staged[key])
+                data.put(key, staged[key])
 
         with pytest.raises(SystemExit, match=r"1 of 3 staged keys are not in the bucket") as raised:
             ingest(["verify-upload", "--stage-dir", str(tmp_path)])
 
         assert raw_label_key(IMAGE, Split.TRAIN) in str(raised.value)
 
-    def test_keys_this_build_did_not_stage_are_allowed(self, s3: Any, tmp_path: Path) -> None:
+    def test_keys_this_build_did_not_stage_are_allowed(
+        self, data: FsspecStore, tmp_path: Path
+    ) -> None:
         """A later step or a re-ingest leaves keys here that this build never wrote."""
         an_ingest_stage(tmp_path)
         ingest(["upload", "--stage-dir", str(tmp_path)])
-        s3.put_object(Bucket=BUCKET, Key=raw_image_key(OTHER, Split.VAL), Body=b"")
-        s3.put_object(Bucket=BUCKET, Key=f"{partition_prefix(V0)}_partition.json", Body=b"{}")
+        data.put(raw_image_key(OTHER, Split.VAL), b"")
+        data.put(f"{partition_prefix(V0)}_partition.json", b"{}")
 
         ingest(["verify-upload", "--stage-dir", str(tmp_path)])
 
@@ -173,8 +153,10 @@ def fetch_inputs(stage_dir: Path, recorded: Path) -> None:
 
 
 class TestFetchInputs:
-    def test_a_first_run_stages_the_manifest_and_no_record(self, s3: Any, tmp_path: Path) -> None:
-        s3.put_object(Bucket=BUCKET, Key=manifest_key(), Body=b"manifest")
+    def test_a_first_run_stages_the_manifest_and_no_record(
+        self, data: FsspecStore, tmp_path: Path
+    ) -> None:
+        data.put(manifest_key(), b"manifest")
         stage_dir, recorded = tmp_path / "stage", tmp_path / "recorded.json"
 
         fetch_inputs(stage_dir, recorded)
@@ -182,9 +164,11 @@ class TestFetchInputs:
         assert (stage_dir / manifest_key()).read_bytes() == b"manifest"
         assert not recorded.exists()
 
-    def test_a_re_run_stages_the_record_outside_the_tree(self, s3: Any, tmp_path: Path) -> None:
-        s3.put_object(Bucket=BUCKET, Key=manifest_key(), Body=b"manifest")
-        s3.put_object(Bucket=BUCKET, Key=partition_manifest_key(V0), Body=a_record())
+    def test_a_re_run_stages_the_record_outside_the_tree(
+        self, data: FsspecStore, tmp_path: Path
+    ) -> None:
+        data.put(manifest_key(), b"manifest")
+        data.put(partition_manifest_key(V0), a_record())
         stage_dir, recorded = tmp_path / "stage", tmp_path / "recorded.json"
 
         fetch_inputs(stage_dir, recorded)
@@ -193,9 +177,9 @@ class TestFetchInputs:
         assert not (stage_dir / partition_manifest_key(V0)).exists()
 
     def test_a_stale_local_record_is_not_checked_in_place_of_the_bucket(
-        self, s3: Any, tmp_path: Path
+        self, data: FsspecStore, tmp_path: Path
     ) -> None:
-        s3.put_object(Bucket=BUCKET, Key=manifest_key(), Body=b"manifest")
+        data.put(manifest_key(), b"manifest")
         recorded = tmp_path / "recorded.json"
         recorded.write_bytes(a_record(seed=1))
 
@@ -203,7 +187,7 @@ class TestFetchInputs:
 
         assert not recorded.exists()
 
-    def test_an_absent_manifest_stops_the_build(self, s3: Any, tmp_path: Path) -> None:
+    def test_an_absent_manifest_stops_the_build(self, data: FsspecStore, tmp_path: Path) -> None:
         with pytest.raises(SystemExit, match="no manifest"):
             fetch_inputs(tmp_path / "stage", tmp_path / "recorded.json")
 
@@ -232,21 +216,21 @@ def upload(stage_dir: Path) -> None:
 
 
 class TestPartitionUpload:
-    def test_only_the_partition_prefix_is_written(self, s3: Any, tmp_path: Path) -> None:
+    def test_only_the_partition_prefix_is_written(self, data: FsspecStore, tmp_path: Path) -> None:
         written = a_partition_stage(tmp_path)
 
         upload(tmp_path)
 
-        assert bucket_keys(s3) == written
-        assert all(key.startswith(partition_prefix(V0)) for key in bucket_keys(s3))
+        assert bucket_keys(data) == written
+        assert all(key.startswith(partition_prefix(V0)) for key in bucket_keys(data))
 
-    def test_the_record_that_landed_is_checked(self, s3: Any, tmp_path: Path) -> None:
+    def test_the_record_that_landed_is_checked(self, data: FsspecStore, tmp_path: Path) -> None:
         a_partition_stage(tmp_path)
         stage_file(tmp_path, partition_manifest_key(V0), a_record(seed=1))
 
         with pytest.raises(SystemExit, match="different seed"):
             upload(tmp_path)
 
-    def test_an_unstaged_partition_is_refused(self, s3: Any, tmp_path: Path) -> None:
+    def test_an_unstaged_partition_is_refused(self, data: FsspecStore, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="nothing to upload"):
             upload(tmp_path)

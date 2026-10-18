@@ -68,7 +68,7 @@ from edge_ml_flywheel.conventions import (
 from edge_ml_flywheel.fleet import detect, telemetry
 from edge_ml_flywheel.scoring import detections
 from edge_ml_flywheel.storage import ObjectStore
-from edge_ml_flywheel.storage.s3 import S3Store
+from edge_ml_flywheel.storage.filesystem import FsspecStore
 
 log = logging.getLogger("edge_ml_flywheel.fleet.replay")
 
@@ -353,7 +353,7 @@ def _run(args: argparse.Namespace) -> None:
     ids = frame_ids(args.frames)
     log.info("%s scoring %d frames with %s, start %d", args.thing, len(ids), version, started)
 
-    frames = S3Store.connect(args.bucket)
+    frames = FsspecStore.connect(args.bucket)
     iot = boto3.client("iot-data", endpoint_url=f"https://{args.endpoint}")
 
     # Cold start is the session plus the first inference, and deliberately not
@@ -387,7 +387,7 @@ def _run(args: argparse.Namespace) -> None:
     # is the evidence for the one after it: a reader that sees the summary can
     # open the detections, and an execution that is resumed can rank them. The
     # reverse order would resume a cycle onto a key that is still uploading.
-    S3Store.connect(args.detections_bucket).upload(parquet, args.detections_key)
+    FsspecStore.connect(args.detections_bucket).upload(parquet, args.detections_key)
     log.info("wrote %d detections to s3://%s/%s", rows, args.detections_bucket, args.detections_key)
     parquet.unlink(missing_ok=True)
 

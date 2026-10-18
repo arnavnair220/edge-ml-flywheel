@@ -88,6 +88,13 @@ ignore_missing_imports = true
 module = ["boto3.*", "botocore.*"]
 ignore_missing_imports = true
 
+# Same situation again: fsspec ships no `py.typed` marker, and neither does
+# `s3fs`. `storage.filesystem` is the only module that imports it, and
+# annotates what it returns, so nothing untyped reaches the callers.
+[[tool.mypy.overrides]]
+module = ["fsspec.*", "s3fs.*"]
+ignore_missing_imports = true
+
 # The training container's packages, which are deliberately not in the lockfile:
 # they are installed by pip inside the prebuilt image from
 # `container/requirements.txt`, against a torch build the image was assembled
@@ -121,13 +128,16 @@ dev = [
     # whether a real engine refuses the second write.
     #
     # `s3` for the storage contract suite, which runs every `ObjectStore`
-    # operation against moto on every run.
-    "moto[dynamodb,s3]>=5",
+    # operation against moto on every run. `server` because `s3fs` sends its
+    # requests through aiohttp, which moto's in-process mock does not intercept;
+    # the suite starts moto as a threaded server and points the store at it.
+    "moto[dynamodb,s3,server]>=5",
     # The same suite against a real MinIO server, in a container started for the
     # session. moto is a model of S3 written by the people who wrote the client;
     # MinIO is a second implementation of the API, which is the claim the
     # storage layer makes. Skipped where no Docker daemon answers.
     "testcontainers[minio]>=4",
+    {include-group = "storage"},
 ]
 
 # A group rather than a project dependency, because these are the ingest
@@ -162,6 +172,16 @@ ingest = [
 # `buildspecs/partition.yml` names this group rather than relying on that.
 run = [
     "boto3>=1.35",
+    {include-group = "storage"},
+]
+
+# The object store, for every job that reads or writes one. `fsspec` is the
+# interface and `s3fs` its S3 implementation, which reaches AWS S3 and MinIO.
+# `gcsfs` joins when a job first runs on GCS. Included by every group whose job
+# opens a store, and by `dev` for the test suite.
+storage = [
+    "fsspec>=2025.9",
+    "s3fs>=2025.9",
 ]
 
 # The operator's side of a training job: reading the labeled set out of parquet
@@ -178,4 +198,5 @@ run = [
 training = [
     "boto3>=1.35",
     "pyarrow>=18",
+    {include-group = "storage"},
 ]

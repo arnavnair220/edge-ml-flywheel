@@ -1,13 +1,16 @@
-"""The storage contract, run against every S3-compatible backend this project uses.
+"""The storage contract, run against every backend this project uses.
 
 One suite, parametrized over backends, because the claim `storage` makes is that
 the same code works against all of them. A test written per backend would prove
-three implementations agree with three sets of expectations.
+four implementations agree with four sets of expectations.
 
-- **moto** runs on every invocation. It is in-process and needs nothing.
+- **memory** runs on every invocation. It is fsspec's in-process filesystem,
+  and the one the job tests run against.
+- **moto** runs on every invocation, as a threaded server on loopback. It is a
+  model of the S3 API, reached through `s3fs` exactly as AWS is.
 - **MinIO** runs in a container started once for the session, and is skipped
   where no Docker daemon answers. It is the backend the local cluster uses, and
-  a second, independent implementation of the API.
+  a second, independent implementation of the S3 API.
 - **AWS S3** runs only when `STORAGE_TEST_AWS_BUCKET` names a bucket, with
   credentials and region from the caller's environment. Each test writes under
   its own prefix and removes what it wrote.
@@ -29,15 +32,14 @@ import boto3
 import docker
 import pytest
 from botocore.config import Config
-from botocore.exceptions import ClientError
-from botocore.stub import Stubber
-from moto import mock_aws
+from fsspec.implementations.memory import MemoryFileSystem
 from testcontainers.community.minio import MinioContainer
 
 from edge_ml_flywheel.storage import (
     ARTIFACTS_BUCKET,
     DATA_BUCKET,
     ENDPOINT_URL,
+    PROTOCOL,
     REGION,
     TELEMETRY_BUCKET,
     NoSuchKeyError,
@@ -46,7 +48,7 @@ from edge_ml_flywheel.storage import (
     buckets,
     tree,
 )
-from edge_ml_flywheel.storage.s3 import S3Store, client
+from edge_ml_flywheel.storage.filesystem import FsspecStore, filesystem
 
 MOTO_REGION: Final = "us-east-1"
 
@@ -60,24 +62,23 @@ MINIO_IMAGE: Final = (
     "@sha256:709099319add48dfb44aa596a7070d3ddd8dd04d7ae881765719aec29df9e510"
 )
 
-# The bucket the MinIO container and moto are given. AWS uses the caller's.
+# The bucket the local backends are given. AWS uses the caller's.
 LOCAL_BUCKET: Final = "storage-contract"
 
 # The opt-in for AWS S3. Unset means the backend is skipped, so a plain
 # `pytest` never writes to a real account.
 AWS_BUCKET_VARIABLE: Final = "STORAGE_TEST_AWS_BUCKET"
 
-# One more than a single `ListObjectsV2` page, which every backend caps at 1,000.
+# One more than a single `ListObjectsV2` page, which every S3 backend caps at 1,000.
 PAGED: Final = 1_001
 
 
 @dataclass(frozen=True, slots=True)
 class Backend:
-    """A store under test, and the raw client that set it up and cleans it up."""
+    """A store under test, and the prefix this test's keys live under."""
 
     name: str
-    store: S3Store
-    admin: Any
+    store: FsspecStore
     prefix: str
 
     def key(self, suffix: str) -> str:
@@ -104,12 +105,17 @@ def minio() -> Iterator[tuple[StorageConfig, str, str]]:
             f"{container.get_exposed_port(container.port)}"
         )
         config = StorageConfig(endpoint_url=endpoint, region=MOTO_REGION)
-        admin = _minio_client(config, container.access_key, container.secret_key)
+        admin = _admin(config, container.access_key, container.secret_key)
         admin.create_bucket(Bucket=LOCAL_BUCKET)
         yield config, container.access_key, container.secret_key
 
 
-def _minio_client(config: StorageConfig, access_key: str, secret_key: str) -> Any:
+def _admin(config: StorageConfig, access_key: str, secret_key: str) -> Any:
+    """A plain boto3 client, which sets a backend up and cleans it up.
+
+    Outside the store on purpose: a fixture that wrote and removed objects
+    through the code under test would pass when that code was wrong both ways.
+    """
     return boto3.session.Session(
         aws_access_key_id=access_key, aws_secret_access_key=secret_key
     ).client(
@@ -124,7 +130,7 @@ def _fake_credentials(monkeypatch: pytest.MonkeyPatch, key: str, secret: str) ->
     """Credentials in the environment, which is where the SDK's chain looks first.
 
     Set for moto as well as MinIO, for `test_base_weights`' reason: a test whose
-    mock failed to engage would otherwise reach a real account.
+    endpoint failed to apply would otherwise reach a real account.
     """
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", key)
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", secret)
@@ -132,24 +138,31 @@ def _fake_credentials(monkeypatch: pytest.MonkeyPatch, key: str, secret: str) ->
     monkeypatch.delenv("AWS_PROFILE", raising=False)
 
 
-@pytest.fixture(params=["moto", "minio", "aws"])
+@pytest.fixture(params=["memory", "moto", "minio", "aws"])
 def backend(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[Backend]:
     prefix = f"contract/{uuid.uuid4().hex}/"
 
+    if request.param == "memory":
+        config = request.getfixturevalue("memory_storage")
+        yield Backend("memory", FsspecStore.connect(LOCAL_BUCKET, config), prefix)
+        return
+
     if request.param == "moto":
         _fake_credentials(monkeypatch, "testing", "testing")
-        with mock_aws():
-            config = StorageConfig(region=MOTO_REGION)
-            admin = client(config)
-            admin.create_bucket(Bucket=LOCAL_BUCKET)
-            yield Backend("moto", S3Store.connect(LOCAL_BUCKET, config), admin, prefix)
+        config = StorageConfig(
+            endpoint_url=request.getfixturevalue("moto_server"), region=MOTO_REGION
+        )
+        admin = _admin(config, "testing", "testing")
+        admin.create_bucket(Bucket=LOCAL_BUCKET)
+        yield Backend("moto", FsspecStore.connect(LOCAL_BUCKET, config), prefix)
+        _remove(admin, LOCAL_BUCKET, prefix)
         return
 
     if request.param == "minio":
         config, access_key, secret_key = request.getfixturevalue("minio")
         _fake_credentials(monkeypatch, access_key, secret_key)
-        admin = _minio_client(config, access_key, secret_key)
-        yield Backend("minio", S3Store.connect(LOCAL_BUCKET, config), admin, prefix)
+        admin = _admin(config, access_key, secret_key)
+        yield Backend("minio", FsspecStore.connect(LOCAL_BUCKET, config), prefix)
         _remove(admin, LOCAL_BUCKET, prefix)
         return
 
@@ -157,9 +170,8 @@ def backend(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> 
     if not bucket:
         pytest.skip(f"{AWS_BUCKET_VARIABLE} is not set, so AWS S3 is not tested")
     config = StorageConfig.from_env()
-    admin = client(config)
-    yield Backend("aws", S3Store.connect(bucket, config), admin, prefix)
-    _remove(admin, bucket, prefix)
+    yield Backend("aws", FsspecStore.connect(bucket, config), prefix)
+    _remove(boto3.session.Session().client("s3", region_name=config.region), bucket, prefix)
 
 
 def _remove(admin: Any, bucket: str, prefix: str) -> None:
@@ -232,8 +244,30 @@ class TestKeys:
             backend.key("in/b"),
         ]
 
+    def test_a_prefix_need_not_end_at_a_directory(self, backend: Backend) -> None:
+        """A key prefix, not a path: `labels/cohort=` names keys in several directories."""
+        for suffix in ("cohort=a/x", "cohort=b/y", "other/z"):
+            backend.store.put(backend.key(suffix), b"")
+
+        assert sorted(backend.store.keys(backend.key("cohort="))) == [
+            backend.key("cohort=a/x"),
+            backend.key("cohort=b/y"),
+        ]
+
     def test_an_empty_prefix_lists_nothing(self, backend: Backend) -> None:
         assert list(backend.store.keys(backend.key("nothing/"))) == []
+
+    def test_a_key_written_after_a_listing_is_listed(self, backend: Backend) -> None:
+        """No listing is cached, so a second listing sees what the first could not."""
+        backend.store.put(backend.key("late/a"), b"")
+        list(backend.store.keys(backend.key("late/")))
+
+        backend.store.put(backend.key("late/b"), b"")
+
+        assert sorted(backend.store.keys(backend.key("late/"))) == [
+            backend.key("late/a"),
+            backend.key("late/b"),
+        ]
 
     def test_the_listing_continues_past_one_page(self, backend: Backend) -> None:
         """A listing that stopped at the first page would drop images silently."""
@@ -264,6 +298,21 @@ class TestExists:
 
         assert not backend.store.exists(backend.key("a/b"))
 
+    def test_a_key_written_after_an_absent_answer_exists(self, backend: Backend) -> None:
+        """A first run asks, finds nothing, writes, and asks again."""
+        assert not backend.store.exists(backend.key("record.json"))
+
+        backend.store.put(backend.key("record.json"), b"{}")
+
+        assert backend.store.exists(backend.key("record.json"))
+
+
+class _Refusing(MemoryFileSystem):  # type: ignore[misc]
+    """A filesystem that refuses every read, the way a denied identity is refused."""
+
+    def cat_file(self, path: str, *args: Any, **kwargs: Any) -> bytes:
+        raise PermissionError(f"refused {path}")
+
 
 class TestDenied:
     """A refused read stays an error. `NoSuchKeyError` would turn a permission fault into
@@ -271,15 +320,10 @@ class TestDenied:
     """
 
     def test_a_denied_get_is_not_missing(self) -> None:
-        s3 = boto3.session.Session(
-            aws_access_key_id="testing", aws_secret_access_key="testing"
-        ).client("s3", region_name=MOTO_REGION)
-        with Stubber(s3) as stub:
-            stub.add_client_error(
-                "get_object", service_error_code="AccessDenied", http_status_code=403
-            )
-            with pytest.raises(ClientError) as raised:
-                S3Store("bucket", s3).get("labels/cohort=eval/x.json")
+        store = FsspecStore("bucket", _Refusing(skip_instance_cache=True))
+
+        with pytest.raises(PermissionError) as raised:
+            store.get("labels/cohort=eval/x.json")
 
         assert not isinstance(raised.value, NoSuchKeyError)
 
@@ -288,16 +332,18 @@ class TestDenied:
         minio: tuple[StorageConfig, str, str],
         tmp_path: Path,
     ) -> None:
-        """Against a real server, for both read paths: a GET and a download's HEAD."""
+        """Against a real server, for both read paths: a GET and a download."""
         config, access_key, secret_key = minio
-        _minio_client(config, access_key, secret_key).put_object(
+        _admin(config, access_key, secret_key).put_object(
             Bucket=LOCAL_BUCKET, Key="denied/x", Body=b"x"
         )
-        stranger = S3Store(LOCAL_BUCKET, _minio_client(config, "stranger", "not-the-secret"))
+        stranger = FsspecStore(
+            LOCAL_BUCKET, filesystem(config, key="stranger", secret="not-the-secret")
+        )
 
-        with pytest.raises(ClientError) as got:
+        with pytest.raises(PermissionError) as got:
             stranger.get("denied/x")
-        with pytest.raises(ClientError) as downloaded:
+        with pytest.raises(PermissionError) as downloaded:
             stranger.download("denied/x", tmp_path / "x")
 
         assert not isinstance(got.value, NoSuchKeyError)
@@ -307,7 +353,7 @@ class TestDenied:
 class _RefusesOnePut:
     """A store that refuses writes to one key and passes everything else through."""
 
-    def __init__(self, store: S3Store, refused: str) -> None:
+    def __init__(self, store: FsspecStore, refused: str) -> None:
         self._store = store
         self._refused = refused
 
@@ -356,30 +402,37 @@ class TestTreeUpload:
 
 
 class TestConfig:
-    def test_unset_means_the_sdk_decides(self) -> None:
-        assert StorageConfig.from_env({}) == StorageConfig(endpoint_url=None, region=None)
+    def test_unset_means_s3_and_the_sdk_decides(self) -> None:
+        assert StorageConfig.from_env({}) == StorageConfig(
+            protocol="s3", endpoint_url=None, region=None
+        )
 
     def test_an_empty_value_is_unset(self) -> None:
         """A manifest that templates an absent value writes an empty string."""
-        assert StorageConfig.from_env({ENDPOINT_URL: "", REGION: ""}) == StorageConfig()
-
-    def test_set_values_are_read(self) -> None:
-        environ = {ENDPOINT_URL: "http://minio:9000", REGION: "us-east-1"}
-
-        assert StorageConfig.from_env(environ) == StorageConfig(
-            endpoint_url="http://minio:9000", region="us-east-1"
+        assert StorageConfig.from_env({PROTOCOL: "", ENDPOINT_URL: "", REGION: ""}) == (
+            StorageConfig()
         )
 
-    def test_an_endpoint_switches_to_path_style(self) -> None:
-        configured = client(StorageConfig(endpoint_url="http://minio:9000", region="us-east-1"))
+    def test_set_values_are_read(self) -> None:
+        environ = {PROTOCOL: "s3", ENDPOINT_URL: "http://minio:9000", REGION: "us-east-1"}
 
-        assert configured.meta.config.s3["addressing_style"] == "path"
-        assert configured.meta.endpoint_url == "http://minio:9000"
+        assert StorageConfig.from_env(environ) == StorageConfig(
+            protocol="s3", endpoint_url="http://minio:9000", region="us-east-1"
+        )
+
+    def test_the_protocol_selects_the_filesystem(self) -> None:
+        assert isinstance(filesystem(StorageConfig(protocol="memory")), MemoryFileSystem)
+
+    def test_an_endpoint_switches_to_path_style(self) -> None:
+        configured = filesystem(StorageConfig(endpoint_url="http://minio:9000", region="us-east-1"))
+
+        assert configured.config_kwargs["s3"]["addressing_style"] == "path"
+        assert configured.endpoint_url == "http://minio:9000"
 
     def test_no_endpoint_leaves_aws_addressing_alone(self) -> None:
-        configured = client(StorageConfig(region="us-east-1"))
+        configured = filesystem(StorageConfig(region="us-east-1"))
 
-        assert (configured.meta.config.s3 or {}).get("addressing_style") != "path"
+        assert "s3" not in configured.config_kwargs
 
 
 class TestBucketNames:

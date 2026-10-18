@@ -2,7 +2,7 @@
 
 `buildspecs/partition.yml` calls these in order. Every copy between the bucket
 and local disk is one of these commands, through `storage.ObjectStore`, so the
-job runs against any S3-compatible store and no key is spelled in the buildspec:
+job runs against any store fsspec reaches and no key is spelled in the buildspec:
 
 - `fetch-inputs` stages the manifest and the version's recorded draw, if any.
 - `stage-labels` stages the label documents the draw names, for the reason

@@ -1,8 +1,9 @@
 # Storage
 
 Every job reads and writes objects through one interface, `edge_ml_flywheel.storage.ObjectStore`,
-implemented once against the S3-compatible API. The same code runs against AWS S3, MinIO and GCS;
-the provider is selected by configuration.
+implemented once over [fsspec](https://filesystem-spec.readthedocs.io/). The same code runs against
+AWS S3 and MinIO through `s3fs`, and against GCS through `gcsfs`; the provider is selected by
+configuration.
 
 ---
 
@@ -22,8 +23,12 @@ jobs perform; nothing else is part of the contract.
 
 `bucket` names the bound bucket, for log lines and error messages.
 
-`NoSuchKeyError` is raised only for an absent key. A denied request propagates as the provider's
-error, so an access failure is never reported as a missing object.
+`NoSuchKeyError` is raised only for an absent key, which fsspec reports as `FileNotFoundError`. A
+denied request propagates as the filesystem's error, `PermissionError` for `s3fs`, so an access
+failure is never reported as a missing object.
+
+`keys` sends `prefix` to the provider as the listing's own prefix, so it is a key prefix and need
+not end at a `/`.
 
 `exists` is implemented as a listing rather than a `HEAD`. A `HEAD` on an absent key returns 403
 rather than 404 to an identity without list permission, which would make the answer depend on the
@@ -31,23 +36,29 @@ grant rather than on the bucket.
 
 ## Implementation
 
-`edge_ml_flywheel.storage.s3.S3Store` is the only implementation. `S3Store.connect(bucket)` builds
-a client from `StorageConfig.from_env()`. A caller that shares one store across a thread pool
-passes `pool=` with its thread count, so threads do not queue for connections.
+`edge_ml_flywheel.storage.filesystem.FsspecStore` is the only implementation. It holds a bucket
+name and an fsspec filesystem, and addresses each object as `<bucket>/<key>`.
+`FsspecStore.connect(bucket)` builds the filesystem from `StorageConfig.from_env()`. A caller that
+shares one store across a thread pool passes `pool=` with its thread count, so threads do not
+queue for connections.
 
-All clients retry in the SDK's `standard` mode, up to five attempts. When an endpoint is
-configured, the client also:
+For the `s3` protocol, the filesystem:
 
-- uses path-style addressing, which MinIO requires; and
-- sends checksums only when an operation requires one, because GCS interoperability rejects the
-  SDK's default checksum headers.
+- retries in botocore's `standard` mode, up to five attempts;
+- keeps no listings cache, so a key written after a listing is seen by the next `keys` or
+  `exists`; and
+- uses path-style addressing when an endpoint is configured, which MinIO requires.
+
+`FsspecStore.from_session(aws, bucket)` builds an `s3` store from a boto3 session's credentials
+and region, for old-stack callers that hold a session rather than storage configuration.
 
 ## Configuration
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `STORAGE_ENDPOINT_URL` | No | The S3-compatible endpoint. Unset for AWS S3. |
-| `STORAGE_REGION` | No | The region passed to the client. Unset to use the SDK's default chain. |
+| `STORAGE_PROTOCOL` | No | The fsspec protocol: `s3` for AWS S3 and MinIO, `gs` for GCS, `memory` for tests. Defaults to `s3`. |
+| `STORAGE_ENDPOINT_URL` | No | The S3 endpoint, for `s3` only. Unset for AWS S3. |
+| `STORAGE_REGION` | No | The region, for `s3` only. Unset to use the SDK's default chain. |
 | `STORAGE_DATA_BUCKET` | Per job | The data bucket: raw images and labels, manifest, partitions, purchases. |
 | `STORAGE_ARTIFACTS_BUCKET` | Per job | Models, rankings, detections, reports, staged code. |
 | `STORAGE_TELEMETRY_BUCKET` | Per job | Device telemetry. |
@@ -56,14 +67,19 @@ A job requires only the bucket variables for the buckets it opens, and exits nam
 unset. Bucket names are never derived from a cloud account; the infrastructure that creates the
 buckets supplies their names.
 
-Credentials are not configured here. The SDK's default chain resolves them:
+Credentials are not configured here. Each filesystem's default chain resolves them:
 
-| Environment | Credentials | `STORAGE_ENDPOINT_URL` |
-|---|---|---|
-| AWS (EKS) | Workload identity (IRSA) | unset |
-| GCP (GKE) | HMAC key for the job's service account | `https://storage.googleapis.com` |
-| Local (kind) | MinIO access key, as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` | the MinIO service URL |
-| Device | Greengrass token exchange role | unset |
+| Environment | `STORAGE_PROTOCOL` | Credentials | `STORAGE_ENDPOINT_URL` |
+|---|---|---|---|
+| AWS (EKS) | `s3` | Workload identity (IRSA) | unset |
+| GCP (GKE) | `gs` | Workload Identity, through `gcsfs` | unset |
+| Local (kind) | `s3` | MinIO access key, as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` | the MinIO service URL |
+| Device | `s3` | Greengrass token exchange role | unset |
+
+GCS is reached through its own API rather than its S3 interoperability layer, so a GKE job needs
+no HMAC key: its Kubernetes service account is bound to a Google service account, and `gcsfs`
+picks up that identity. `gcsfs` is added to the `storage` dependency group when a job first runs
+on GCS.
 
 The local object store is MinIO, run from `cgr.dev/chainguard/minio` pinned by digest. MinIO is
 used because it enforces per-prefix bucket policies, which the local check of the `eval` label
@@ -113,12 +129,14 @@ The store applies no access rule of its own. Two mechanisms enforce what a job m
 
 `tests/test_job_inputs.py` checks each job's fetched inputs against a bucket that also holds the
 labels the job is denied. `tests/test_evaluation_job.py` runs the evaluation job end to end
-against the store.
+against the store. Both use fsspec's in-memory filesystem, through the `memory_storage` fixture
+in `tests/conftest.py`, which empties it before and after each test.
 
 `tests/test_storage.py` runs one contract suite against every backend:
 
 | Backend | When it runs |
 |---|---|
-| moto (in-process S3) | Always. |
+| fsspec memory | Always. |
+| moto (threaded server on loopback) | Always. `s3fs` sends requests through aiohttp, which moto's in-process mock does not intercept. |
 | MinIO (container) | When a Docker daemon is reachable; skipped otherwise. |
 | AWS S3 | When `STORAGE_TEST_AWS_BUCKET` names a bucket, with credentials and region from the environment. Each test writes under its own prefix and removes what it wrote. |

@@ -6,11 +6,11 @@ and ask whether one key is there. A capability nothing calls is surface a second
 implementation would have to match for no reader.
 
 **Where the store is comes from configuration, never from the provider.** The
-endpoint, the region and the three bucket names are environment variables, so
-the same code reaches AWS S3, MinIO and GCS through its S3-compatible API by a
-change of settings rather than of code. Credentials are not among them: the
-SDK's default chain resolves them, which is environment keys locally and the
-cluster's workload identity in a cloud.
+fsspec protocol, the endpoint, the region and the three bucket names are
+environment variables, so the same code reaches AWS S3, MinIO and GCS by a
+change of settings rather than of code. Credentials are not among them: each
+filesystem's default chain resolves them, which is environment keys locally and
+the cluster's workload identity in a cloud.
 
 **The store holds no access rule of its own.** What a job may read is decided by
 the identity its credentials belong to and, for labels, by the key builders in
@@ -28,6 +28,7 @@ from edge_ml_flywheel.conventions import Buckets
 
 # The variables, named once. `docs/storage.md` lists them for an operator; this
 # is the list the code reads.
+PROTOCOL = "STORAGE_PROTOCOL"
 ENDPOINT_URL = "STORAGE_ENDPOINT_URL"
 REGION = "STORAGE_REGION"
 DATA_BUCKET = "STORAGE_DATA_BUCKET"
@@ -73,21 +74,24 @@ class ObjectStore(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class StorageConfig:
-    """Where the S3-compatible API is.
+    """Which fsspec filesystem holds the buckets, and where its API is.
 
-    `endpoint_url` is `None` for AWS S3, which the SDK resolves from the region.
-    Any other provider is an explicit URL: MinIO's service address locally, and
-    `https://storage.googleapis.com` for GCS. `region` is `None` to leave it to
-    the SDK's own chain, which is what a pod on EKS or a Greengrass device
-    already sets.
+    `protocol` is `s3` for AWS S3 and MinIO, `gs` for GCS, and `memory` for an
+    in-process store in tests. `endpoint_url` and `region` apply to `s3` only.
+    `endpoint_url` is `None` for AWS S3, which the SDK resolves from the region,
+    and MinIO's service address locally. `region` is `None` to leave it to the
+    SDK's own chain, which is what a pod on EKS or a Greengrass device already
+    sets.
     """
 
+    protocol: str = "s3"
     endpoint_url: str | None = None
     region: str | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] = os.environ) -> Self:
         return cls(
+            protocol=environ.get(PROTOCOL) or "s3",
             endpoint_url=environ.get(ENDPOINT_URL) or None,
             region=environ.get(REGION) or None,
         )
