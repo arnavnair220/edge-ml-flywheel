@@ -1,0 +1,24 @@
+# The cluster check: the run image, pulled from the local registry, prints usage
+# on the gpu node. See hack/kind-check.sh.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kind-check
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        pool: gpu
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: run
+          image: localhost:5001/edge-ml-flywheel/run:dev
+          # The tag is rebuilt in place, so always pull the latest push.
+          imagePullPolicy: Always
+          args: ["--help"]

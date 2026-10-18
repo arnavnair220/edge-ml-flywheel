@@ -64,6 +64,9 @@ aws.json
 # Local working notes, not for publication
 local/
 
+# Pinned tools the Makefile downloads
+/bin/
+
 # Agent tooling config, local only
 .claude/
 
