@@ -63,11 +63,11 @@ Credentials are not configured here. The SDK's default chain resolves them:
 | AWS (EKS) | Workload identity (IRSA) | unset |
 | GCP (GKE) | HMAC key for the job's service account | `https://storage.googleapis.com` |
 | Local (kind) | MinIO access key, as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` | the MinIO service URL |
+| Device | Greengrass token exchange role | unset |
 
 The local object store is MinIO, run from `cgr.dev/chainguard/minio` pinned by digest. MinIO is
 used because it enforces per-prefix bucket policies, which the local check of the `eval` label
 boundary requires.
-| Device | Greengrass token exchange role | unset |
 
 ## Job inputs and outputs
 
@@ -79,13 +79,16 @@ arguments, never passed as paths.
 
 `storage.tree.fetch` copies many small objects with a thread pool and attempts every key before
 reporting failures, so a missing object and a denied prefix are distinguishable by count.
+`storage.tree.upload` is the same in the other direction: every file under a local directory is
+written to the given prefix plus its relative path, so it writes nothing outside that prefix.
 
 | Job | Arguments that name its keys | Reads | Writes |
 |---|---|---|---|
 | Training | `--version`, `--partition_version` | Images named by `training_manifest_key`; `cohort=bootstrap` labels; the run's purchases; base weights | `model.pt`, `model.onnx` and `sha256sums` at `model_artifact_key` |
 | Scoring | `--version`, `--seed`, `--precision` | The model at `model_artifact_key` for the precision; images named by `scoring_manifest_key` | Detections at `detections_key` |
 | Evaluation | `--version`, `--seeds`, `--partition_version`, `--champion`, `--artifact_bytes` | The `eval` manifest; `cohort=eval` labels; each seed's detections; int8 detections when judged; the champion's `eval_prefix` | Match caches and metrics under `eval_prefix`; the gate report at `gate_report_key` |
-| Partition | `--partition-version` | Label documents for the labeled cohorts | Nothing; the build uploads its staged tree |
+| Ingest | `--stage-dir` | Nothing; it lists `raw/` and `derived/` to verify the upload | Every staged file, at its path relative to the stage directory |
+| Partition | `--partition-version` | The manifest under `MANIFEST_PREFIX`; the version's `_partition.json`, absent on a first run; label documents for the labeled cohorts | The staged partition prefix only, then reads `_partition.json` back to verify it |
 
 The input modules (`training.inputs`, `scoring.inputs`, `evaluation.inputs`) hold the key
 derivation and import no GPU stack, so each job's reach into the store is tested directly.

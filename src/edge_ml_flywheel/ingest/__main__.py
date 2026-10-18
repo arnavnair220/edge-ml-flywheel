@@ -19,11 +19,15 @@ from pathlib import Path
 from edge_ml_flywheel.ingest import manifest, provenance
 from edge_ml_flywheel.ingest.source import ARCHIVES
 from edge_ml_flywheel.ingest.stage import stage
+from edge_ml_flywheel.storage import DATA_BUCKET, ObjectStore, bucket_name, tree
+from edge_ml_flywheel.storage.s3 import S3Store
 
 log = logging.getLogger("edge_ml_flywheel.ingest")
 
-# `aws s3 ls --recursive` prints date, time, size and key.
-_LISTING_FIELDS = 4
+# The prefixes ingest writes, listed separately: the ingest role's ListBucket is
+# conditioned on an `s3:prefix` of one of these, so a root listing is denied by
+# design -- it cannot enumerate the artifacts of runs it has nothing to do with.
+_WRITTEN_PREFIXES = ("raw/", "derived/")
 
 
 def _add_host(parser: argparse.ArgumentParser) -> None:
@@ -69,9 +73,11 @@ def _parser() -> argparse.ArgumentParser:
     prov.add_argument("--stage-dir", type=Path, required=True)
     prov.add_argument("--work-dir", type=Path, required=True)
 
-    uploaded = sub.add_parser("verify-upload", help="check every staged key arrived in S3")
+    sent = sub.add_parser("upload", help="copy the staged tree to the data bucket")
+    sent.add_argument("--stage-dir", type=Path, required=True)
+
+    uploaded = sub.add_parser("verify-upload", help="check every staged key arrived in the bucket")
     uploaded.add_argument("--stage-dir", type=Path, required=True)
-    uploaded.add_argument("--listing", type=Path, required=True)
 
     return parser
 
@@ -93,27 +99,33 @@ def _staged_keys(stage_dir: Path) -> set[str]:
     }
 
 
-def _listed_keys(listing: Path) -> set[str]:
-    """Keys out of `aws s3 ls --recursive` output.
+def _data_store() -> ObjectStore:
+    """The data bucket, behind a store sized for the upload's thread pool."""
+    return S3Store.connect(bucket_name(DATA_BUCKET), pool=tree.WORKERS)
 
-    Lines are `<date> <time> <size> <key>`. Zero-byte entries whose key ends in
-    a slash are the console's directory placeholders and are not objects anyone
-    staged.
+
+def _upload(store: ObjectStore, stage_dir: Path) -> None:
+    """The staged tree, every file at the key it was staged at.
+
+    160,000 small objects, so the request rate is the whole cost of this step,
+    and `tree.upload` spends it on a thread pool.
     """
-    keys: set[str] = set()
-    for line in listing.read_text(encoding="utf-8").splitlines():
-        parts = line.split(maxsplit=_LISTING_FIELDS - 1)
-        if len(parts) != _LISTING_FIELDS:
-            continue
-        key = parts[-1]
-        if not key.endswith("/"):
-            keys.add(key)
-    return keys
+    tree.upload(store, stage_dir, what="staged files")
 
 
-def _verify_upload(stage_dir: Path, listing: Path) -> None:
+def _listed_keys(store: ObjectStore) -> set[str]:
+    """Every key under the prefixes ingest writes, one listing per prefix."""
+    return {key for prefix in _WRITTEN_PREFIXES for key in store.keys(prefix)}
+
+
+def _verify_upload(store: ObjectStore, stage_dir: Path) -> None:
+    """The check the pre-upload suite structurally cannot make: that every staged key arrived.
+
+    Catches a partial upload, where the earlier ID-set check catches a partial
+    download.
+    """
     staged = _staged_keys(stage_dir)
-    listed = _listed_keys(listing)
+    listed = _listed_keys(store)
     missing = staged - listed
 
     if missing:
@@ -156,8 +168,11 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "provenance":
         provenance.write(args.stage_dir, args.work_dir)
 
+    elif args.command == "upload":
+        _upload(_data_store(), args.stage_dir)
+
     elif args.command == "verify-upload":
-        _verify_upload(args.stage_dir, args.listing)
+        _verify_upload(_data_store(), args.stage_dir)
 
 
 if __name__ == "__main__":

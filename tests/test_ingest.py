@@ -35,7 +35,7 @@ from edge_ml_flywheel.conventions import (
     raw_label_key,
 )
 from edge_ml_flywheel.ingest import manifest as manifest_module
-from edge_ml_flywheel.ingest.__main__ import _listed_keys, _parser, _require_host, _staged_keys
+from edge_ml_flywheel.ingest.__main__ import _parser, _require_host, _staged_keys
 from edge_ml_flywheel.ingest.images import inspect_image
 from edge_ml_flywheel.ingest.labels import parse_label
 from edge_ml_flywheel.ingest.provenance import verify_archive
@@ -51,11 +51,11 @@ BUILDSPEC = Path(__file__).resolve().parent.parent / "buildspecs" / "ingest.yml"
 # choices, so adding a subcommand is a decision about whether the buildspec
 # should call it rather than a line that updates itself.
 SUBCOMMANDS = frozenset(
-    {"url", "verify-archives", "stage", "manifest", "provenance", "verify-upload"}
+    {"url", "verify-archives", "stage", "manifest", "provenance", "upload", "verify-upload"}
 )
 
 # `url` is called twice, once per archive.
-BUILDSPEC_INVOCATIONS = 7
+BUILDSPEC_INVOCATIONS = 8
 
 _INVOCATION = re.compile(r"python -m edge_ml_flywheel\.ingest\s+(.+)")
 
@@ -473,28 +473,6 @@ class TestUploadVerification:
     def test_staged_keys_are_relative_posix_paths(self, tmp_path: Path) -> None:
         an_image(tmp_path / raw_image_key(IMAGE, Split.TRAIN))
         assert _staged_keys(tmp_path) == {raw_image_key(IMAGE, Split.TRAIN)}
-
-    def test_listing_lines_become_keys(self, tmp_path: Path) -> None:
-        listing = tmp_path / "uploaded.txt"
-        listing.write_text(
-            "2026-08-15 12:00:00      58123 raw/images/100k/train/a.jpg\n"
-            "2026-08-15 12:00:01       1024 raw/labels/scalabel/train/a.json\n",
-            encoding="utf-8",
-        )
-        assert _listed_keys(listing) == {
-            "raw/images/100k/train/a.jpg",
-            "raw/labels/scalabel/train/a.json",
-        }
-
-    def test_directory_placeholders_are_not_objects(self, tmp_path: Path) -> None:
-        listing = tmp_path / "uploaded.txt"
-        listing.write_text(
-            "                           PRE raw/\n"
-            "2026-08-15 12:00:00          0 raw/images/\n"
-            "2026-08-15 12:00:00      58123 raw/images/100k/train/a.jpg\n",
-            encoding="utf-8",
-        )
-        assert _listed_keys(listing) == {"raw/images/100k/train/a.jpg"}
 
 
 # --- the command line the buildspec actually types ----------------------------

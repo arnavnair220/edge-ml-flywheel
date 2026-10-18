@@ -1,20 +1,22 @@
-"""Copying many objects onto local disk, below one prefix.
+"""Copying many objects between the store and local disk, below one prefix.
 
-An object lands at `root / <key with prefix removed>`. With no prefix that is
-`ingest.stage`'s rule -- the tree is the bucket -- which the partition job uses.
-The jobs pass the prefix of each input and a short directory of their own for
-it, because a full key is long enough that `root / key` passes the 260-character
+An object lands at `root / <key with prefix removed>`, and a file goes up to
+`prefix + <path relative to root>`. With no prefix that is `ingest.stage`'s rule
+-- the tree is the bucket -- which the ingest and partition jobs use. The other
+jobs pass the prefix of each input and a short directory of their own for it,
+because a full key is long enough that `root / key` passes the 260-character
 path limit Windows still applies by default.
 
-Many small reads from one process are request latency, which is what a thread
-pool is for -- and the reason this is not a loop of `download` calls, whose
-transfer manager starts its own threads to multipart something that arrives in
-one response.
+Many small requests from one process are request latency, which is what a thread
+pool is for -- and the reason this is not a loop of `download` or `upload`
+calls, whose transfer manager starts its own threads to multipart something that
+fits in one request.
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import partial
 from pathlib import Path
 from typing import Final
 
@@ -61,31 +63,17 @@ def fetch(
 
     log.info("staging %d %s into %d directories", len(keys), what, len(directories))
 
-    failures: list[tuple[str, Exception]] = []
-    landed = 0
-
-    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futures = {pool.submit(_get, store, key, path): key for key, path in targets.items()}
-        for done in as_completed(futures):
-            try:
-                done.result()
-            except Exception as error:
-                failures.append((futures[done], error))
-                continue
-
-            landed += 1
-            if landed % _EVERY == 0:
-                log.info("staged %d of %d", landed, len(keys))
-
-    if failures:
-        named = ", ".join(f"{key} ({error})" for key, error in failures[:_REPORTED])
+    landed = _attempt_all(
+        {key: partial(_get, store, key, path) for key, path in targets.items()}, "staged"
+    )
+    if landed.failures:
         raise RuntimeError(
-            f"{len(failures)} of {len(keys)} {what} could not be staged, so anything read from "
-            f"this tree would be short: {named}"
+            f"{len(landed.failures)} of {len(keys)} {what} could not be staged, so anything "
+            f"read from this tree would be short: {landed.named()}"
         )
 
-    log.info("staged %d %s", landed, what)
-    return landed
+    log.info("staged %d %s", landed.count, what)
+    return landed.count
 
 
 def fetch_prefix(store: ObjectStore, prefix: str, root: Path, what: str = "objects") -> int:
@@ -98,5 +86,74 @@ def fetch_prefix(store: ObjectStore, prefix: str, root: Path, what: str = "objec
     return fetch(store, sorted(store.keys(prefix)), root, prefix, what)
 
 
+def upload(store: ObjectStore, root: Path, prefix: str = "", what: str = "objects") -> int:
+    """Copy every file under `root` to `prefix + <relative path>`, and return how many landed.
+
+    `fetch` in the other direction, with its rule: every file is attempted
+    before anything is raised, and the count says whether one object failed or
+    the identity cannot write the prefix at all. Every key starts with `prefix`,
+    so nothing outside it is written whatever else sits beside `root`.
+
+    A missing `root` is an error rather than zero, because the callers upload a
+    tree an earlier step was meant to have written.
+    """
+    if not root.is_dir():
+        raise FileNotFoundError(f"nothing to upload: {root} is not a directory")
+
+    files = {
+        prefix + path.relative_to(root).as_posix(): path
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+    log.info("uploading %d %s to %s/%s", len(files), what, store.bucket, prefix)
+
+    landed = _attempt_all(
+        {key: partial(_put, store, key, path) for key, path in files.items()}, "uploaded"
+    )
+    if landed.failures:
+        raise RuntimeError(
+            f"{len(landed.failures)} of {len(files)} {what} could not be uploaded, so the "
+            f"bucket holds a partial copy: {landed.named()}"
+        )
+
+    log.info("uploaded %d %s", landed.count, what)
+    return landed.count
+
+
+class _Attempted:
+    """What a pool of copies came to: how many landed, and what failed."""
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.failures: list[tuple[str, Exception]] = []
+
+    def named(self) -> str:
+        return ", ".join(f"{key} ({error})" for key, error in self.failures[:_REPORTED])
+
+
+def _attempt_all(copies: Mapping[str, Callable[[], None]], verb: str) -> _Attempted:
+    """Run every copy on the pool, logging progress, and collect failures by key."""
+    attempted = _Attempted()
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        futures = {pool.submit(copy): key for key, copy in copies.items()}
+        for done in as_completed(futures):
+            try:
+                done.result()
+            except Exception as error:
+                attempted.failures.append((futures[done], error))
+                continue
+
+            attempted.count += 1
+            if attempted.count % _EVERY == 0:
+                log.info("%s %d of %d", verb, attempted.count, len(copies))
+
+    return attempted
+
+
 def _get(store: ObjectStore, key: str, path: Path) -> None:
     path.write_bytes(store.get(key))
+
+
+def _put(store: ObjectStore, key: str, path: Path) -> None:
+    store.put(key, path.read_bytes())

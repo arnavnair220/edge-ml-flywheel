@@ -2,14 +2,14 @@
 
 Runs in CodeBuild and nowhere else (see `buildspecs/ingest.yml` for why). Every
 step here is a subcommand of `python -m edge_ml_flywheel.ingest`, with the shell
-doing the fetching and copying and this package owning every decision about what
-the data is.
+doing the downloading and unzipping and this package owning every decision about
+what the data is and every copy to the bucket.
 
-Deliberately free of AWS SDK calls. The steps operate on local directories and
-on a listing file the shell produces, so the whole module is exercisable from a
-temp directory with no credentials -- which is what makes the unit tests real
-tests rather than mocks. The one thing that talks to S3 is `aws s3 cp`, and it
-copies a tree whose paths are already the keys.
+Every step but the last two operates on local directories only, so it is
+exercisable from a temp directory with no credentials. The last two, `upload`
+and `verify-upload`, reach the data bucket through `storage.ObjectStore`: the
+upload copies a tree whose paths are already the keys, and the check lists the
+two prefixes it wrote.
 
 The submodules, in the order a build passes through them:
 

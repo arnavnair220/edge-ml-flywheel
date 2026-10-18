@@ -44,6 +44,7 @@ from edge_ml_flywheel.storage import (
     StorageConfig,
     bucket_name,
     buckets,
+    tree,
 )
 from edge_ml_flywheel.storage.s3 import S3Store, client
 
@@ -301,6 +302,57 @@ class TestDenied:
 
         assert not isinstance(got.value, NoSuchKeyError)
         assert not isinstance(downloaded.value, NoSuchKeyError)
+
+
+class _RefusesOnePut:
+    """A store that refuses writes to one key and passes everything else through."""
+
+    def __init__(self, store: S3Store, refused: str) -> None:
+        self._store = store
+        self._refused = refused
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._store, name)
+
+    def put(self, key: str, body: bytes) -> None:
+        if key == self._refused:
+            raise PermissionError(f"refused {key}")
+        self._store.put(key, body)
+
+
+class TestTreeUpload:
+    def test_every_file_lands_at_the_prefix_plus_its_relative_path(
+        self, backend: Backend, tmp_path: Path
+    ) -> None:
+        (tmp_path / "a" / "b").mkdir(parents=True)
+        (tmp_path / "top.json").write_bytes(b"top")
+        (tmp_path / "a" / "b" / "deep.json").write_bytes(b"deep")
+
+        landed = tree.upload(backend.store, tmp_path, backend.prefix)
+
+        assert landed == 2
+        assert sorted(backend.store.keys(backend.prefix)) == [
+            backend.key("a/b/deep.json"),
+            backend.key("top.json"),
+        ]
+        assert backend.store.get(backend.key("a/b/deep.json")) == b"deep"
+
+    def test_every_file_is_attempted_before_a_failure_is_raised(
+        self, backend: Backend, tmp_path: Path
+    ) -> None:
+        """The count says whether one object failed or the whole prefix is denied."""
+        for name in ("a", "b", "c"):
+            (tmp_path / name).write_bytes(name.encode())
+        store = _RefusesOnePut(backend.store, backend.key("b"))
+
+        with pytest.raises(RuntimeError, match=r"1 of 3 objects could not be uploaded"):
+            tree.upload(store, tmp_path, backend.prefix)
+
+        assert sorted(backend.store.keys(backend.prefix)) == [backend.key("a"), backend.key("c")]
+
+    def test_a_missing_directory_is_refused(self, backend: Backend, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError):
+            tree.upload(backend.store, tmp_path / "absent", backend.prefix)
 
 
 class TestConfig:
