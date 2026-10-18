@@ -1,7 +1,6 @@
 """Copying the label documents a partition names onto local disk.
 
-The one place in the data jobs where the package makes the copy rather than
-printing keys for the shell to copy, and it is here for a measured reason: the
+The first copy the data jobs moved out of the shell, for a measured reason: the
 buildspec's `xargs -P 32 -I {} aws s3 cp` ran one `aws s3 cp` per document, and
 13,000 of them timed the build out at thirty minutes without finishing. Each of
 those is a Python interpreter and a botocore import before a request leaves, so
@@ -9,8 +8,7 @@ on the two vCPUs a small CodeBuild container has, the work is process startup an
 the parallelism buys nothing. The same 13,000 GETs from one process are request
 latency, which is what a thread pool is for.
 
-The division the buildspec keeps everywhere else survives the move: the keys are
-still named by `cohort_labels.keys`, and this module fetches a list it is handed
+The keys are still named by `cohort_labels.keys`, and this module fetches a list it is handed
 rather than a prefix it walks. `stage-labels` derives that list itself instead of
 reading one from stdin, so there is no argument anyone can pass that makes this
 fetch a `pool` label -- the refusal stays where `cohort_labels.label_key` puts

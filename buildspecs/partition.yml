@@ -7,10 +7,12 @@
 #   aws codebuild start-build --project-name edge-ml-flywheel-partition \
 #     --environment-variables-override name=PARTITION_VERSION,value=1,type=PLAINTEXT
 #
-# Same division of labour as `ingest.yml`: shell copies, and every decision about
-# what the data is goes through the package. No S3 key is written here -- the two
-# prefixes are printed by `partition prefix`, which reads them from
-# `conventions`, so the copy cannot address a path the writer does not use.
+# Same division of labour as `ingest.yml`: every decision about what the data
+# is, and every copy to or from the bucket, goes through the package and
+# `storage.ObjectStore` (docs/storage.md). No S3 key is written here; the
+# commands derive their keys from `conventions`, so a copy cannot address a path
+# the writer does not use. The package reads its bucket from
+# `STORAGE_DATA_BUCKET`, which is this build's `DATA_BUCKET`.
 #
 # The seed is not an input. It is a property of `PARTITION_VERSION`, recorded in
 # `conventions.PARTITIONS`, and there is no flag to override it.
@@ -36,9 +38,9 @@ phases:
 
       # The `ingest` group, which is where `pyarrow` lives. Both data jobs read
       # and write parquet, so the group serves both. `run` is the AWS SDK, which
-      # this job needs because `stage-labels` makes its own S3 calls -- named
-      # rather than left to arrive transitively through the dev group's `moto`,
-      # which is a test dependency and no promise to a build.
+      # every copy below calls through the object store -- named rather than
+      # left to arrive transitively through the dev group's `moto`, which is a
+      # test dependency and no promise to a build.
       - uv sync --frozen --group ingest --group run
       - uv run python -c "import sys; print(sys.version)"
 
@@ -46,29 +48,26 @@ phases:
     commands:
       - mkdir -p "$WORK/stage"
 
-      # Prefixes out of the package, so this file holds none. `prefix` writes to
-      # stdout and logging to stderr, the way `ingest url` does.
+      # Prefixes out of the package, for the log. `prefix` writes to stdout and
+      # logging to stderr, the way `ingest url` does.
       - MANIFEST_PREFIX=$(uv run python -m edge_ml_flywheel.partition prefix manifest)
       - PARTITION_PREFIX=$(uv run python -m edge_ml_flywheel.partition prefix partition --partition-version "$PARTITION_VERSION")
       - echo "reading $MANIFEST_PREFIX"
       - echo "writing $PARTITION_PREFIX"
 
-      # Staged at the key it has in S3, so the partitioner finds it exactly where
-      # `conventions` says it is.
-      - aws s3 cp "s3://$DATA_BUCKET/$MANIFEST_PREFIX" "$WORK/stage/$MANIFEST_PREFIX" --recursive --only-show-errors
+      # The manifest, staged at the key it has in the bucket so the partitioner
+      # finds it exactly where `conventions` says it is, and this version's
+      # recorded draw if it has one. The record goes to $WORK rather than into
+      # the staged tree, which is what gets uploaded. Absent is the ordinary
+      # first run and leaves no file.
+      - STORAGE_DATA_BUCKET="$DATA_BUCKET" uv run python -m edge_ml_flywheel.partition fetch-inputs --stage-dir "$WORK/stage" --recorded "$WORK/recorded.json" --partition-version "$PARTITION_VERSION"
       - ls -l "$WORK/stage/$MANIFEST_PREFIX"
 
       # The redraw guard. If this version has already been drawn, its recorded
       # seed, sizes and draw rule must be the ones in this commit -- the
       # assignments in the bucket are what every run keyed to this version was
       # measured against, so an edited seed here is a new version and not a
-      # re-run of this one.
-      #
-      # `|| true` because absent is the ordinary first-run case and `aws s3 cp`
-      # exits 1 on a missing key; `verify-recorded` treats a missing file as the
-      # first run and a present one as something to check. Copied to $WORK rather
-      # than into the staged tree, which is what gets uploaded.
-      - aws s3 cp "s3://$DATA_BUCKET/${PARTITION_PREFIX}_partition.json" "$WORK/recorded.json" --only-show-errors || true
+      # re-run of this one. A missing file is the first run.
       - uv run python -m edge_ml_flywheel.partition verify-recorded --recorded "$WORK/recorded.json" --partition-version "$PARTITION_VERSION"
 
   build:
@@ -82,8 +81,7 @@ phases:
       # The labels `bootstrap` and `eval` own. Three steps rather than one because
       # which documents to fetch is a function of the draw that just happened: the
       # package names them, fetches exactly what it named, and reads back only
-      # that. The copy is the package's here and the shell's everywhere else in
-      # this file, which `partition.fetch` is the argument for.
+      # that.
       #
       # `label-keys` reads the assignments off the staged tree, so the list is the
       # partition's own answer rather than a size arithmetic that could agree with
@@ -105,9 +103,6 @@ phases:
       # that file, so nothing in the build can hand the downloader a key the
       # partition did not name. A document that fails to land fails the build,
       # rather than becoming a short label file below.
-      #
-      # The package reads its bucket from `STORAGE_DATA_BUCKET` (docs/storage.md),
-      # which is the bucket this file already copies from.
       - STORAGE_DATA_BUCKET="$DATA_BUCKET" uv run python -m edge_ml_flywheel.partition stage-labels --stage-dir "$WORK/stage" --partition-version "$PARTITION_VERSION"
 
       # Asserts each cohort's file holds exactly that cohort's images before
@@ -125,17 +120,10 @@ phases:
       # Only the partition prefix: the manifest and the label documents were
       # copied into the staged tree to be read, and writing either back is a
       # permission this role deliberately does not hold -- `raw/` is denied it by
-      # the bucket policy whatever this copy addresses.
+      # the bucket policy whatever this copy addresses. The assignments, the
+      # record and the two cohort label files all sit under the prefix.
       #
-      # Four objects now rather than two. The two cohort label files land under
-      # `labels/cohort=` inside this same prefix, so they are covered by the copy
-      # that already exists rather than by a second one.
-      - PARTITION_PREFIX=$(uv run python -m edge_ml_flywheel.partition prefix partition --partition-version "$PARTITION_VERSION")
-      - aws s3 cp "$WORK/stage/$PARTITION_PREFIX" "s3://$DATA_BUCKET/$PARTITION_PREFIX" --recursive --only-show-errors
-      - aws s3 ls "s3://$DATA_BUCKET/$PARTITION_PREFIX" --recursive
-
-      # Read back what landed and check it against the code, which is the same
-      # comparison the guard above makes and here confirms the upload: the
-      # document in the bucket now describes the partition this commit draws.
-      - aws s3 cp "s3://$DATA_BUCKET/${PARTITION_PREFIX}_partition.json" "$WORK/uploaded.json" --only-show-errors
-      - uv run python -m edge_ml_flywheel.partition verify-recorded --recorded "$WORK/uploaded.json" --partition-version "$PARTITION_VERSION"
+      # Then it reads the record back and makes `verify-recorded`'s comparison
+      # against what landed: the document in the bucket now describes the
+      # partition this commit draws.
+      - STORAGE_DATA_BUCKET="$DATA_BUCKET" uv run python -m edge_ml_flywheel.partition upload --stage-dir "$WORK/stage" --partition-version "$PARTITION_VERSION"

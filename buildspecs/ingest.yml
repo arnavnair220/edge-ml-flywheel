@@ -11,12 +11,12 @@
 # cost-per-label claim rests on. The one copy no policy describes is the one on
 # somebody's laptop.
 #
-# The shape of the file: shell does the parts shell is good at -- fetching,
-# unzipping, copying to S3 -- and every decision about *what the data is* goes
-# through the package, where it is linted, typed and unit tested. No S3 key is
-# ever spelled here; the staging step builds the local tree at exactly the keys
-# `edge_ml_flywheel.conventions` produces, and the upload is a single recursive
-# copy of that tree.
+# The shape of the file: shell does the parts shell is good at -- downloading
+# and unzipping -- and every decision about *what the data is*, and every copy
+# to the bucket, goes through the package, where it is linted, typed and unit
+# tested. No S3 key is ever spelled here; the staging step builds the local tree
+# at exactly the keys `edge_ml_flywheel.conventions` produces, and the upload
+# copies that tree through `storage.ObjectStore` (docs/storage.md).
 
 version: 0.2
 
@@ -55,7 +55,10 @@ phases:
       # dependency set CI resolved rather than whatever resolves today. The
       # interpreter comes from .python-version and uv downloads it, which is
       # what keeps this independent of what the CodeBuild image happens to ship.
-      - uv sync --frozen --group ingest
+      #
+      # `run` is the AWS SDK, which the upload and its check call through the
+      # object store.
+      - uv sync --frozen --group ingest --group run
       - uv run python -c "import sys; print(sys.version)"
 
   pre_build:
@@ -168,21 +171,14 @@ phases:
       - test "$CODEBUILD_BUILD_SUCCEEDING" = "1"
 
       # 160,000 small objects, so the request rate is the whole cost of this
-      # step. --only-show-errors because a per-object progress line 160,000
-      # times is CloudWatch ingestion billed by the gigabyte, for output nobody
-      # reads.
-      - aws configure set s3.max_concurrent_requests 40
-      - aws s3 cp "$WORK/stage/" "s3://$DATA_BUCKET/" --recursive --only-show-errors
-
-      # Two listings rather than one at the bucket root: the ingest role's
-      # ListBucket is conditioned on an `s3:prefix` of `raw/` or `derived/`, so
-      # a root listing is denied by design -- it cannot enumerate the artifacts
-      # of runs it has nothing to do with.
-      - aws s3 ls "s3://$DATA_BUCKET/raw/" --recursive > "$WORK/uploaded.txt"
-      - aws s3 ls "s3://$DATA_BUCKET/derived/" --recursive >> "$WORK/uploaded.txt"
+      # step: one process and a thread pool, logging a progress line per
+      # thousand rather than one per object. The package reads its bucket from
+      # `STORAGE_DATA_BUCKET`, which is this build's `DATA_BUCKET`.
+      - STORAGE_DATA_BUCKET="$DATA_BUCKET" uv run python -m edge_ml_flywheel.ingest upload --stage-dir "$WORK/stage"
 
       # The check the pre-upload suite structurally cannot make: that every
-      # staged key arrived. Catches a partial upload, where the earlier ID-set
-      # check catches a partial download.
-      - uv run python -m edge_ml_flywheel.ingest verify-upload --stage-dir "$WORK/stage" --listing "$WORK/uploaded.txt"
+      # staged key arrived. It lists `raw/` and `derived/` separately, because
+      # the ingest role's ListBucket is limited to those two prefixes and a
+      # root listing is denied.
+      - STORAGE_DATA_BUCKET="$DATA_BUCKET" uv run python -m edge_ml_flywheel.ingest verify-upload --stage-dir "$WORK/stage"
       - df -h /
