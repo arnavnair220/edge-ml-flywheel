@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Delete the kind cluster and its local registry. Safe to run again.
-# Run through `make cluster-down`, which sets the variables below.
+# Run through `make kind-down`, which sets the variables below.
 set -euo pipefail
 
 : "${KIND:?}" "${KIND_CLUSTER:?}" "${REGISTRY_NAME:?}"

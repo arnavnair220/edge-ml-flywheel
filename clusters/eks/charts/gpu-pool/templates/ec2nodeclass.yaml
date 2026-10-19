@@ -1,0 +1,26 @@
+# How Karpenter launches a gpu node. al2023 resolves to the NVIDIA variant of
+# the AMI on GPU instance types, with the driver and container toolkit installed.
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: gpu
+spec:
+  role: {{ required "nodeRole is required" .Values.nodeRole | quote }}
+  amiSelectorTerms:
+    - alias: al2023@latest
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ .Values.clusterName | quote }}
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ .Values.clusterName | quote }}
+  # Public subnets, no NAT gateway: the node reaches GHCR on its own address.
+  associatePublicIPAddress: true
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: {{ .Values.rootVolumeSize }}
+        volumeType: gp3
+        deleteOnTermination: true
+  tags:
+    {{- toYaml .Values.tags | nindent 4 }}

@@ -1,0 +1,6 @@
+# Copy to backend.hcl and set your own bucket, then:
+#   terraform init -backend-config=backend.hcl
+#
+# The same hand-made state bucket as infra/. versions.tf sets this stack's key.
+
+bucket = "edge-ml-flywheel-tfstate-000000000000"

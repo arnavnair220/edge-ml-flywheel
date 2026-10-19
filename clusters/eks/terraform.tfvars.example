@@ -1,0 +1,3 @@
+# Copy to terraform.tfvars and fill in. Every other variable has a default.
+
+account_id = "000000000000"

@@ -59,7 +59,7 @@ uv run ruff check . && uv run mypy src
 
 `docker buildx bake` builds every job image. The images are specified in [images.md](images.md).
 
-`make cluster-up` starts a local Kubernetes cluster on kind, and `make cluster-down` deletes it.
+`make kind-up` starts a local Kubernetes cluster on kind, and `make kind-down` deletes it.
 The cluster is specified in [cluster.md](cluster.md).
 
 ---
