@@ -11,6 +11,14 @@ REGISTRY_NAME := kind-registry
 # docker-bake.hcl tags images for this port.
 REGISTRY_PORT := 5001
 
+# Argo CD syncs the cluster from clusters/apps/ at this revision of the GitHub
+# repo, so a change reaches the cluster only once it is pushed. Defaults to the
+# current branch:
+#   make kind-up ARGOCD_REVISION=main
+ARGOCD_VERSION  := v3.5.5
+ARGOCD_REPO     := https://github.com/arnavnair220/edge-ml-flywheel.git
+ARGOCD_REVISION ?= $(shell git rev-parse --abbrev-ref HEAD)
+
 ifeq ($(OS),Windows_NT)
 EXE := .exe
 endif
@@ -28,6 +36,7 @@ EKS_GPU_INSTANCE_TYPES ?=
 
 SHELL := bash
 export KIND KIND_NODE_IMAGE REGISTRY_IMAGE KIND_CLUSTER REGISTRY_NAME REGISTRY_PORT
+export ARGOCD_VERSION ARGOCD_REPO ARGOCD_REVISION
 export EKS_CLUSTER EKS_CHECK_IMAGE
 
 eks-up eks-check eks-down: export AWS_PROFILE := $(EKS_PROFILE)

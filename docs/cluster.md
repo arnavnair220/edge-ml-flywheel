@@ -43,6 +43,34 @@ the container, so a manifest names an image the same way on the host and in the 
 The `local-registry-hosting` ConfigMap in `kube-public` publishes the registry address, following
 [kind's local registry setup](https://kind.sigs.k8s.io/docs/user/local-registry/).
 
+### Argo CD
+
+Argo CD runs in namespace `argocd`, installed from the release's `manifests/install.yaml` with
+server-side apply. Its pods run on the services worker; nothing in the manifest tolerates the GPU
+taint.
+
+The `root` Application is created by `kind-up` and is the only Application not kept in the repo.
+It syncs `clusters/apps/` from the GitHub repository at revision `ARGOCD_REVISION`, with automated
+sync, pruning and self-heal. Every other piece of in-cluster state is a manifest or a child
+Application in `clusters/apps/`.
+
+| Property | Value |
+|---|---|
+| Repository | `ARGOCD_REPO` in the `Makefile`, the public GitHub repository, read without credentials |
+| Revision | `ARGOCD_REVISION`, the current git branch by default |
+| Path | `clusters/apps/` |
+| Poll interval | Argo CD's default, three minutes |
+
+Argo CD reads the remote repository, not the working tree. A change reaches the cluster only once
+it is pushed to the revision. A revision other than the current branch is set on the command line:
+
+```sh
+make kind-up ARGOCD_REVISION=main
+```
+
+`clusters/apps/sync-check.yaml`, the ConfigMap `argocd-sync-check` in namespace `default`, exists
+for `kind-check` to confirm the sync.
+
 ### Versions
 
 Pinned in the `Makefile`.
@@ -52,6 +80,7 @@ Pinned in the `Makefile`.
 | kind | v0.33.0 |
 | Node image | `kindest/node:v1.37.0`, pinned by digest |
 | Registry | `registry:3`, pinned by digest |
+| Argo CD | v3.5.5 |
 
 kind is downloaded to `bin/` on first use and checked against the release's published sha256, so
 no installed kind is used. The node image is built for its kind release; the two move together.
@@ -60,17 +89,18 @@ no installed kind is used. The node image is built for its kind release; the two
 
 | Command | Effect |
 |---|---|
-| `make kind-up` | Starts the registry and creates the cluster, context `kind-edge-ml-flywheel` |
-| `make kind-check` | Builds and pushes the `run` image, runs it as a Job on the GPU worker with `--help` |
+| `make kind-up` | Starts the registry, creates the cluster, context `kind-edge-ml-flywheel`, installs Argo CD and applies the `root` Application |
+| `make kind-check` | Builds and pushes the `run` image, runs it as a Job on the GPU worker with `--help`, then checks that `root` is Synced and Healthy and `argocd-sync-check` exists |
 | `make kind-down` | Deletes the cluster and the registry |
 
-Each command skips what is already done, so it is safe to repeat. `kind-check` fails unless the
-Job completes, and on failure leaves the Job in place for inspection. Images in the registry do not
-survive `kind-down`.
+Each command skips or reapplies what is already done, so it is safe to repeat. `kind-check` fails
+unless the Job completes and `root` reaches Synced and Healthy within five minutes. On failure it
+leaves the Job in place for inspection, or describes `root`. Images in the registry do not survive
+`kind-down`.
 
 ### Requirements
 
-Docker, `kubectl`, GNU `make`, `bash` and `curl`. On Windows, run `make` from Git Bash.
+Docker, `kubectl`, GNU `make`, `bash`, `curl` and `git`. On Windows, run `make` from Git Bash.
 
 ---
 
