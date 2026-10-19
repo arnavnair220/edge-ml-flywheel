@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bring up the kind cluster and its local registry. Safe to run again: each step
 # skips what already exists. Follows https://kind.sigs.k8s.io/docs/user/local-registry/
-# Run through `make cluster-up`, which sets the variables below.
+# Run through `make kind-up`, which sets the variables below.
 set -euo pipefail
 # Git Bash would rewrite the /etc/... paths passed to docker exec into Windows paths.
 export MSYS_NO_PATHCONV=1
@@ -22,7 +22,7 @@ fi
 # 2. The cluster.
 if ! "$KIND" get clusters | grep -qx "$KIND_CLUSTER"; then
   "$KIND" create cluster --name "$KIND_CLUSTER" --image "$KIND_NODE_IMAGE" \
-    --config kind/kind-config.yaml --wait 120s
+    --config clusters/kind/kind-config.yaml --wait 120s
 fi
 
 # 3. Point each node's containerd at the registry. Inside a node, localhost is the

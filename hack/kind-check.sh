@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Check the kind cluster end to end: build the run image, push it to the local
 # registry, and run it on the gpu node with --help. Exits non-zero unless the Job
-# completes. Run through `make cluster-check`, after `make cluster-up`.
+# completes. Run through `make kind-check`, after `make kind-up`.
 set -euo pipefail
 
 : "${KIND_CLUSTER:?}"

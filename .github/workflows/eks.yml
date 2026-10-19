@@ -1,0 +1,48 @@
+name: eks
+
+# Checks the EKS cluster's Terraform: formatting and validity only. It never
+# plans or applies, so it needs no AWS credentials. The cluster is brought up by
+# hand with `make eks-up`; see docs/cluster.md.
+on:
+  pull_request:
+    paths:
+      - "clusters/eks/**"
+      - ".github/workflows/eks.yml"
+  push:
+    branches: [refactor/kubernetes-platform]
+    paths:
+      - "clusters/eks/**"
+      - ".github/workflows/eks.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eks-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: 1.14.5
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clusters/eks
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: fmt
+        run: terraform fmt -check -recursive
+
+      # No backend: validate needs the providers and modules, not the state.
+      - name: init
+        run: terraform init -input=false -backend=false
+
+      - name: validate
+        run: terraform validate
