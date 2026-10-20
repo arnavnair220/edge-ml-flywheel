@@ -1,0 +1,5 @@
+# Also applied on its own by hack/kind-up.sh, before the Secret is created in it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: minio

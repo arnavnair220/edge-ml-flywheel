@@ -1,0 +1,6 @@
+# Everything the kind cluster runs. hack/kind-up.sh applies it with
+# `kubectl apply -k`. See docs/cluster.md.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - minio

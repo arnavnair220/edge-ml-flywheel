@@ -1,0 +1,10 @@
+# MinIO, the local stand-in for S3. The root Secret `minio-root` and the bucket
+# are created by hack/kind-up.sh, so no credential is kept in git.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: minio
+resources:
+  - namespace.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml

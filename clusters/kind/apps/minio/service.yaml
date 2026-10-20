@@ -1,0 +1,12 @@
+# The S3 endpoint, http://minio.minio:9000 inside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+spec:
+  selector:
+    app: minio
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3

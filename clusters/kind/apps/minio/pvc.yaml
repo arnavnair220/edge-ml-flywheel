@@ -1,0 +1,12 @@
+# On kind's default `standard` class, a directory on the node. It survives a
+# restart of the pod, not `make kind-down`.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio
+spec:
+  storageClassName: standard
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
