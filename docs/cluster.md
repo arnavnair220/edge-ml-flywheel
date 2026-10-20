@@ -43,44 +43,59 @@ the container, so a manifest names an image the same way on the host and in the 
 The `local-registry-hosting` ConfigMap in `kube-public` publishes the registry address, following
 [kind's local registry setup](https://kind.sigs.k8s.io/docs/user/local-registry/).
 
-### Argo CD
+### In-cluster state
 
-Argo CD runs in namespace `argocd`, installed from the release's `manifests/install.yaml` with
-server-side apply. Its pods run on the services worker; nothing in the manifest tolerates the GPU
-taint.
+`clusters/kind/apps/` holds everything the cluster runs, as one Kustomize root. `kind-up` applies
+it from the working tree with `kubectl apply -k`, so a saved change reaches the cluster on the
+next `kind-up`, with no commit or push. Each component is a subdirectory with its own
+`kustomization.yaml`, listed under `resources` in `clusters/kind/apps/kustomization.yaml`.
 
-The `root` Application is created by `kind-up` and is the only Application not kept in the repo.
-It syncs `clusters/apps/` from the GitHub repository at revision `ARGOCD_REVISION`, with automated
-sync, pruning and self-heal. Every other piece of in-cluster state is a manifest or a child
-Application in `clusters/apps/`.
-
-| Property | Value |
+| Component | Directory |
 |---|---|
-| Repository | `ARGOCD_REPO` in the `Makefile`, the public GitHub repository, read without credentials |
-| Revision | `ARGOCD_REVISION`, the current git branch by default |
-| Path | `clusters/apps/` |
-| Poll interval | Argo CD's default, three minutes |
+| MinIO | `clusters/kind/apps/minio/` |
 
-Argo CD reads the remote repository, not the working tree. A change reaches the cluster only once
-it is pushed to the revision. A revision other than the current branch is set on the command line:
+Secrets are not kept in the repository. `kind-up` creates them directly, before the apply.
+
+### MinIO
+
+MinIO is the cluster's S3 endpoint, at `http://minio.minio:9000`. It runs from
+`cgr.dev/chainguard/minio` pinned by digest; see [storage](storage.md).
+
+| Resource | Name | Spec |
+|---|---|---|
+| Namespace | `minio` | |
+| Deployment | `minio` | One replica on `pool=services`, `Recreate` strategy, readiness probe on `/minio/health/ready` |
+| PersistentVolumeClaim | `minio` | 10Gi, storage class `standard`, `ReadWriteOnce` |
+| Service | `minio` | Port 9000 |
+| Secret | `minio-root` | `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`; created by `kind-up`, not in the repository |
+| Bucket | `edge-ml-flywheel` | Created by `kind-up` |
+
+`kind-up` applies `minio/namespace.yaml` first, then creates `minio-root` if it is absent, with
+user `admin` and a random 48-character hex password. An existing Secret is kept, so the password
+is stable for the life of the cluster. To read it:
 
 ```sh
-make kind-up ARGOCD_REVISION=main
+kubectl --context kind-edge-ml-flywheel -n minio get secret minio-root \
+  -o jsonpath='{.data.MINIO_ROOT_PASSWORD}' | base64 -d
 ```
 
-`clusters/apps/sync-check.yaml`, the ConfigMap `argocd-sync-check` in namespace `default`, exists
-for `kind-check` to confirm the sync.
+After the rollout, `kind-up` runs the Job `minio-bucket` from `hack/kind-bucket-job.yaml`, which
+runs `mc mb --ignore-existing` with `cgr.dev/chainguard/minio-client` pinned by digest. The Job is
+deleted when it succeeds and left in place when it fails.
+
+Objects live on the services worker's disk. They survive a restart of the pod, not `kind-down`.
 
 ### Versions
 
-Pinned in the `Makefile`.
+| Component | Version | Pinned in |
+|---|---|---|
+| kind | v0.33.0 | `Makefile` |
+| Node image | `kindest/node:v1.37.0`, pinned by digest | `Makefile` |
+| Registry | `registry:3`, pinned by digest | `Makefile` |
+| MinIO server | `cgr.dev/chainguard/minio@sha256:709099319add48dfb44aa596a7070d3ddd8dd04d7ae881765719aec29df9e510` | `clusters/kind/apps/minio/deployment.yaml`, the same digest as `tests/test_storage.py` |
+| MinIO client | `cgr.dev/chainguard/minio-client@sha256:7d0cf8f3de478cd4d2a8df4efcff9563091e298c8916122bbbbedb2ce08edcad` | `hack/kind-bucket-job.yaml`, `hack/kind-check-minio-job.yaml` |
 
-| Component | Version |
-|---|---|
-| kind | v0.33.0 |
-| Node image | `kindest/node:v1.37.0`, pinned by digest |
-| Registry | `registry:3`, pinned by digest |
-| Argo CD | v3.5.5 |
+Chainguard's free tier tags only `latest`, so both MinIO images are pinned by digest alone.
 
 kind is downloaded to `bin/` on first use and checked against the release's published sha256, so
 no installed kind is used. The node image is built for its kind release; the two move together.
@@ -89,18 +104,18 @@ no installed kind is used. The node image is built for its kind release; the two
 
 | Command | Effect |
 |---|---|
-| `make kind-up` | Starts the registry, creates the cluster, context `kind-edge-ml-flywheel`, installs Argo CD and applies the `root` Application |
-| `make kind-check` | Builds and pushes the `run` image, runs it as a Job on the GPU worker with `--help`, then checks that `root` is Synced and Healthy and `argocd-sync-check` exists |
+| `make kind-up` | Starts the registry, creates the cluster, context `kind-edge-ml-flywheel`, creates the MinIO Secret, applies `clusters/kind/apps/`, waits for MinIO to roll out and creates the bucket |
+| `make kind-check` | Builds and pushes the `run` image and runs it as a Job on the GPU worker with `--help`, then runs `kind-check-minio`, which writes one object under `kind-check/` in the bucket and reads it back |
 | `make kind-down` | Deletes the cluster and the registry |
 
 Each command skips or reapplies what is already done, so it is safe to repeat. `kind-check` fails
-unless the Job completes and `root` reaches Synced and Healthy within five minutes. On failure it
-leaves the Job in place for inspection, or describes `root`. Images in the registry do not survive
-`kind-down`.
+unless each Job completes within five minutes and the object read back matches the one written.
+On failure it leaves the failing Job in place for inspection. Images in the registry and objects
+in MinIO do not survive `kind-down`.
 
 ### Requirements
 
-Docker, `kubectl`, GNU `make`, `bash`, `curl` and `git`. On Windows, run `make` from Git Bash.
+Docker, `kubectl`, GNU `make`, `bash`, `curl` and `openssl`. On Windows, run `make` from Git Bash.
 
 ---
 

@@ -1,0 +1,53 @@
+# The storage check: one object written to the bucket and read back. The image
+# has no shell, so the write and the read are two containers, and
+# hack/kind-check.sh compares what `read` prints with the ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kind-check-minio
+  namespace: minio
+data:
+  object: kind-check round trip
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kind-check-minio
+  namespace: minio
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        pool: services
+      initContainers:
+        - name: write
+          image: cgr.dev/chainguard/minio-client@sha256:7d0cf8f3de478cd4d2a8df4efcff9563091e298c8916122bbbbedb2ce08edcad
+          args: ["cp", "/check/object", "local/edge-ml-flywheel/kind-check/object"]
+          env: &env
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-root
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-root
+                  key: MINIO_ROOT_PASSWORD
+            - name: MC_HOST_local
+              value: http://$(MINIO_ROOT_USER):$(MINIO_ROOT_PASSWORD)@minio.minio:9000
+          volumeMounts:
+            - name: check
+              mountPath: /check
+      containers:
+        - name: read
+          image: cgr.dev/chainguard/minio-client@sha256:7d0cf8f3de478cd4d2a8df4efcff9563091e298c8916122bbbbedb2ce08edcad
+          args: ["cat", "local/edge-ml-flywheel/kind-check/object"]
+          env: *env
+      volumes:
+        - name: check
+          configMap:
+            name: kind-check-minio

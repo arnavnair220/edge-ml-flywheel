@@ -1,0 +1,34 @@
+# Creates the bucket in the kind cluster's MinIO. Safe to run again: an existing
+# bucket is left as it is. See hack/kind-up.sh.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-bucket
+  namespace: minio
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        pool: services
+      containers:
+        - name: mc
+          image: cgr.dev/chainguard/minio-client@sha256:7d0cf8f3de478cd4d2a8df4efcff9563091e298c8916122bbbbedb2ce08edcad
+          args: ["mb", "--ignore-existing", "local/edge-ml-flywheel"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-root
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-root
+                  key: MINIO_ROOT_PASSWORD
+            # mc reads the alias `local` from this variable. The password is hex,
+            # so it needs no escaping in the URL.
+            - name: MC_HOST_local
+              value: http://$(MINIO_ROOT_USER):$(MINIO_ROOT_PASSWORD)@minio.minio:9000

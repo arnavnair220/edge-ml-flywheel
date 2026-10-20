@@ -73,7 +73,7 @@ Credentials are not configured here. Each filesystem's default chain resolves th
 |---|---|---|---|
 | AWS (EKS) | `s3` | Workload identity (IRSA) | unset |
 | GCP (GKE) | `gs` | Workload Identity, through `gcsfs` | unset |
-| Local (kind) | `s3` | MinIO access key, as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` | the MinIO service URL |
+| Local (kind) | `s3` | MinIO access key, as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` | `http://minio.minio:9000` |
 | Device | `s3` | Greengrass token exchange role | unset |
 
 GCS is reached through its own API rather than its S3 interoperability layer, so a GKE job needs

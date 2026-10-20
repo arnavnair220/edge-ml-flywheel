@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Bring up the kind cluster, its local registry and Argo CD. Safe to run again:
-# each step skips or reapplies what already exists. The registry follows
+# Bring up the kind cluster and its local registry, then apply clusters/kind/apps/
+# and create MinIO's bucket. Safe to run again: each step skips or reapplies what
+# already exists. The registry follows
 # https://kind.sigs.k8s.io/docs/user/local-registry/
 # Run through `make kind-up`, which sets the variables below.
 set -euo pipefail
@@ -9,7 +10,6 @@ export MSYS_NO_PATHCONV=1
 
 : "${KIND:?}" "${KIND_NODE_IMAGE:?}" "${REGISTRY_IMAGE:?}"
 : "${KIND_CLUSTER:?}" "${REGISTRY_NAME:?}" "${REGISTRY_PORT:?}"
-: "${ARGOCD_VERSION:?}" "${ARGOCD_REPO:?}" "${ARGOCD_REVISION:?}"
 cd "$(dirname "$0")/.."
 kube=(kubectl --context "kind-${KIND_CLUSTER}")
 
@@ -57,33 +57,28 @@ data:
     help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
 EOF
 
-# 6. Argo CD, from the release's own manifest. Server-side apply, because the
-#    CRDs exceed the size limit of client-side apply's annotation.
-"${kube[@]}" create namespace argocd --dry-run=client -o yaml | "${kube[@]}" apply -f -
-"${kube[@]}" apply -n argocd --server-side --force-conflicts \
-  -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
-"${kube[@]}" -n argocd rollout status deployment --timeout 300s
-"${kube[@]}" -n argocd rollout status statefulset --timeout 300s
+# 6. MinIO's root credentials, kept out of git. The password is generated once;
+#    a later run keeps the Secret it finds. The namespace comes first, so the
+#    Secret has somewhere to go.
+"${kube[@]}" apply -f clusters/kind/apps/minio/namespace.yaml
+if ! "${kube[@]}" -n minio get secret minio-root >/dev/null 2>&1; then
+  "${kube[@]}" -n minio create secret generic minio-root \
+    --from-literal=MINIO_ROOT_USER=admin \
+    --from-literal=MINIO_ROOT_PASSWORD="$(openssl rand -hex 24)"
+fi
 
-# 7. The root Application. It syncs clusters/apps/, which holds every other
-#    Application, and prunes what is removed from it.
-"${kube[@]}" apply -f - <<EOF
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: root
-  namespace: argocd
-spec:
-  project: default
-  source:
-    repoURL: ${ARGOCD_REPO}
-    targetRevision: ${ARGOCD_REVISION}
-    path: clusters/apps
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: argocd
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-EOF
+# 7. Everything the cluster runs, from the working tree.
+"${kube[@]}" apply -k clusters/kind/apps
+"${kube[@]}" -n minio rollout status deployment/minio --timeout 300s
+
+# 8. The bucket. The Job is rerun each time and removed once it succeeds; on
+#    failure it is left in place for inspection.
+bucket_job=job/minio-bucket
+"${kube[@]}" -n minio delete "$bucket_job" --ignore-not-found --wait
+"${kube[@]}" apply -f hack/kind-bucket-job.yaml
+if ! "${kube[@]}" -n minio wait "$bucket_job" --for=condition=complete --timeout 120s; then
+  "${kube[@]}" -n minio logs "$bucket_job" || true
+  echo "kind-up failed: $bucket_job did not complete; left in place for inspection" >&2
+  exit 1
+fi
+"${kube[@]}" -n minio delete "$bucket_job" --wait
