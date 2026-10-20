@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Check the kind cluster end to end: build the run image, push it to the local
-# registry, and run it on the gpu node with --help. Exits non-zero unless the Job
-# completes. Run through `make kind-check`, after `make kind-up`.
+# registry, and run it on the gpu node with --help; then check that Argo CD's root
+# Application is synced and healthy and its test ConfigMap is on the cluster.
+# Exits non-zero unless both hold. Run through `make kind-check`, after
+# `make kind-up`.
 set -euo pipefail
 
 : "${KIND_CLUSTER:?}"
@@ -30,4 +32,22 @@ if [ "$("${kube[@]}" get "$job" -o jsonpath='{.status.succeeded}')" != 1 ]; then
 fi
 
 "${kube[@]}" delete "$job" --wait
+
+# Argo CD: the root Application reports Synced and Healthy, and the ConfigMap it
+# syncs from clusters/apps/ exists. Argo CD polls the repo every three minutes.
+app=application/root
+status=
+for _ in $(seq 1 60); do
+  status=$("${kube[@]}" -n argocd get "$app" -o jsonpath='{.status.sync.status}/{.status.health.status}' || true)
+  [ "$status" = Synced/Healthy ] && break
+  sleep 5
+done
+
+if [ "$status" != Synced/Healthy ] ||
+  ! "${kube[@]}" -n default get configmap/argocd-sync-check >/dev/null; then
+  "${kube[@]}" -n argocd describe "$app"
+  echo "cluster check failed: $app is $status, want Synced/Healthy" >&2
+  exit 1
+fi
+
 echo "cluster check passed"

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Bring up the kind cluster and its local registry. Safe to run again: each step
-# skips what already exists. Follows https://kind.sigs.k8s.io/docs/user/local-registry/
+# Bring up the kind cluster, its local registry and Argo CD. Safe to run again:
+# each step skips or reapplies what already exists. The registry follows
+# https://kind.sigs.k8s.io/docs/user/local-registry/
 # Run through `make kind-up`, which sets the variables below.
 set -euo pipefail
 # Git Bash would rewrite the /etc/... paths passed to docker exec into Windows paths.
@@ -8,7 +9,9 @@ export MSYS_NO_PATHCONV=1
 
 : "${KIND:?}" "${KIND_NODE_IMAGE:?}" "${REGISTRY_IMAGE:?}"
 : "${KIND_CLUSTER:?}" "${REGISTRY_NAME:?}" "${REGISTRY_PORT:?}"
+: "${ARGOCD_VERSION:?}" "${ARGOCD_REPO:?}" "${ARGOCD_REVISION:?}"
 cd "$(dirname "$0")/.."
+kube=(kubectl --context "kind-${KIND_CLUSTER}")
 
 # 1. The registry container, published on the host at localhost:$REGISTRY_PORT.
 state=$(docker inspect -f '{{.State.Running}}' "$REGISTRY_NAME" 2>/dev/null || true)
@@ -42,7 +45,7 @@ if [ "$(docker inspect -f '{{json .NetworkSettings.Networks.kind}}' "$REGISTRY_N
 fi
 
 # 5. Publish the registry's address for in-cluster tools (KEP-1755).
-kubectl --context "kind-${KIND_CLUSTER}" apply -f - <<EOF
+"${kube[@]}" apply -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -52,4 +55,35 @@ data:
   localRegistryHosting.v1: |
     host: "localhost:${REGISTRY_PORT}"
     help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
+EOF
+
+# 6. Argo CD, from the release's own manifest. Server-side apply, because the
+#    CRDs exceed the size limit of client-side apply's annotation.
+"${kube[@]}" create namespace argocd --dry-run=client -o yaml | "${kube[@]}" apply -f -
+"${kube[@]}" apply -n argocd --server-side --force-conflicts \
+  -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
+"${kube[@]}" -n argocd rollout status deployment --timeout 300s
+"${kube[@]}" -n argocd rollout status statefulset --timeout 300s
+
+# 7. The root Application. It syncs clusters/apps/, which holds every other
+#    Application, and prunes what is removed from it.
+"${kube[@]}" apply -f - <<EOF
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: ${ARGOCD_REPO}
+    targetRevision: ${ARGOCD_REVISION}
+    path: clusters/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
 EOF

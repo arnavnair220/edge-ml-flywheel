@@ -1,0 +1,9 @@
+# Synced by the root Application. hack/kind-check.sh checks that it reaches the
+# cluster, which shows Argo CD syncs from this folder.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-sync-check
+  namespace: default
+data:
+  source: clusters/apps
